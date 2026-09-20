@@ -348,9 +348,14 @@ class FbpModeSensor(Fbp1200Entity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
-            "source": self.coordinator.config.get("operating_mode_entity"),
+            "source": (
+                "local control-register read-back"
+                if self.coordinator.is_direct_local
+                else self.coordinator.config.get("operating_mode_entity")
+            ),
+            "local_observed_mode": self.coordinator.data.get("local_observed_mode"),
             "current_decision": self.coordinator.data.get("current_action"),
-            "note": "Read-back from the local Operating Mode entity; charge and discharge power sensors show the physical result.",
+            "note": "Control-register read-back expresses configured mode; charge and discharge power sensors show the physical result.",
         }
 
 

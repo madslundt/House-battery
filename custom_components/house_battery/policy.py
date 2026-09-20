@@ -37,6 +37,7 @@ def action_from_operating_mode(value: str | None) -> Action:
     return {
         "Charge": Action.CHARGE,
         "Idle": Action.GRID,
+        "Discharge": Action.BATTERY,
         "Self-Gen/Zero Export": Action.BATTERY,
     }.get(value, Action.SAFE)
 

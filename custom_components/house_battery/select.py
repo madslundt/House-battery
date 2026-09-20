@@ -40,7 +40,8 @@ class FbpLocalOperatingModeSelect(Fbp1200Entity, SelectEntity):
     def extra_state_attributes(self) -> dict[str, str]:
         return {
             "source": "local_commanded_state",
-            "note": "The vendor app can change mode separately; use battery power sensors as physical evidence.",
+            "observed_control_mode": self.coordinator.data.get("local_observed_mode"),
+            "note": "The vendor app can change mode separately; register read-back and battery power sensors are the evidence.",
         }
 
     async def async_select_option(self, option: str) -> None:

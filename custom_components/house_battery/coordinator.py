@@ -39,7 +39,13 @@ from .const import (
 from .evidence import EvidenceCollector
 from .forecast import assess_external_forecast, extend_known_horizon
 from .health import get_health_problems
-from .local_tcp import FbpLocalSnapshot, FbpLocalTcpClient, LocalProtocolError
+from .local_tcp import (
+    FbpLocalSnapshot,
+    FbpLocalTcpClient,
+    FbpTelemetryValidator,
+    LocalProtocolError,
+    operating_mode_from_controls,
+)
 from .models import Action, Plan, PlannerSettings, PriceSlot
 from .planner import optimize
 from .policy import (
@@ -87,7 +93,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._local_snapshot: FbpLocalSnapshot | None = None
         self._local_controls: dict[str, str] = {}
+        self._local_telemetry_validator = FbpTelemetryValidator()
         self._commanded_local_mode = MODE_SAFE
+        self._observed_local_mode: str | None = None
         self.actuator = LocalControlAdapter(
             hass,
             lambda: self.config,
@@ -294,7 +302,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _observed_action(self) -> Action:
         if self.is_direct_local:
-            return action_from_operating_mode(self._commanded_local_mode)
+            return action_from_operating_mode(
+                self._observed_local_mode or self._commanded_local_mode
+            )
         state = self._state(CONF_OPERATING_MODE)
         return action_from_operating_mode(state.state if state else None)
 
@@ -325,11 +335,20 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         local_problem: str | None = None
         if self.local_client is not None:
             try:
-                self._local_snapshot = await self.local_client.async_snapshot()
+                snapshot = await self.local_client.async_snapshot()
+                if problem := self._local_telemetry_validator.validate(snapshot, now):
+                    self._local_snapshot = None
+                    local_problem = f"battery local TCP telemetry rejected: {problem}"
+                else:
+                    self._local_snapshot = snapshot
                 self._local_controls = await self.local_client.async_read_controls()
+                self._observed_local_mode = operating_mode_from_controls(
+                    self._local_controls
+                )
             except LocalProtocolError as exc:
                 self._local_snapshot = None
                 self._local_controls = {}
+                self._observed_local_mode = None
                 local_problem = f"battery local TCP unavailable: {exc}"
         problems = get_health_problems(self.hass, self.config, now)
         if local_problem:
@@ -475,6 +494,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "native_min_soc": _control_number(self._local_controls, "3023"),
             "native_max_soc": _control_number(self._local_controls, "3024"),
             "local_operating_mode": self._commanded_local_mode
+            if self.is_direct_local
+            else None,
+            "local_observed_mode": self._observed_local_mode
             if self.is_direct_local
             else None,
             "pv_power_w": self._float(CONF_PV_POWER, 0),
