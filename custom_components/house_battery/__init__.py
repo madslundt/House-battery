@@ -14,6 +14,8 @@ from homeassistant.util import dt as dt_util
 from .const import CONF_COMMISSIONED, DOMAIN, PLATFORMS
 from .coordinator import Fbp1200Coordinator
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
 SERVICE_SCHEDULE_LOAD = "schedule_load"
 SERVICE_CLEAR_SCHEDULED_LOADS = "clear_scheduled_loads"
 SERVICE_EXPORT_DATA = "export_data"
