@@ -1,0 +1,78 @@
+"""Constants for the FOSSiBOT FBP1200 Optimizer integration."""
+
+from datetime import timedelta
+
+DOMAIN = "fossibot_fbp1200"
+NAME = "FOSSiBOT FBP1200 Optimizer"
+PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button"]
+UPDATE_INTERVAL = timedelta(minutes=1)
+STORAGE_VERSION = 1
+STORAGE_KEY = f"{DOMAIN}.state"
+
+CONF_SOC = "soc_entity"
+CONF_LOAD_POWER = "load_power_entity"
+CONF_GRID_IMPORT_POWER = "grid_import_power_entity"
+CONF_GRID_AVAILABLE = "grid_available_entity"
+CONF_GRID_EXPORT_POWER = "grid_export_power_entity"
+CONF_BATTERY_CHARGE_POWER = "battery_charge_power_entity"
+CONF_BATTERY_DISCHARGE_POWER = "battery_discharge_power_entity"
+CONF_PV_POWER = "pv_power_entity"
+CONF_FAULT = "fault_entity"
+CONF_ONLINE = "online_entity"
+CONF_OPERATING_MODE = "operating_mode_entity"
+CONF_CHARGE_POWER_CONTROL = "charge_power_control_entity"
+CONF_DISCHARGE_POWER_CONTROL = "discharge_power_control_entity"
+CONF_MIN_SOC_CONTROL = "minimum_soc_control_entity"
+CONF_MAX_SOC_CONTROL = "maximum_soc_control_entity"
+CONF_PRICE_ENTITIES = "price_entities"
+CONF_COMMISSIONED = "commissioned"
+
+ACTION_CHARGE = "charge"
+ACTION_GRID = "grid"
+ACTION_BATTERY = "battery"
+ACTION_SAFE = "safe"
+
+MODE_CHARGE = "Charge"
+MODE_GRID = "Idle"
+MODE_BATTERY = "Self-Gen/Zero Export"
+MODE_SAFE = "Self-Gen/Zero Export"
+
+DEFAULT_SETTINGS: dict[str, float] = {
+    "capacity_kwh": 1.958,
+    "absolute_min_soc": 10.0,
+    "reserve_soc": 20.0,
+    "target_soc": 90.0,
+    "opportunistic_target_soc": 100.0,
+    "charge_power_w": 1200.0,
+    "discharge_power_w": 800.0,
+    "round_trip_efficiency": 85.0,
+    "degradation_cost_dkk_per_kwh": 0.35,
+    "minimum_profit_dkk_per_kwh": 0.75,
+    "extra_storage_spread_dkk_per_kwh": 2.0,
+    "switching_penalty_dkk": 0.05,
+    "minimum_mode_minutes": 30.0,
+    "maximum_transitions_per_day": 4.0,
+    "cycle_life": 6000.0,
+}
+
+SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
+    "capacity_kwh": (0.5, 20.0, 0.001, "kWh"),
+    "absolute_min_soc": (0.0, 50.0, 1.0, "%"),
+    "reserve_soc": (5.0, 80.0, 1.0, "%"),
+    "target_soc": (20.0, 100.0, 1.0, "%"),
+    "opportunistic_target_soc": (20.0, 100.0, 1.0, "%"),
+    "charge_power_w": (100.0, 1200.0, 50.0, "W"),
+    "discharge_power_w": (100.0, 800.0, 50.0, "W"),
+    "round_trip_efficiency": (50.0, 100.0, 1.0, "%"),
+    "degradation_cost_dkk_per_kwh": (0.0, 5.0, 0.01, "DKK/kWh"),
+    "minimum_profit_dkk_per_kwh": (0.0, 10.0, 0.05, "DKK/kWh"),
+    "extra_storage_spread_dkk_per_kwh": (0.0, 20.0, 0.05, "DKK/kWh"),
+    "switching_penalty_dkk": (0.0, 5.0, 0.01, "DKK"),
+    "minimum_mode_minutes": (15.0, 120.0, 15.0, "min"),
+    "maximum_transitions_per_day": (1.0, 12.0, 1.0, None),
+    "cycle_life": (500.0, 15000.0, 100.0, "cycles"),
+}
+
+TELEMETRY_STALE_AFTER = timedelta(minutes=5)
+DECISION_HISTORY_LIMIT = 500
+LEDGER_HISTORY_LIMIT = 96 * 62

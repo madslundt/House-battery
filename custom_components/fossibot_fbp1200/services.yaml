@@ -1,0 +1,56 @@
+schedule_load:
+  name: Schedule additional load
+  description: Adds a known future load to the learned forecast and immediately replans.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      description: Optional when only one FBP1200 Optimizer entry exists.
+      example: 01JABCDEF0123456789
+      selector:
+        text:
+    start:
+      name: Start
+      description: Timezone-aware ISO 8601 start timestamp.
+      required: true
+      example: "2026-09-21T01:00:00+02:00"
+      selector:
+        text:
+    end:
+      name: End
+      description: Timezone-aware ISO 8601 end timestamp.
+      required: true
+      example: "2026-09-21T03:00:00+02:00"
+      selector:
+        text:
+    additional_w:
+      name: Additional power
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 20000
+          unit_of_measurement: W
+          mode: box
+    label:
+      name: Label
+      selector:
+        text:
+
+clear_scheduled_loads:
+  name: Clear scheduled loads
+  description: Removes every future manually scheduled load and replans.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      selector:
+        text:
+
+export_data:
+  name: Export optimizer evidence
+  description: Returns settings, plan, learning model, interval ledger, and decision history as structured JSON.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      selector:
+        text:
+

@@ -1,0 +1,57 @@
+{
+  "title": "FOSSiBOT FBP1200 Optimizer",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure local FBP1200 optimization",
+        "description": "Bind sensors from AFERIY PS240 (Local) and your whole-home meter. Automatic control remains disabled until commissioned in Options.",
+        "data": {
+          "name": "Name",
+          "soc_entity": "Battery state of charge",
+          "load_power_entity": "Connected/house load power",
+          "grid_import_power_entity": "Grid import power",
+          "grid_available_entity": "Grid available / on-grid state",
+          "operating_mode_entity": "AFERIY Operating Mode",
+          "price_entities": "Electricity price forecast entities",
+          "grid_export_power_entity": "Grid export power (optional)",
+          "battery_charge_power_entity": "Battery charge power",
+          "battery_discharge_power_entity": "Battery discharge power",
+          "pv_power_entity": "PV power (optional)",
+          "fault_entity": "Battery fault entity (optional)",
+          "online_entity": "Battery online entity (optional)",
+          "charge_power_control_entity": "Charge power control (optional)",
+          "discharge_power_control_entity": "Discharge power control (optional)",
+          "minimum_soc_control_entity": "Discharge limit control (optional)",
+          "maximum_soc_control_entity": "Charge limit control (optional)"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "FBP1200 bindings and commissioning",
+        "description": "Commissioned permits the Active control switch to write only through the bound local Operating Mode entity. Verify each mode and read-back before enabling it.",
+        "data": {
+          "soc_entity": "Battery state of charge",
+          "load_power_entity": "Connected/house load power",
+          "grid_import_power_entity": "Grid import power",
+          "grid_available_entity": "Grid available / on-grid state",
+          "operating_mode_entity": "AFERIY Operating Mode",
+          "price_entities": "Electricity price forecast entities",
+          "grid_export_power_entity": "Grid export power (optional)",
+          "battery_charge_power_entity": "Battery charge power",
+          "battery_discharge_power_entity": "Battery discharge power",
+          "pv_power_entity": "PV power (optional)",
+          "fault_entity": "Battery fault entity (optional)",
+          "online_entity": "Battery online entity (optional)",
+          "charge_power_control_entity": "Charge power control (optional)",
+          "discharge_power_control_entity": "Discharge power control (optional)",
+          "minimum_soc_control_entity": "Discharge limit control (optional)",
+          "maximum_soc_control_entity": "Charge limit control (optional)",
+          "commissioned": "I verified local control, read-back, limits, wiring, and legal export settings"
+        }
+      }
+    }
+  }
+}
