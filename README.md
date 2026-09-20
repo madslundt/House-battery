@@ -188,6 +188,8 @@ change is rejected if it violates the SOC ordering above.
 
 Examples for a dashboard, physical grid-status template, scheduled dishwasher
 load, data export, and tuning are in [docs/examples.md](docs/examples.md).
+The complete plain-language list of entities, attributes, actions, configuration
+numbers, and tuning examples is in [the entity reference](docs/entity-reference.md).
 
 ## Evidence and troubleshooting
 

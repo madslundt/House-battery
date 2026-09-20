@@ -4,7 +4,7 @@ schedule_load:
   fields:
     config_entry_id:
       name: Config entry ID
-      description: Optional when only one FBP1200 Optimizer entry exists.
+      description: Optional when only one House Battery entry exists.
       example: 01JABCDEF0123456789
       selector:
         text:
@@ -53,4 +53,3 @@ export_data:
       name: Config entry ID
       selector:
         text:
-

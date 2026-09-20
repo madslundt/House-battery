@@ -1,0 +1,116 @@
+# Entity, action, and configuration reference
+
+Home Assistant generates the exact entity IDs from your entry name. Use the
+entity picker; names below are the stable, user-facing names.
+
+## Live state and safety
+
+| Entity | What it means | How to use it |
+| --- | --- | --- |
+| **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. Read its `reason` attribute first when it is not active. |
+| **Current decision** | The action the current plan wants now: `charge`, `grid`, `battery`, or `safe`. | Compare it with **Battery mode** to see planned versus observed behavior. |
+| **Battery mode** | Mode read back from the configured local battery control. | `charge` maps to `Charge`; `grid` maps to `Idle`; `battery` maps to self-consumption/zero-export. Physical power sensors remain the final evidence. |
+| **Grid available** | Whether an on-grid supply physically exists. | This is not grid import. `off` produces `OUTAGE` and stops economic control. |
+| **Optimizer problem** | `on` when required telemetry is stale, invalid, faulted, offline, or grid status is unknown. | Treat it as a stop signal. Its `problems` attribute names the failed binding. |
+| **Automatic control** | Explicit permission for House Battery to issue local mode/limit writes. | Leave off during setup. It cannot turn on until the entry is commissioned and native SOC controls pass validation. |
+| **Force safe mode** | Button that turns automatic control off and requests the configured safe local mode. | Use immediately if real battery behavior disagrees with the plan. |
+
+Example: if **Current decision** says `battery` but **Battery mode** is `grid`, do
+not “fix” it by changing settings. Inspect **Optimizer problem**, the local
+provider, and the mode read-back before re-enabling automatic control.
+
+## Telemetry and economics
+
+| Entity | Plain-language description |
+| --- | --- |
+| **Battery state of charge** | Current usable battery percentage reported by the bound battery sensor. |
+| **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
+| **Grid import/export power** | Current power bought from/sent to the grid; used for evidence and accounting. |
+| **Battery charge/discharge power** | Measured instantaneous battery flow; used for learning, throughput, and realized savings estimates. |
+| **PV input power** | Optional measured solar input used to reduce expected net load. |
+| **Current electricity price** | Price for the current known price interval. |
+| **Expected plan savings** | Forecast saving across the current known horizon versus buying expected load from grid. It is a forecast, not cash earned. |
+| **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Compare matching tariff periods, not one unusual day. |
+| **Known price spread** | Highest minus lowest price in the known future horizon. |
+| **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before extra storage is allowed. |
+| **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary extra-storage ceiling. |
+| **Extra storage policy** | `normal` or `active`, with its target, spread, effective margin, and explanation in attributes. |
+
+Example: with prices of 0.20 and 4.00 DKK/kWh, 85% efficiency, and 0.35
+DKK/kWh degradation cost, effective margin is about 3.41 DKK/kWh. If the
+required profit is 0.75 and extra-storage threshold is 2.00, **Extra storage
+policy** can become `active`. With 1.90 and 2.25 prices, it remains `normal`;
+cycling is not worth it.
+
+## Battery use and learning
+
+| Entity | Plain-language description |
+| --- | --- |
+| **Battery charge/discharge today/month/total** | Energy moved into/out of the battery. These are throughput counters, not grid-meter billing totals. |
+| **Equivalent full cycles** | Lifetime discharged energy divided by usable capacity. One 1.958 kWh discharge is roughly one equivalent cycle. |
+| **Estimated battery degradation** | Capacity loss estimated from learned capacity when available, otherwise from cycle-life reference. It is not a BMS warranty value. |
+| **Estimated remaining capacity** | 100% minus the estimated degradation. |
+| **Learned usable capacity** | Capacity inferred from sufficiently stable charge/discharge observations. |
+| **Learned round-trip efficiency** | Measured energy-out versus energy-in estimate once enough stable samples exist. |
+| **Battery learning** | `learning` until both capacity and efficiency are reliable; attributes show sample counts/readiness. |
+| **Load learning coverage** | Percentage of the 7-day, 15-minute demand profile with enough observations. Higher is better. |
+| **Load forecast mean absolute error** | Typical absolute load-forecast error in W. A persistent high value means inspect the load sensor scope or add scheduled loads. |
+
+Example: if cycles rise by 12/month while realized monthly savings stay near
+zero, raise **Minimum required profit** from 0.75 to 1.00 DKK/kWh or raise
+**Battery degradation cost**. If learned capacity falls materially while the
+manufacturer/BMS reading does not, first verify charge/discharge telemetry and
+SOC calibration; do not assume a warranty issue from this estimate alone.
+
+## Planner entities and attributes
+
+| Entity | What to inspect |
+| --- | --- |
+| **Operation plan** | `blocks` attribute: contiguous start/end times, action, expected savings, energy, SOC start/end, and reason. Also exposes baseline cost, expected cost, terminal price, and horizon length. |
+| **Decision history** | Recent state/reason changes with timestamp, SOC, price, action, and command result. Use it to explain why the plan changed. |
+
+Example: a plan block of `charge`, 01:00–03:00, SOC 25→90, followed by
+`battery`, 17:00–20:00, is evidence that House Battery found a complete,
+profitable cycle. A `grid` block during a small price spread is intentional,
+not a missed optimization.
+
+## Configuration numbers
+
+All values are persistent inputs. This ordering is enforced:
+
+```text
+absolute emergency SOC ≤ arbitrage reserve SOC
+  < maximum charge SOC ≤ extra-storage charge SOC ≤ 100
+```
+
+| Number | What changing it does | Realistic change |
+| --- | --- | --- |
+| **Nominal battery capacity** | Fallback usable capacity until learning is ready. | Set 1.958 kWh for one module; use the installed usable capacity, not a marketing nominal total. |
+| **Absolute emergency SOC** | Native lower hardware floor written during automatic commands. | Raise 10→20% if outage reserve is more valuable than arbitrage. |
+| **Arbitrage reserve SOC** | Planner's no-discharge floor. | Raise 20→35% before a storm; the optimizer keeps more backup but has less energy to sell against peak prices. |
+| **Maximum charge SOC** | Normal charge ceiling. | Lower 90→80% to reduce high-SOC dwell time; it may skip otherwise profitable evening coverage. |
+| **Extra-storage charge SOC** | Higher ceiling allowed only on exceptional spreads. | Keep 100% for rare 4 DKK/kWh peaks, or set 90% to disable extra storage without changing normal operation. |
+| **Maximum charge/discharge power** | Planner and native command power cap. | Lower discharge 800→500 W if the load path or battery behaves better at a lower sustained output. |
+| **Fallback round-trip efficiency** | Used before measured efficiency is ready. | Set 80% rather than 85% to make early plans more conservative. |
+| **Battery degradation cost** | Wear cost charged to each discharged kWh. | Raise 0.35→0.60 DKK/kWh if avoiding wear matters more than short-term savings. |
+| **Minimum required profit** | Extra margin required for discharge. | Raise 0.75→1.25 DKK/kWh to reject marginal cycles. |
+| **Extra-storage price spread** | Raw price difference required before higher SOC is permitted. | Raise 2.00→3.00 DKK/kWh if full charges are too frequent. |
+| **Mode switching penalty** | Cost assigned to every mode change. | Raise 0.05→0.20 DKK to reduce chattering around similar prices. |
+| **Minimum mode duration** | How long a chosen mode stays locked. | Raise 30→60 min if the local controller needs more settling time. |
+| **Maximum daily mode transitions** | Daily switching budget. | Lower 4→2 for a quieter, more conservative system. |
+| **Cycle-life reference** | Fallback degradation model denominator. | Set it to the manufacturer-supported cycle rating; it does not change physical battery behavior. |
+
+Change one number at a time. Observe at least several similar tariff days, then
+compare **realized savings**, **equivalent cycles**, forecast error, and the
+plan/decision history before keeping or reverting it.
+
+## Services
+
+| Service | Action | Example result |
+| --- | --- | --- |
+| `house_battery.schedule_load` | Adds known future demand and immediately replans. | Add a dishwasher at 800 W from 19:00–21:00; the planner can preserve or charge energy before the peak. |
+| `house_battery.clear_scheduled_loads` | Removes all manually scheduled future loads and replans. | Run it after cancelling an EV charge so the battery does not retain unnecessary energy. |
+| `house_battery.export_data` | Returns settings, plan, learning models, ledger, decisions, and scheduled loads as JSON. | Export monthly evidence before changing degradation or profit settings. |
+
+With multiple House Battery entries, provide `config_entry_id` to every
+service. See [examples](examples.md) for exact service YAML.
