@@ -1,4 +1,4 @@
-"""Typed domain model for deterministic FBP1200 optimization."""
+"""Typed domain model for deterministic battery optimization."""
 
 from __future__ import annotations
 

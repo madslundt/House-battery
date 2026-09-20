@@ -1,4 +1,4 @@
-"""Pure dynamic-programming optimizer for the FBP1200."""
+"""Pure dynamic-programming battery optimizer."""
 
 from __future__ import annotations
 

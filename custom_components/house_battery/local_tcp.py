@@ -1,4 +1,4 @@
-"""Small, fail-closed local TCP protocol adapter for AECC FBP1200 devices.
+"""Small, fail-closed local TCP protocol adapter for compatible devices.
 
 The protocol is newline-delimited JSON.  This module intentionally exposes
 only the telemetry read and control-register operations used by the optimizer.
@@ -42,7 +42,7 @@ class FbpLocalSnapshot:
 
 
 class FbpLocalTcpClient:
-    """Single-session, serialised JSON-line connection to one FBP1200."""
+    """Single-session, serialised JSON-line connection to one battery."""
 
     def __init__(
         self, host: str, port: int = DEFAULT_PORT, timeout: float = 5.0
@@ -110,7 +110,7 @@ class FbpLocalTcpClient:
         """Return to the device's local self-consumption / zero-export mode.
 
         This is the small, allowlisted AI restore sequence used by compatible
-        AECC devices. It intentionally does not retry: an ambiguous write is
+        compatible devices. It intentionally does not retry: an ambiguous write is
         always safer than issuing the same battery command again.
         """
         await self._request(
@@ -189,7 +189,7 @@ class FbpLocalTcpClient:
 
 
 def decode_energy_parameter(response: dict[str, Any]) -> FbpLocalSnapshot:
-    """Decode only conservative, known AECC summary/storage fields."""
+    """Decode only conservative, known summary/storage fields."""
     summary = _first_mapping(response.get("SSumInfoList"))
     storage = _first_mapping(response.get("Storage_list"))
     soc = _number(summary, "AverageBatteryAverageSOC") or _number(storage, "BatterySoc")

@@ -17,7 +17,7 @@ The GitHub repository is the installation source. Adding it as a HACS custom
 repository lets HACS install and update the integration without a manual file
 copy or a local repository checkout on Home Assistant.
 
-House Battery connects to the FBP1200 itself. In the first setup screen, enter
+House Battery connects to the battery itself. In the first setup screen, enter
 the battery's local IP address, TCP port (normally `8080`), and a display name.
 The flow performs a read-only telemetry handshake before it creates the entry.
 It then creates the battery SOC, charging/discharging-power, native SOC-limit,
@@ -26,7 +26,7 @@ integration is needed.
 
 ## Connect the battery locally
 
-1. Give the FBP1200 a DHCP reservation/static IP.
+1. Give the battery a DHCP reservation/static IP.
 2. Add **House Battery**, enter its IP address, TCP port, and name, then let
    the read-only connection check complete.
 3. Verify the created **Battery state of charge**, **Battery charge power**,

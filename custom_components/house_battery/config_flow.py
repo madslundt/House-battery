@@ -1,4 +1,4 @@
-"""Config and options flows for the FBP1200 optimizer."""
+"""Config and options flows for the battery optimizer."""
 
 from __future__ import annotations
 
@@ -122,7 +122,7 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
 
 
 class Fbp1200ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Bind an optimizer entry to locally managed FBP1200 entities."""
+    """Configure an optimizer entry with a local battery connection."""
 
     VERSION = 1
 

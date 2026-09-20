@@ -25,7 +25,7 @@ provider, and the mode read-back before re-enabling automatic control.
 
 | Entity | Plain-language description |
 | --- | --- |
-| **Battery state of charge** | Current usable battery percentage reported directly by the FBP1200. |
+| **Battery state of charge** | Current usable battery percentage reported directly by the battery. |
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
 | **Grid import/export power** | Current power bought from/sent to the grid; used for evidence and accounting. |
 | **Battery charge/discharge power** | Measured instantaneous battery flow; used for learning, throughput, and realized savings estimates. |

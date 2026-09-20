@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Before adding this integration, give the FBP1200 a stable local IP address.
+Before adding this integration, give the battery a stable local IP address.
 House Battery connects to its local TCP interface directly: enter the IP,
 port (normally `8080`), and device name, then complete the read-only telemetry
 check. It creates battery telemetry, native SOC-limit, and operating-mode

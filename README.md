@@ -1,7 +1,7 @@
 # House Battery for Home Assistant
 
-House Battery is a local, deterministic optimizer for a FOSSiBOT FBP1200 or
-compatible home battery. It learns the connected load, plans against every
+House Battery is a local, deterministic optimizer for a compatible home
+battery. It learns the connected load, plans against every
 known electricity-price interval, and chooses `charge`, `grid`, or `battery`
 only when losses, battery wear, and the configured profit requirement are met.
 
@@ -10,7 +10,7 @@ controller, or battery-management system. Battery firmware and the installed
 local device provider remain responsible for electrical protection and hard
 limits.
 
-The integration connects directly to a compatible FBP1200 through its local
+The integration connects directly to a compatible battery through its local
 TCP interface. Setup starts with the battery IP address, port (normally 8080),
 and a device name; it then creates the battery telemetry, native SOC-limit,
 and operating-mode entities itself. Home load, physical on-grid state, and

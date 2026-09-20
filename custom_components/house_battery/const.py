@@ -1,4 +1,4 @@
-"""Constants for the FOSSiBOT FBP1200 Optimizer integration."""
+"""Constants for the House Battery integration."""
 
 from datetime import timedelta
 

@@ -1,4 +1,4 @@
-"""Guarded Home Assistant adapter for proven local FBP1200 controls."""
+"""Guarded Home Assistant adapter for proven local battery controls."""
 
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ class LocalControlAdapter:
             await client.async_set_limits(minimum, maximum)
         except Exception as exc:
             if action is not Action.SAFE:
-                _LOGGER.exception("FBP1200 local TCP SOC-limit command failed")
+                _LOGGER.exception("Local TCP SOC-limit command failed")
                 runtime.execution_enabled = False
                 await self._save()
                 return False, f"local TCP command failed: {exc}"
@@ -134,7 +134,7 @@ class LocalControlAdapter:
             else:
                 await client.async_set_mode("Idle", 0, min_soc=minimum, max_soc=maximum)
         except Exception as exc:
-            _LOGGER.exception("FBP1200 local TCP mode command failed")
+            _LOGGER.exception("Local TCP mode command failed")
             runtime.execution_enabled = False
             await self._save()
             return False, f"local TCP command failed: {exc}"
@@ -227,7 +227,7 @@ class LocalControlAdapter:
             await self._apply_limits(target_soc)
         except Exception as exc:  # The safety command must remain available.
             if action is not Action.SAFE:
-                _LOGGER.exception("FBP1200 SOC limit command failed")
+                _LOGGER.exception("Battery SOC limit command failed")
                 runtime.execution_enabled = False
                 await self._save()
                 return False, f"command failed: {exc}"
@@ -247,7 +247,7 @@ class LocalControlAdapter:
                 blocking=True,
             )
         except Exception as exc:  # Home Assistant service failures vary by adapter
-            _LOGGER.exception("FBP1200 command failed")
+            _LOGGER.exception("Battery command failed")
             runtime.execution_enabled = False
             await self._save()
             return False, f"command failed: {exc}"

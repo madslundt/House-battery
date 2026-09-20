@@ -3,7 +3,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect FBP1200 locally",
+        "title": "Connect battery locally",
         "description": "Enter the battery connection details. House Battery checks local telemetry before creating the device; automatic control remains disabled until commissioned in Options.",
         "data": {
           "name": "Name",
@@ -30,7 +30,7 @@
       },
       "household": {
         "title": "Connect household and tariff data",
-        "description": "Battery telemetry and controls are created directly from the local FBP1200 connection. Select only the independent household and tariff sources.",
+        "description": "Battery telemetry and controls are created directly from the local connection. Select only the independent household and tariff sources.",
         "data": {
           "load_power_entity": "Connected/house load power",
           "grid_import_power_entity": "Grid import power",

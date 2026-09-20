@@ -1,4 +1,4 @@
-"""Freshness and safety checks for bound physical FBP1200 entities."""
+"""Freshness and safety checks for bound physical battery entities."""
 
 from __future__ import annotations
 

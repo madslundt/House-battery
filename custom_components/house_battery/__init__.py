@@ -1,4 +1,4 @@
-"""FOSSiBOT FBP1200 Optimizer integration."""
+"""House Battery integration."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         if entry_id:
             coordinator = coordinators.get(entry_id)
             if coordinator is None:
-                raise vol.Invalid(f"Unknown FBP1200 config entry: {entry_id}")
+                raise vol.Invalid(f"Unknown House Battery config entry: {entry_id}")
             return coordinator
         if len(coordinators) != 1:
             raise vol.Invalid("config_entry_id is required when multiple entries exist")
@@ -96,7 +96,7 @@ def _parse_datetime(value: str) -> datetime:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up one FBP1200 optimizer."""
+    """Set up one battery optimizer."""
     coordinator = Fbp1200Coordinator(hass, entry)
     await coordinator.async_initialize()
     await coordinator.async_config_entry_first_refresh()

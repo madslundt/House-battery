@@ -1,4 +1,4 @@
-"""Shared entity base for the FBP1200 optimizer."""
+"""Shared entity base for the battery optimizer."""
 
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 

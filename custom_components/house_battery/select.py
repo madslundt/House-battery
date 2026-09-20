@@ -1,4 +1,4 @@
-"""Direct local operating-mode control for FBP1200 devices."""
+"""Direct local operating-mode control for compatible batteries."""
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry

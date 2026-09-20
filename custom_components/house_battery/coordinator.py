@@ -117,8 +117,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     def device_info(self) -> DeviceInfo:
         return DeviceInfo(
             identifiers={(DOMAIN, self.entry.entry_id)},
-            manufacturer="FOSSiBOT",
-            model="FBP1200",
             name=self.entry.title,
             configuration_url="https://github.com/madslundt/House-battery",
         )
