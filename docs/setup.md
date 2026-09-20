@@ -2,9 +2,20 @@
 
 ## Install
 
-Copy `custom_components/house_battery` to your Home Assistant configuration
-directory and restart Home Assistant. Then add **House Battery** from
-**Settings → Devices & services → Add integration**.
+Install through HACS; do not copy component files into Home Assistant.
+
+1. Open **HACS → Integrations** in Home Assistant.
+2. Open the overflow menu, choose **Custom repositories**, and add
+   `https://github.com/madslundt/House-battery` with category **Integration**.
+3. Search HACS integrations for **House Battery**, select it, and choose
+   **Download**.
+4. Restart Home Assistant when HACS requests it.
+5. Add **House Battery** from **Settings → Devices & services → Add
+   integration**.
+
+The GitHub repository is the installation source. Adding it as a HACS custom
+repository lets HACS install and update the integration without a manual file
+copy or a local repository checkout on Home Assistant.
 
 House Battery does not yet discover or connect to a battery during its config
 flow. First install and prove a local provider for the FBP1200; then bind the

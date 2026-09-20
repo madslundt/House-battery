@@ -18,7 +18,8 @@ direct setup is released. There is no cloud account or external optimizer.
 ## Start here
 
 - [Setup and commissioning](docs/setup.md) — installation, local battery
-  connection, required bindings, and safe first use.
+  connection, required bindings, and safe first use. Installation is through
+  HACS from this GitHub repository; no manual component-file copy is needed.
 - [Configuration reference](docs/configuration.md) — every config-flow field
   and safety rule.
 - [Optimizer and forecast guide](docs/optimization.md) — planning economics,
