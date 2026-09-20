@@ -6,27 +6,27 @@ entity picker rather than assuming these example names are exact.
 
 ## Physical grid-availability template
 
-Only use this when `sensor.fbp1200_ac_input_state` is a device-provided physical
+Only use this when `sensor.house_battery_ac_input_state` is a device-provided physical
 AC-input/on-grid status. It must not be grid-import watts.
 
 ```yaml
 template:
   - binary_sensor:
-      - name: FBP1200 grid available
-        unique_id: fbp1200_grid_available
+      - name: House Battery grid available
+        unique_id: house_battery_grid_available
         device_class: power
         state: >-
-          {{ states('sensor.fbp1200_ac_input_state') | lower
+          {{ states('sensor.house_battery_ac_input_state') | lower
              in ['on', 'on_grid', 'connected', 'available'] }}
 ```
 
-Bind `binary_sensor.fbp1200_grid_available` to **Grid available / on-grid
+Bind `binary_sensor.house_battery_grid_available` to **Grid available / on-grid
 state** in the config flow. If the device exposes a native binary sensor,
 prefer that directly.
 
 ## Conservative starting policy
 
-For a 1.958 kWh FBP1200 with a 10% emergency buffer and a 20% economic reserve,
+For a 1.958 kWh home battery with a 10% emergency buffer and a 20% economic reserve,
 set the number entities as follows before commissioning:
 
 | Number entity | Suggested starting value |
@@ -53,20 +53,20 @@ decision reason visible together:
 
 ```yaml
 type: entities
-title: FBP1200 optimizer
+title: House Battery optimizer
 entities:
-  - entity: sensor.fbp1200_optimizer_state
-  - entity: binary_sensor.fbp1200_optimizer_problem
-  - entity: binary_sensor.fbp1200_grid_available
-  - entity: sensor.fbp1200_current_decision
-  - entity: sensor.fbp1200_battery_mode
-  - entity: sensor.fbp1200_battery_state_of_charge
-  - entity: sensor.fbp1200_effective_charge_target_soc
-  - entity: sensor.fbp1200_expected_plan_savings
-  - entity: sensor.fbp1200_estimated_realized_savings_today
-  - entity: sensor.fbp1200_extra_storage_policy
-  - entity: switch.fbp1200_automatic_control
-  - entity: button.fbp1200_force_safe_mode
+  - entity: sensor.house_battery_optimizer_state
+  - entity: binary_sensor.house_battery_optimizer_problem
+  - entity: binary_sensor.house_battery_grid_available
+  - entity: sensor.house_battery_current_decision
+  - entity: sensor.house_battery_battery_mode
+  - entity: sensor.house_battery_battery_state_of_charge
+  - entity: sensor.house_battery_effective_charge_target_soc
+  - entity: sensor.house_battery_expected_plan_savings
+  - entity: sensor.house_battery_estimated_realized_savings_today
+  - entity: sensor.house_battery_extra_storage_policy
+  - entity: switch.house_battery_automatic_control
+  - entity: button.house_battery_force_safe_mode
 ```
 
 Inspect the **Operation plan** entity attributes in Developer Tools → States.

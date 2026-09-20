@@ -2,12 +2,12 @@
 
 ## Prerequisites
 
-Before adding this integration, expose the FBP1200 through a **local** Home
+Before adding this integration, expose the battery through a **local** Home
 Assistant integration/control path that provides a verified Operating Mode
 `select` entity and the relevant telemetry. The implementation is designed to
-layer on that local device provider; it does not open a new TCP connection,
-discover the FBP1200, or implement its device protocol itself. Install and
-validate that provider before adding this companion optimizer. The optimizer
+layer on that local device provider while the direct local-TCP path completes
+hardware validation. Install and validate the provider before enabling the
+optimizer. The optimizer
 project is maintained at
 [github.com/madslundt/House-battery](https://github.com/madslundt/House-battery).
 
@@ -20,10 +20,10 @@ planner must compare future intervals.
 | Config-flow field | Expected entity | Notes |
 | --- | --- | --- |
 | Battery state of charge | `sensor` | Numeric percentage from 0 to 100. |
-| Connected/house load power | `sensor` | Watts for load served by this battery. Do not use whole-house demand if the FBP1200 cannot serve all of it. |
+| Connected/house load power | `sensor` | Watts for load served by this battery. Do not use whole-house demand if the battery cannot serve all of it. |
 | Grid import power | `sensor` | Numeric watts. Used for accounting/telemetry. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
-| FBP1200 Operating Mode | `select` | Must offer the verified local options `Charge`, `Idle`, and `Self-Gen/Zero Export`. |
+| Battery Operating Mode | `select` | Must offer the verified local options `Charge`, `Idle`, and `Self-Gen/Zero Export`. |
 | Electricity price forecast entities | one or more `sensor` entities | Must contain dated price rows. |
 | Battery charge power | `sensor` | Measured W; required for evidence and learning. |
 | Battery discharge power | `sensor` | Measured W; required for evidence and learning. |
@@ -87,10 +87,10 @@ you mark the integration commissioned in its Options. Commission only after:
    battery/load path.
 2. Verifying that the grid-available entity changes accurately during an
    on-grid/off-grid test or approved simulation.
-3. Manually checking each mode through the local FBP1200 control and confirming
+3. Manually checking each mode through the local battery control and confirming
    the Operating Mode read-back and measured power response.
 4. Checking the native minimum/maximum SOC controls and the resulting device
-   behavior. In particular, understand what the FBP1200 does at its minimum
+   behavior. In particular, understand what the battery does at its minimum
    SOC when the grid is absent.
 5. Confirming export, charging, electrical installation, and tariff behavior
    comply with your local requirements.

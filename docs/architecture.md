@@ -3,7 +3,7 @@
 ## Local data flow
 
 ```text
-Local FBP1200 device-provider entities + price forecast + load measurement
+Local battery-provider entities + price forecast + load measurement
                          │
                          ▼
                   coordinator (1 min)
@@ -17,11 +17,10 @@ Local FBP1200 device-provider entities + price forecast + load measurement
       native SOC/power controls + local Operating Mode select
 ```
 
-The integration never issues raw TCP commands, discovers a device, or controls
-relays, grid wiring, or a transfer switch. A separate local Home Assistant
-FBP1200 device provider is the only actuator. This repository supplies the
-optimizer layer; it needs that provider's verified entities before it can be
-configured.
+The integration never controls relays, grid wiring, or a transfer switch. The
+optimizer consumes verified local battery-provider entities; its direct TCP
+compatibility layer remains behind hardware validation and is not an automatic
+fallback.
 
 ## Forecasting
 
@@ -95,7 +94,7 @@ Equivalent full cycles are lifetime battery discharge energy divided by usable
 capacity. Estimated degradation uses learned capacity when it is ready;
 otherwise it is a conservative cycle-life-reference estimate. These are
 estimates for decision support—not an authoritative battery-health report from
-the FBP1200 BMS.
+the battery BMS.
 
 ## Explainability and export
 

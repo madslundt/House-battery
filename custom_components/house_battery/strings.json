@@ -3,15 +3,15 @@
   "config": {
     "step": {
       "user": {
-        "title": "Configure local FBP1200 optimization",
-        "description": "Bind sensors and controls from your local FOSSiBOT FBP1200 device provider and your whole-home meter. Automatic control remains disabled until commissioned in Options.",
+        "title": "Configure local battery optimization",
+        "description": "Bind sensors and controls from your local battery provider and your whole-home meter. Automatic control remains disabled until commissioned in Options.",
         "data": {
           "name": "Name",
           "soc_entity": "Battery state of charge",
           "load_power_entity": "Connected/house load power",
           "grid_import_power_entity": "Grid import power",
           "grid_available_entity": "Grid available / on-grid state",
-          "operating_mode_entity": "FBP1200 Operating Mode",
+          "operating_mode_entity": "Battery Operating Mode",
           "price_entities": "Electricity price forecast entities",
           "grid_export_power_entity": "Grid export power (optional)",
           "battery_charge_power_entity": "Battery charge power",
@@ -30,14 +30,14 @@
   "options": {
     "step": {
       "init": {
-        "title": "FBP1200 bindings and commissioning",
+        "title": "Battery bindings and commissioning",
         "description": "Commissioned permits the Active control switch to write only through the bound local Operating Mode entity. Verify each mode and read-back before enabling it.",
         "data": {
           "soc_entity": "Battery state of charge",
           "load_power_entity": "Connected/house load power",
           "grid_import_power_entity": "Grid import power",
           "grid_available_entity": "Grid available / on-grid state",
-          "operating_mode_entity": "FBP1200 Operating Mode",
+          "operating_mode_entity": "Battery Operating Mode",
           "price_entities": "Electricity price forecast entities",
           "grid_export_power_entity": "Grid export power (optional)",
           "battery_charge_power_entity": "Battery charge power",

@@ -1,15 +1,15 @@
 # House Battery for Home Assistant
 
-Local, deterministic battery arbitrage for a FOSSiBOT FBP1200. The integration
+Local, deterministic battery arbitrage for a home battery. The integration
 learns the connected load, evaluates every currently known electricity-price
 interval, and selects `charge`, `grid`, or `battery` while accounting for
 battery losses, wear, operating limits, and anti-chatter limits.
 
-This is a **companion optimizer**, not an FBP1200 protocol implementation. It
-requires an already-installed local Home Assistant device-provider integration
-that exposes the FBP1200 telemetry and controls selected during setup. It does
-not discover the battery or open a TCP connection itself. Project source,
-releases, and issue tracking are at
+House Battery connects its optimization layer to a local Home Assistant battery
+provider selected during setup. The bundled local-TCP compatibility layer is
+kept fail-closed and is being validated against real hardware; until its direct
+setup flow is released, use a proven local provider for the device connection.
+Project source, releases, and issue tracking are at
 [github.com/madslundt/House-battery](https://github.com/madslundt/House-battery).
 
 It is deliberately conservative: battery energy is not spent to save a few
@@ -19,7 +19,7 @@ profitable after losses and degradation.
 ## What it provides
 
 - A 15-minute battery plan across all contiguous known price intervals.
-- Local control through already-proven FBP1200 Home Assistant entities; no
+- Local control through already-proven battery Home Assistant entities; no
   cloud account, raw network command implementation, or electrical wiring
   control is added here.
 - Continuous load-profile learning and conservative usable-capacity and
@@ -35,7 +35,7 @@ profitable after losses and degradation.
 ## Safety boundary
 
 This is an economic controller, not a transfer switch, UPS safety controller,
-or battery-management system. The FBP1200 firmware and your installed local
+or battery-management system. The battery firmware and your installed local
 integration remain responsible for electrical protection and device limits.
 
 Do not enable automatic control until every configured mode, SOC limit,
@@ -49,7 +49,7 @@ control off.
 
 The **Absolute emergency SOC** setting is written to the configured native
 minimum-SOC control whenever automatic control issues a command. Its final
-cut-off behavior is defined by the FBP1200 firmware, so verify that behavior
+cut-off behavior is defined by the battery firmware, so verify that behavior
 on your equipment before relying on it during an outage.
 
 ## Installation
@@ -64,7 +64,7 @@ restart Home Assistant:
 
 Add **House Battery** from *Settings → Devices & services → Add
 integration*. It does not discover a battery; instead, its config flow binds
-the local entities already supplied by your FBP1200/local-control setup and
+the local entities already supplied by your battery/local-control setup and
 your electricity-price integration.
 
 For development, this repository keeps the component in
@@ -77,11 +77,11 @@ The config flow requires the following bindings.
 
 | Binding | Purpose |
 | --- | --- |
-| Battery state of charge | Current FBP1200 SOC in percent. |
+| Battery state of charge | Current battery SOC in percent. |
 | Connected/house load power | Load that the battery can actually serve, in W. |
 | Grid import power | Imported grid power, in W. |
 | Grid available / on-grid state | A physical or device-reported on-grid state. |
-| FBP1200 Operating Mode | The verified local `select` control. |
+| Battery Operating Mode | The verified local `select` control. |
 | Electricity price forecast entities | Entities with dated price intervals. |
 | Battery charge power | Measured battery charging power, in W. |
 | Battery discharge power | Measured battery discharging power, in W. |
@@ -201,14 +201,46 @@ decisions, and scheduled loads for offline or LLM analysis.
 Do not bypass it by inventing a state or switching on automatic control; repair
 the entity mapping or local battery connection first.
 
-## Rename migration
+## Connect the battery locally
 
-This release changes the Home Assistant integration domain from
-`fossibot_fbp1200` to `house_battery`. Home Assistant does not migrate a custom
-integration domain in place. Before installing this version, disable automatic
-control, remove the old entry, install `custom_components/house_battery`,
-restart Home Assistant, and add **House Battery** again. Re-enter the bindings
-and commission only after validating the replacement entry in shadow mode.
+1. Give the battery a DHCP reservation/static IP and confirm its local-control
+   provider can read SOC, charge/discharge power, and Operating Mode.
+2. Verify the provider's local connection without the vendor app holding the
+   only device session. For AECC-compatible batteries, local TCP commonly uses
+   port `8080`; use the provider's documented connection test.
+3. Add House Battery and bind that provider's SOC, power, Operating Mode, and
+   native min/max-SOC entities. Bind a separate physical on-grid entity and
+   your price forecast/load entities.
+4. Keep House Battery in `SHADOW` while you test `Charge`, `Idle`, and
+   self-consumption locally. Commission it only after every read-back is
+   correct.
+
+## Evaluate degradation, ROI, and configuration quality
+
+Use observed evidence, not a single “savings” number. Review these after at
+least two representative tariff weeks:
+
+- **Battery charge/discharge total** and **Equivalent full cycles** measure
+  throughput. If throughput rises while realized savings do not, increase the
+  minimum-profit margin, degradation cost, or switching penalty.
+- **Estimated degradation**, **Learned usable capacity**, and **Learned
+  round-trip efficiency** indicate whether the fallback model is still honest.
+  Treat these as estimates; compare them with BMS/manufacturer diagnostics.
+- **Estimated realized savings today/month/total** should be compared with a
+  no-battery baseline over matching days. A practical ROI estimate is
+  `lifetime realized savings ÷ installed battery cost`; use month-level values
+  rather than a single volatile day.
+- **Expected plan savings** versus realized savings and **Load forecast mean
+  absolute error** show model quality. Large, persistent forecast error means
+  inspect the load sensor scope, add scheduled loads, or wait for more history.
+- **Extra storage policy** should be active only on large, clearly profitable
+  spreads. If it frequently fills to 100% without later discharge, raise its
+  spread threshold or lower its target.
+
+Change one setting at a time, leave it for several comparable price horizons,
+then export evidence with `house_battery.export_data`. Keep a small change log
+of tariff conditions, settings, cycles, realized savings, and observed device
+behavior so later tuning is evidence-based.
 
 ## Development
 
@@ -220,5 +252,5 @@ uv run --with pytest --with 'homeassistant>=2025.1' \
 
 The core planner, policy, learning, and accounting behavior is covered by unit
 tests. The adapter deliberately issues Home Assistant service calls only; use a
-real commissioned local FBP1200 setup to validate device-specific modes and
+real commissioned local battery setup to validate device-specific modes and
 limits.
