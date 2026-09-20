@@ -2,7 +2,8 @@
 
 ## Install
 
-Install through HACS; do not copy component files into Home Assistant.
+House Battery is distributed as a **custom HACS integration**. Install through
+HACS; do not copy component files into Home Assistant.
 
 1. Open **HACS → Integrations** in Home Assistant.
 2. Open the overflow menu, choose **Custom repositories**, and add
@@ -13,9 +14,17 @@ Install through HACS; do not copy component files into Home Assistant.
 5. Add **House Battery** from **Settings → Devices & services → Add
    integration**.
 
+Alternatively, after the restart, use the **Add integration** button in the
+repository README. It opens the same config flow in the selected Home Assistant
+instance.
+
 The GitHub repository is the installation source. Adding it as a HACS custom
 repository lets HACS install and update the integration without a manual file
 copy or a local repository checkout on Home Assistant.
+
+Home Assistant 2025.1 or later is required. The local `brand/` icon and logo
+are shown by Home Assistant 2026.3 and later; they do not affect the
+integration's operation on earlier supported versions.
 
 House Battery connects to the battery itself. In the first setup screen, enter
 the battery's local IP address, TCP port (normally `8080`), and a display name.

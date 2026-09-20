@@ -1,0 +1,13 @@
+{
+  "services": {
+    "schedule_load": {
+      "service": "mdi:calendar-plus"
+    },
+    "clear_scheduled_loads": {
+      "service": "mdi:calendar-remove"
+    },
+    "export_data": {
+      "service": "mdi:file-export-outline"
+    }
+  }
+}

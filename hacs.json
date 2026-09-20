@@ -1,4 +1,5 @@
 {
+  "homeassistant": "2025.1.0",
   "name": "House Battery",
   "render_readme": true
 }

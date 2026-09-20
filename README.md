@@ -1,5 +1,15 @@
 # House Battery for Home Assistant
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/madslundt/House-battery/main/assets/house-battery-banner.png" alt="House Battery: local battery optimization for Home Assistant" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/madslundt/House-battery/actions/workflows/validate.yml"><img src="https://github.com/madslundt/House-battery/actions/workflows/validate.yml/badge.svg" alt="Validation status"></a>
+  <a href="https://github.com/hacs/integration"><img src="https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=flat-square" alt="HACS custom integration"></a>
+  <a href="https://www.home-assistant.io/"><img src="https://img.shields.io/badge/Home%20Assistant-2025.1%2B-41BDF5.svg?style=flat-square" alt="Home Assistant 2025.1 or later"></a>
+</p>
+
 House Battery is a local, deterministic optimizer for a compatible home
 battery. It learns the connected load, plans against every
 known electricity-price interval, and chooses `charge`, `grid`, or `battery`
@@ -46,6 +56,24 @@ external optimizer.
   never merely that the load is currently importing power.
 - A commissioning gate and separate **Automatic control** switch. Every new
   entry starts in safe shadow mode.
+
+## Install with HACS
+
+House Battery is a **custom HACS integration**. In Home Assistant, open
+**HACS → Integrations → ⋮ → Custom repositories**, add
+`https://github.com/madslundt/House-battery` as an **Integration**, then
+download **House Battery**. Restart Home Assistant when prompted and add it
+from **Settings → Devices & services**.
+
+After HACS has installed the integration and Home Assistant has restarted, you
+can start its config flow here:
+
+[![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start?domain=house_battery)
+
+Home Assistant 2025.1 or later is required. On Home Assistant 2026.3 and
+later, the included local icon and logo appear directly in the integration UI.
+Older supported versions retain full functionality and use the normal custom
+integration presentation.
 
 ## Quick safety rules
 
