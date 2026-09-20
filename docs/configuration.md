@@ -58,12 +58,15 @@ The integration reads common list attributes named `prices`, `raw_today`,
 `raw_tomorrow`, `today`, or `tomorrow`. Each row needs:
 
 - a timestamp field named `start`, `hour`, `time`, or `Time`;
-- an optional `end` (otherwise one hour is assumed); and
+- an optional `end`; and
 - a numeric `price`, `value`, or `Price`.
 
-Rows must use timezone-aware timestamps. Valid rows are normalized into
-15-minute slots. The optimizer uses only a contiguous future horizon and never
-invent missing price data.
+Rows must use timezone-aware timestamps. Explicit `end` times are retained.
+When `end` is omitted, the source cadence is inferred from adjacent `start`
+times (using the median gap for a final row); a single isolated row defaults to
+one hour. This lets hourly, quarter-hourly, and other regular sources keep
+their own duration. The optimizer uses only a contiguous future horizon and
+never invents missing price data.
 
 The optional external forecast uses exactly this format. It is disabled by
 default through **Use external price forecast**. While disabled, the forecast

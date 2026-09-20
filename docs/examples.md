@@ -143,7 +143,7 @@ extra-storage target, 85% round-trip efficiency, 0.35 DKK/kWh degradation
 cost, and 0.75 DKK/kWh minimum profit. The connected load is typically
 250–450 W overnight and 500–900 W in the evening. These examples show the
 decision shape; the actual plan still uses the learned load profile and every
-known 15-minute interval.
+contiguous known interval at the cadence supplied by the price provider.
 
 | Day | Known price pattern, DKK/kWh | Expected optimizer outcome | Why |
 | --- | --- | --- | --- |

@@ -37,8 +37,10 @@ estimate and readiness/sample counts are exposed by **Battery learning**.
 
 ## Planner
 
-The pure planner operates over only valid, chronological, contiguous,
-15-minute price slots. It builds a dynamic-programming state space:
+The pure planner operates over only valid, chronological, contiguous price
+slots. It retains each provider's interval duration, so hourly known prices can
+join quarter-hour external forecasts. It builds a dynamic-programming state
+space:
 
 ```text
 (stored-energy step, current action, remaining mode lock, transitions used)

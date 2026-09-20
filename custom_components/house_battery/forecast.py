@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from .models import PriceSlot
@@ -54,14 +55,21 @@ def extend_known_horizon(
 class ForecastAccuracy:
     """Persisted, one-shot comparisons between issued forecasts and actual prices."""
 
-    outstanding: dict[str, float] = field(default_factory=dict)
+    outstanding: dict[str, dict[str, str | float]] = field(default_factory=dict)
     errors_dkk_per_kwh: list[float] = field(default_factory=list)
     within_uncertainty: list[bool] = field(default_factory=list)
 
     def record_forecasts(self, slots: list[PriceSlot]) -> None:
         """Keep the first forecast seen for each interval for an honest score."""
         for slot in slots:
-            self.outstanding.setdefault(_key(slot), slot.price)
+            self.outstanding.setdefault(
+                _key(slot),
+                {
+                    "start": slot.start.isoformat(),
+                    "end": slot.end.isoformat(),
+                    "price": slot.price,
+                },
+            )
         self.outstanding = dict(list(self.outstanding.items())[-_MAX_SAMPLES:])
 
     def score_actual_prices(
@@ -69,12 +77,34 @@ class ForecastAccuracy:
     ) -> int:
         """Score forecast intervals once their actual price becomes known."""
         matched = 0
-        for slot in actual:
-            key = _key(slot)
-            forecast = self.outstanding.pop(key, None)
-            if forecast is None:
+        for key, forecast in list(self.outstanding.items()):
+            try:
+                start = datetime.fromisoformat(str(forecast["start"]))
+                end = datetime.fromisoformat(str(forecast["end"]))
+                predicted_price = float(forecast["price"])
+            except (KeyError, TypeError, ValueError):
+                self.outstanding.pop(key)
                 continue
-            error = forecast - slot.price
+            duration = (end - start).total_seconds()
+            overlapping = [
+                (
+                    max(
+                        0.0,
+                        (min(end, slot.end) - max(start, slot.start)).total_seconds(),
+                    ),
+                    slot.price,
+                )
+                for slot in actual
+                if slot.start < end and slot.end > start
+            ]
+            covered = sum(seconds for seconds, _ in overlapping)
+            if duration <= 0 or covered + 1e-6 < duration:
+                continue
+            actual_price = (
+                sum(seconds * price for seconds, price in overlapping) / covered
+            )
+            self.outstanding.pop(key)
+            error = predicted_price - actual_price
             self.errors_dkk_per_kwh.append(error)
             self.within_uncertainty.append(
                 abs(error) <= max(0.0, uncertainty_dkk_per_kwh)
@@ -130,11 +160,29 @@ class ForecastAccuracy:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ForecastAccuracy:
+        outstanding: dict[str, dict[str, str | float]] = {}
+        for key, value in data.get("outstanding", {}).items():
+            if isinstance(value, dict):
+                try:
+                    outstanding[str(key)] = {
+                        "start": str(value["start"]),
+                        "end": str(value["end"]),
+                        "price": float(value["price"]),
+                    }
+                except (KeyError, TypeError, ValueError):
+                    continue
+            elif isinstance(value, (int, float)):
+                try:
+                    start, end = str(key).split("|", maxsplit=1)
+                    outstanding[str(key)] = {
+                        "start": start,
+                        "end": end,
+                        "price": float(value),
+                    }
+                except ValueError:
+                    continue
         return cls(
-            outstanding={
-                str(key): float(value)
-                for key, value in data.get("outstanding", {}).items()
-            },
+            outstanding=outstanding,
             errors_dkk_per_kwh=[
                 float(value) for value in data.get("errors_dkk_per_kwh", [])
             ][-_MAX_SAMPLES:],

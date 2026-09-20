@@ -72,7 +72,7 @@ def test_price_rows_require_timezone_and_are_deduplicated() -> None:
     assert result[0].price == 1.1
 
 
-def test_hourly_price_rows_are_split_for_quarter_hour_load_learning() -> None:
+def test_hourly_price_rows_keep_the_provider_interval_duration() -> None:
     result = normalize_price_rows(
         [
             {
@@ -82,5 +82,5 @@ def test_hourly_price_rows_are_split_for_quarter_hour_load_learning() -> None:
             }
         ]
     )
-    assert len(result) == 4
-    assert all(slot.end - slot.start == timedelta(minutes=15) for slot in result)
+    assert len(result) == 1
+    assert result[0].end - result[0].start == timedelta(hours=1)

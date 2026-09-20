@@ -32,8 +32,8 @@ direct setup is released. There is no cloud account or external optimizer.
 
 ## What it provides
 
-- A 15-minute plan across contiguous actual price intervals, optionally
-  extended with an external forecast.
+- A plan across contiguous source price intervals (hourly, quarter-hourly, or
+  another valid cadence), optionally extended with an external forecast.
 - Continuous load learning plus conservative usable-capacity and efficiency
   estimates.
 - Expected and realized savings, throughput, cycles, estimated degradation,

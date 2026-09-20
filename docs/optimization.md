@@ -2,9 +2,9 @@
 
 ## What is optimized
 
-Every minute, House Battery validates local telemetry, normalizes price data
-to 15-minute intervals, predicts the connected load, and uses a deterministic
-dynamic-programming plan. The plan respects SOC bounds, capacity,
+Every minute, House Battery validates local telemetry, retains each price
+source's valid interval duration, predicts the connected load, and uses a
+deterministic dynamic-programming plan. The plan respects SOC bounds, capacity,
 charge/discharge power, round-trip losses, minimum mode duration, maximum
 daily transitions, switching cost, degradation cost, and the minimum required
 profit.
@@ -23,8 +23,10 @@ has to find a useful charge interval before it stores more energy.
 The optional **External price forecast entity** uses precisely the same list
 attribute format as known prices: `prices`, `raw_today`, `raw_tomorrow`,
 `today`, or `tomorrow`, with `start` (or `hour`/`time`) and `price` (or
-`value`). `end` is optional and defaults to one hour. Intervals are normalized
-to 15 minutes.
+`value`). Explicit `end` times are retained. Without an `end`, the interval is
+inferred from the source's adjacent start times; only an isolated row defaults
+to one hour. Known prices and forecasts may therefore use different cadences,
+such as hourly known prices and quarter-hour forecasts.
 
 Known prices remain authoritative. When **Use external price forecast** is
 off, forecast data are collected only for accuracy evidence. When it is on,
@@ -48,8 +50,10 @@ inside that conservative spread, the battery remains idle/grid-powered.
 `fair`, or `poor` from the first forecast recorded for each interval once the
 actual known price arrives. Its attributes include sample count, MAE, bias
 (forecast minus actual), and the percentage of samples inside your uncertainty
-buffer. Positive bias means forecasts tend to overstate prices. Use its
-evidence even while the forecast switch is disabled.
+buffer. Positive bias means forecasts tend to overstate prices. If the source
+cadences differ, the comparison uses the duration-weighted actual price over
+each forecast interval. Use its evidence even while the forecast switch is
+disabled.
 
 ## A realistic week
 

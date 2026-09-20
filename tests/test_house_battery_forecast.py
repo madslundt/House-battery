@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 from house_battery.forecast import ForecastAccuracy, extend_known_horizon
 from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
+from house_battery.price import normalize_price_rows
 
 
 def _slot(hour: int, price: float) -> PriceSlot:
@@ -28,6 +29,48 @@ def test_external_forecast_only_extends_known_horizon_conservatively() -> None:
     assert merged[1].uncertainty_dkk_per_kwh == 0.25
 
 
+def test_hourly_known_prices_and_quarterly_forecasts_keep_their_source_cadence() -> (
+    None
+):
+    """The planner can join a 60-minute known horizon to 15-minute forecasts."""
+    known = normalize_price_rows(
+        [
+            {
+                "start": "2026-01-01T00:00:00+00:00",
+                "end": "2026-01-01T01:00:00+00:00",
+                "price": 1.0,
+            }
+        ]
+    )
+    forecast_start = datetime(2026, 1, 1, 1, tzinfo=UTC)
+    forecast = normalize_price_rows(
+        [
+            {
+                "start": forecast_start + timedelta(minutes=minute),
+                "end": forecast_start + timedelta(minutes=minute + 15),
+                "price": 0.5,
+            }
+            for minute in range(0, 60, 15)
+        ]
+    )
+
+    merged = extend_known_horizon(known, forecast, uncertainty_dkk_per_kwh=0.25)
+
+    assert [slot.hours for slot in merged] == [1.0, 0.25, 0.25, 0.25, 0.25]
+
+
+def test_missing_end_uses_the_source_cadence_inferred_from_adjacent_starts() -> None:
+    """Quarter-hour rows without `end` do not silently become hourly prices."""
+    slots = normalize_price_rows(
+        [
+            {"start": f"2026-01-01T00:{minute:02d}:00+00:00", "price": 1.0}
+            for minute in (0, 15, 30)
+        ]
+    )
+
+    assert [slot.hours for slot in slots] == [0.25, 0.25, 0.25]
+
+
 def test_forecast_accuracy_scores_forecast_once_actual_price_is_known() -> None:
     """Accuracy reports absolute error, bias, and whether the error fit the buffer."""
     accuracy = ForecastAccuracy()
@@ -42,6 +85,30 @@ def test_forecast_accuracy_scores_forecast_once_actual_price_is_known() -> None:
     assert accuracy.mean_absolute_error_dkk_per_kwh == 0.20
     assert accuracy.mean_bias_dkk_per_kwh == 0.20
     assert accuracy.within_uncertainty_pct == 100.0
+
+
+def test_forecast_accuracy_compares_hourly_forecast_to_quarterly_actual_prices() -> (
+    None
+):
+    """Accuracy is duration-weighted when the two sources use different cadences."""
+    accuracy = ForecastAccuracy()
+    forecast = _slot(1, 1.20)
+    actual_start = forecast.start
+    actual = [
+        PriceSlot(
+            actual_start + timedelta(minutes=15 * index),
+            actual_start + timedelta(minutes=15 * (index + 1)),
+            price,
+        )
+        for index, price in enumerate((1.00, 1.10, 1.30, 1.40))
+    ]
+    accuracy.record_forecasts([forecast])
+
+    matched = accuracy.score_actual_prices(actual, uncertainty_dkk_per_kwh=0.25)
+
+    assert matched == 1
+    assert accuracy.samples == 1
+    assert accuracy.mean_absolute_error_dkk_per_kwh == 0.0
 
 
 def test_forecast_uncertainty_rejects_a_marginal_forecast_discharge() -> None:
