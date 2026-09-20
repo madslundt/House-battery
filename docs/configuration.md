@@ -5,7 +5,11 @@
 Before adding this integration, expose the FBP1200 through a **local** Home
 Assistant integration/control path that provides a verified Operating Mode
 `select` entity and the relevant telemetry. The implementation is designed to
-layer on that local adapter; it does not open a new TCP connection itself.
+layer on that local device provider; it does not open a new TCP connection,
+discover the FBP1200, or implement its device protocol itself. Install and
+validate that provider before adding this companion optimizer. The optimizer
+project is maintained at
+[github.com/madslundt/House-battery](https://github.com/madslundt/House-battery).
 
 You also need an electricity-price integration that exposes dated forecast
 rows. A current-price-only entity is insufficient for optimization because the
@@ -19,15 +23,17 @@ planner must compare future intervals.
 | Connected/house load power | `sensor` | Watts for load served by this battery. Do not use whole-house demand if the FBP1200 cannot serve all of it. |
 | Grid import power | `sensor` | Numeric watts. Used for accounting/telemetry. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
-| AFERIY Operating Mode | `select` | Must offer the verified local options `Charge`, `Idle`, and `Self-Gen/Zero Export`. |
+| FBP1200 Operating Mode | `select` | Must offer the verified local options `Charge`, `Idle`, and `Self-Gen/Zero Export`. |
 | Electricity price forecast entities | one or more `sensor` entities | Must contain dated price rows. |
 | Battery charge power | `sensor` | Measured W; required for evidence and learning. |
 | Battery discharge power | `sensor` | Measured W; required for evidence and learning. |
 
-Optional bindings are grid export power, PV power, fault state, online state,
-charge-power control, discharge-power control, native minimum-SOC control, and
-native maximum-SOC control. Bind all available native controls so device limits
-are synchronized whenever automatic control sends an action.
+Grid export power, PV power, fault state, online state, charge-power control,
+and discharge-power control are optional. Native minimum-SOC and maximum-SOC
+controls are optional while initially creating a shadow-only entry, but they
+are required before commissioning or enabling automatic control. Their native
+bounds are checked before control is enabled and their state is read back after
+an automatic limit write.
 
 ## Grid availability is not grid use
 
@@ -105,7 +111,7 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 ```
 
 - **Absolute emergency SOC**: device-level lower SOC value written through the
-  optional native minimum-SOC control during automatic commands. It is below
+  required native minimum-SOC control during automatic commands. It is below
   the normal economic reserve, preserving a last-resort buffer.
 - **Arbitrage reserve SOC**: planning floor. The optimizer never schedules a
   battery discharge below this value.

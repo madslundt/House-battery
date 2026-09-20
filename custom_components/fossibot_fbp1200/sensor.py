@@ -161,6 +161,14 @@ SENSORS = (
         precision=3,
     ),
     FbpSensorDescription(
+        key="lifetime_charge_kwh",
+        name="Battery charge total",
+        icon="mdi:battery-arrow-up",
+        unit=UnitOfEnergy.KILO_WATT_HOUR,
+        precision=3,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    FbpSensorDescription(
         key="lifetime_discharge_kwh",
         name="Battery discharge total",
         icon="mdi:battery-sync",

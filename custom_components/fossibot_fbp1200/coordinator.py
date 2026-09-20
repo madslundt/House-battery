@@ -12,7 +12,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .actuator import LocalControlAdapter
+from .actuator import LocalControlAdapter, soc_control_problems
 from .const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
@@ -86,16 +86,24 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             manufacturer="FOSSiBOT",
             model="FBP1200",
             name=self.entry.title,
-            configuration_url="https://github.com/MortUK/Aferiy-PS240-Local-",
+            configuration_url="https://github.com/madslundt/House-battery",
         )
 
     async def async_initialize(self) -> None:
         self.runtime = await self.store.load()
-        if self.runtime.execution_enabled and not self.config.get(
-            CONF_COMMISSIONED, False
-        ):
-            self.runtime.execution_enabled = False
-            await self.store.save(self.runtime)
+        self.runtime.load_learner.configure_time_zone(
+            dt_util.get_time_zone(self.hass.config.time_zone) or UTC
+        )
+        if self.runtime.execution_enabled:
+            problems = soc_control_problems(
+                self.hass,
+                self.config,
+                absolute_min_soc=self.runtime.settings["absolute_min_soc"],
+                maximum_soc=self.runtime.settings["opportunistic_target_soc"],
+            )
+            if not self.config.get(CONF_COMMISSIONED, False) or problems:
+                self.runtime.execution_enabled = False
+                await self.store.save(self.runtime)
 
     def _state(self, key: str):
         entity_id = self.config.get(key)
@@ -415,6 +423,18 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if enabled and not self.config.get(CONF_COMMISSIONED, False):
             raise ValueError(
                 "Commission the integration in Options before enabling control"
+            )
+        if enabled and (
+            problems := soc_control_problems(
+                self.hass,
+                self.config,
+                absolute_min_soc=self.runtime.settings["absolute_min_soc"],
+                maximum_soc=self.runtime.settings["opportunistic_target_soc"],
+            )
+        ):
+            raise ValueError(
+                "Automatic control requires commissioned native minimum and maximum "
+                f"SOC controls: {'; '.join(problems)}"
             )
         was_enabled = self.runtime.execution_enabled
         self.runtime.execution_enabled = enabled

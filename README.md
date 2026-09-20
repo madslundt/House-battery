@@ -5,6 +5,13 @@ learns the connected load, evaluates every currently known electricity-price
 interval, and selects `charge`, `grid`, or `battery` while accounting for
 battery losses, wear, operating limits, and anti-chatter limits.
 
+This is a **companion optimizer**, not an FBP1200 protocol implementation. It
+requires an already-installed local Home Assistant device-provider integration
+that exposes the FBP1200 telemetry and controls selected during setup. It does
+not discover the battery or open a TCP connection itself. Project source,
+releases, and issue tracking are at
+[github.com/madslundt/House-battery](https://github.com/madslundt/House-battery).
+
 It is deliberately conservative: battery energy is not spent to save a few
 cents, and extra charging is allowed only when the full known price spread is
 profitable after losses and degradation.
@@ -74,15 +81,15 @@ The config flow requires the following bindings.
 | Connected/house load power | Load that the battery can actually serve, in W. |
 | Grid import power | Imported grid power, in W. |
 | Grid available / on-grid state | A physical or device-reported on-grid state. |
-| AFERIY Operating Mode | The verified local `select` control. |
+| FBP1200 Operating Mode | The verified local `select` control. |
 | Electricity price forecast entities | Entities with dated price intervals. |
 | Battery charge power | Measured battery charging power, in W. |
 | Battery discharge power | Measured battery discharging power, in W. |
 
-Grid export, PV input, fault/online status, charge/discharge power controls,
-and native minimum/maximum SOC controls are optional but strongly recommended.
-The native SOC controls allow the optimizer to synchronize the hardware limits
-with its configured economic and emergency policy.
+Grid export, PV input, fault/online status, and charge/discharge power controls
+are optional. Native minimum/maximum SOC controls are required before
+commissioning and enabling automatic control; the optimizer verifies their
+bounds and synchronizes them with its economic and emergency policy.
 
 Full field semantics and the commissioning checklist are in
 [configuration](docs/configuration.md).

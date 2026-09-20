@@ -73,16 +73,20 @@ def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
         _optional(CONF_ONLINE, defaults): _entity(["sensor", "binary_sensor"]),
         _optional(CONF_CHARGE_POWER_CONTROL, defaults): _entity("number"),
         _optional(CONF_DISCHARGE_POWER_CONTROL, defaults): _entity("number"),
-        _optional(CONF_MIN_SOC_CONTROL, defaults): _entity("number"),
-        _optional(CONF_MAX_SOC_CONTROL, defaults): _entity("number"),
     }
     if options:
+        # The native SOC limits are mandatory before a user can complete the
+        # commissioning step. Runtime availability is checked again on enable.
+        fields[_required(CONF_MIN_SOC_CONTROL, defaults)] = _entity("number")
+        fields[_required(CONF_MAX_SOC_CONTROL, defaults)] = _entity("number")
         fields[
             vol.Required(
                 CONF_COMMISSIONED, default=defaults.get(CONF_COMMISSIONED, False)
             )
         ] = bool
     else:
+        fields[_optional(CONF_MIN_SOC_CONTROL, defaults)] = _entity("number")
+        fields[_optional(CONF_MAX_SOC_CONTROL, defaults)] = _entity("number")
         fields[vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, NAME))] = str
     return vol.Schema(fields)
 

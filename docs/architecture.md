@@ -3,7 +3,7 @@
 ## Local data flow
 
 ```text
-Local FBP1200 entities + price forecast + load measurement
+Local FBP1200 device-provider entities + price forecast + load measurement
                          │
                          ▼
                   coordinator (1 min)
@@ -17,8 +17,11 @@ Local FBP1200 entities + price forecast + load measurement
       native SOC/power controls + local Operating Mode select
 ```
 
-The integration never issues raw TCP commands or controls relays, grid wiring,
-or a transfer switch. The Home Assistant local adapter is the only actuator.
+The integration never issues raw TCP commands, discovers a device, or controls
+relays, grid wiring, or a transfer switch. A separate local Home Assistant
+FBP1200 device provider is the only actuator. This repository supplies the
+optimizer layer; it needs that provider's verified entities before it can be
+configured.
 
 ## Forecasting
 
@@ -81,10 +84,12 @@ higher ceiling.
 
 ## Accounting and degradation
 
-The evidence ledger is updated in 15-minute intervals using observed
-charge/discharge power, current price, expected load, and planned actions. It
-records estimated realized savings and charge/discharge energy for today,
-month, and lifetime.
+The evidence ledger is updated in 15-minute intervals from sampled observed
+connected-load power, grid import/export power, battery charge/discharge power,
+SOC, the current price, and the optimizer's current action. It records
+estimated realized savings and charge/discharge energy for today, month, and
+lifetime. Forecast load and future plan values are not treated as observed
+ledger inputs.
 
 Equivalent full cycles are lifetime battery discharge energy divided by usable
 capacity. Estimated degradation uses learned capacity when it is ready;

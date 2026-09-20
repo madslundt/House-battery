@@ -84,6 +84,7 @@ def _slot_transition(
     charge_efficiency = sqrt(settings.round_trip_efficiency)
     discharge_efficiency = charge_efficiency
     changed = action != state.action
+    is_locked_continuation = not changed and state.locked_minutes > 0
     transitions = state.transitions + int(changed)
     elapsed_minutes = max(1, round(slot.hours * 60))
     locked = (
@@ -104,14 +105,18 @@ def _slot_transition(
             settings.charge_power_w * slot.hours, headroom_wh / charge_efficiency
         )
         if input_wh <= settings.energy_step_wh / 4:
-            return None
-        charged_wh = input_wh * charge_efficiency
-        grid_wh += input_wh
-        reason = (
-            "Known low price justifies charging after losses, wear and profit threshold"
-        )
+            if not is_locked_continuation:
+                return None
+            reason = (
+                "Energy-neutral continuation while minimum mode duration is locked "
+                "at the charge target"
+            )
+        else:
+            charged_wh = input_wh * charge_efficiency
+            grid_wh += input_wh
+            reason = "Known low price justifies charging after losses, wear and profit threshold"
     elif action is Action.BATTERY:
-        if slot.price + 1e-9 < discharge_price_floor:
+        if slot.price + 1e-9 < discharge_price_floor and not is_locked_continuation:
             return None
         available_wh = max(0.0, energy_wh - minimum_step * settings.energy_step_wh)
         deliverable_wh = min(
@@ -120,10 +125,16 @@ def _slot_transition(
             available_wh * discharge_efficiency,
         )
         if deliverable_wh <= settings.energy_step_wh / 4:
-            return None
-        discharged_wh = deliverable_wh / discharge_efficiency
-        grid_wh -= deliverable_wh
-        reason = "Battery avoids expensive grid import and clears the configured economic margin"
+            if not is_locked_continuation:
+                return None
+            reason = (
+                "Energy-neutral continuation while minimum mode duration is locked "
+                "at the reserve"
+            )
+        else:
+            discharged_wh = deliverable_wh / discharge_efficiency
+            grid_wh -= deliverable_wh
+            reason = "Battery avoids expensive grid import and clears the configured economic margin"
 
     new_energy_wh = energy_wh + charged_wh - discharged_wh
     new_step = round(new_energy_wh / settings.energy_step_wh)

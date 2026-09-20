@@ -4,14 +4,14 @@
     "step": {
       "user": {
         "title": "Configure local FBP1200 optimization",
-        "description": "Bind sensors from AFERIY PS240 (Local) and your whole-home meter. Automatic control remains disabled until commissioned in Options.",
+        "description": "Bind sensors and controls from your local FOSSiBOT FBP1200 device provider and your whole-home meter. Automatic control remains disabled until commissioned in Options.",
         "data": {
           "name": "Name",
           "soc_entity": "Battery state of charge",
           "load_power_entity": "Connected/house load power",
           "grid_import_power_entity": "Grid import power",
           "grid_available_entity": "Grid available / on-grid state",
-          "operating_mode_entity": "AFERIY Operating Mode",
+          "operating_mode_entity": "FBP1200 Operating Mode",
           "price_entities": "Electricity price forecast entities",
           "grid_export_power_entity": "Grid export power (optional)",
           "battery_charge_power_entity": "Battery charge power",
@@ -21,8 +21,8 @@
           "online_entity": "Battery online entity (optional)",
           "charge_power_control_entity": "Charge power control (optional)",
           "discharge_power_control_entity": "Discharge power control (optional)",
-          "minimum_soc_control_entity": "Discharge limit control (optional)",
-          "maximum_soc_control_entity": "Charge limit control (optional)"
+          "minimum_soc_control_entity": "Discharge limit control (required before commissioning)",
+          "maximum_soc_control_entity": "Charge limit control (required before commissioning)"
         }
       }
     }
@@ -37,7 +37,7 @@
           "load_power_entity": "Connected/house load power",
           "grid_import_power_entity": "Grid import power",
           "grid_available_entity": "Grid available / on-grid state",
-          "operating_mode_entity": "AFERIY Operating Mode",
+          "operating_mode_entity": "FBP1200 Operating Mode",
           "price_entities": "Electricity price forecast entities",
           "grid_export_power_entity": "Grid export power (optional)",
           "battery_charge_power_entity": "Battery charge power",
@@ -47,8 +47,8 @@
           "online_entity": "Battery online entity (optional)",
           "charge_power_control_entity": "Charge power control (optional)",
           "discharge_power_control_entity": "Discharge power control (optional)",
-          "minimum_soc_control_entity": "Discharge limit control (optional)",
-          "maximum_soc_control_entity": "Charge limit control (optional)",
+          "minimum_soc_control_entity": "Discharge limit control (required for automatic control)",
+          "maximum_soc_control_entity": "Charge limit control (required for automatic control)",
           "commissioned": "I verified local control, read-back, limits, wiring, and legal export settings"
         }
       }

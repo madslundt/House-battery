@@ -3,6 +3,7 @@
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
@@ -25,6 +26,21 @@ def test_load_model_round_trips_through_persistence() -> None:
     learner.observe(when, 420)
     restored = LoadLearner.from_dict(learner.as_dict())
     assert restored.as_dict() == learner.as_dict()
+
+
+def test_load_profile_uses_configured_local_time_across_dst_offsets() -> None:
+    """The same Copenhagen wall-clock time must share one learning bucket."""
+    learner = LoadLearner(time_zone=ZoneInfo("Europe/Copenhagen"))
+    winter_utc = datetime(2026, 1, 5, 17, 0, tzinfo=UTC)
+    summer_utc = datetime(2026, 7, 6, 16, 0, tzinfo=UTC)
+
+    for week in range(4):
+        learner.observe(summer_utc - timedelta(weeks=week), 410)
+    learner.recent_w.clear()
+    learner.recent_w.extend([100] * 8)
+
+    assert learner.key(winter_utc) == learner.key(summer_utc) == "0:72"
+    assert learner.predict_w(summer_utc) > 100
 
 
 def test_battery_learning_needs_five_stable_samples() -> None:

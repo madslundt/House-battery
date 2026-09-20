@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, tzinfo
 from math import sqrt
 from statistics import median
 from typing import Any
@@ -41,10 +41,29 @@ class LoadLearner:
     recent_w: deque[float] = field(default_factory=lambda: deque(maxlen=8))
     observations: int = 0
     absolute_error_sum_w: float = 0.0
+    time_zone: tzinfo = field(default=UTC, repr=False, compare=False)
+    bucket_timezone: str | None = None
 
-    @staticmethod
-    def key(when: datetime) -> str:
-        return f"{when.weekday()}:{when.hour * 4 + when.minute // 15}"
+    def __post_init__(self) -> None:
+        if self.bucket_timezone is None:
+            self.bucket_timezone = _timezone_name(self.time_zone)
+
+    def configure_time_zone(self, time_zone: tzinfo) -> None:
+        """Set the Home Assistant local zone and discard incompatible buckets."""
+        name = _timezone_name(time_zone)
+        if self.bucket_timezone != name:
+            self.buckets.clear()
+            self.observations = 0
+            self.absolute_error_sum_w = 0.0
+            self.bucket_timezone = name
+        self.time_zone = time_zone
+
+    def key(self, when: datetime) -> str:
+        """Return the configured local weekday/quarter-hour bucket."""
+        if when.tzinfo is None:
+            raise ValueError("Load-learning timestamps must be timezone-aware")
+        local = when.astimezone(self.time_zone)
+        return f"{local.weekday()}:{local.hour * 4 + local.minute // 15}"
 
     def predict_w(self, when: datetime, fallback_w: float = 0.0) -> float:
         bucket = self.buckets.get(self.key(when))
@@ -93,6 +112,7 @@ class LoadLearner:
             "recent_w": list(self.recent_w),
             "observations": self.observations,
             "absolute_error_sum_w": self.absolute_error_sum_w,
+            "bucket_timezone": self.bucket_timezone,
         }
 
     @classmethod
@@ -107,7 +127,12 @@ class LoadLearner:
         learner.recent_w.extend(float(value) for value in data.get("recent_w", []))
         learner.observations = int(data.get("observations", 0))
         learner.absolute_error_sum_w = float(data.get("absolute_error_sum_w", 0))
+        learner.bucket_timezone = str(data.get("bucket_timezone", "UTC"))
         return learner
+
+
+def _timezone_name(time_zone: tzinfo) -> str:
+    return getattr(time_zone, "key", str(time_zone))
 
 
 @dataclass(slots=True)
