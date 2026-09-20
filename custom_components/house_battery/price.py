@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import pairwise
 from statistics import median
 from typing import Any
 
 from .models import PriceSlot
+
+
+@dataclass(frozen=True, slots=True)
+class PriceNormalization:
+    """Normalized slots together with enough evidence to reject bad inputs."""
+
+    slots: tuple[PriceSlot, ...]
+    source_rows: int
+    invalid_rows: int
 
 
 def _datetime(value: Any) -> datetime | None:
@@ -42,6 +52,11 @@ def _row(row: Any) -> tuple[datetime, datetime | None, float] | None:
 
 
 def normalize_price_rows(rows: Iterable[Any]) -> list[PriceSlot]:
+    """Return the valid source intervals without exposing input diagnostics."""
+    return list(normalize_price_rows_with_report(rows).slots)
+
+
+def normalize_price_rows_with_report(rows: Iterable[Any]) -> PriceNormalization:
     """Return sorted source intervals, inferring missing ends from their cadence.
 
     Price providers need not share a cadence: an hourly known-price feed and a
@@ -49,12 +64,20 @@ def normalize_price_rows(rows: Iterable[Any]) -> list[PriceSlot]:
     The final row without an ``end`` uses the source's median start-to-start
     interval; only a single isolated row falls back to one hour.
     """
-    parsed_rows = [parsed for value in rows if (parsed := _row(value)) is not None]
-    parsed_rows = [
-        row
-        for row in parsed_rows
-        if row[0].tzinfo is not None and (row[1] is None or row[1].tzinfo is not None)
-    ]
+    source_rows = 0
+    invalid_rows = 0
+    parsed_rows: list[tuple[datetime, datetime | None, float]] = []
+    for value in rows:
+        source_rows += 1
+        parsed = _row(value)
+        if (
+            parsed is None
+            or parsed[0].tzinfo is None
+            or (parsed[1] is not None and parsed[1].tzinfo is None)
+        ):
+            invalid_rows += 1
+            continue
+        parsed_rows.append(parsed)
     starts = sorted({start for start, _, _ in parsed_rows})
     gaps = [
         (later - earlier).total_seconds()
@@ -72,7 +95,11 @@ def normalize_price_rows(rows: Iterable[Any]) -> list[PriceSlot]:
         if interval_end <= start:
             continue
         normalized[(start, interval_end)] = PriceSlot(start, interval_end, price)
-    return sorted(normalized.values(), key=lambda item: item.start)
+    return PriceNormalization(
+        tuple(sorted(normalized.values(), key=lambda item: item.start)),
+        source_rows=source_rows,
+        invalid_rows=invalid_rows,
+    )
 
 
 def extract_rows(attributes: dict[str, Any]) -> list[Any]:

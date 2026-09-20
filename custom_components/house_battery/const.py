@@ -55,6 +55,7 @@ DEFAULT_SETTINGS: dict[str, float] = {
     "maximum_transitions_per_day": 4.0,
     "cycle_life": 6000.0,
     "forecast_uncertainty_dkk_per_kwh": 0.25,
+    "forecast_max_age_minutes": 180.0,
 }
 
 SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
@@ -74,6 +75,7 @@ SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
     "maximum_transitions_per_day": (1.0, 12.0, 1.0, None),
     "cycle_life": (500.0, 15000.0, 100.0, "cycles"),
     "forecast_uncertainty_dkk_per_kwh": (0.0, 10.0, 0.01, "DKK/kWh"),
+    "forecast_max_age_minutes": (5.0, 1440.0, 5.0, "min"),
 }
 
 TELEMETRY_STALE_AFTER = timedelta(minutes=5)

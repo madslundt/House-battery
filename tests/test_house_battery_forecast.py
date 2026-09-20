@@ -6,7 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.forecast import ForecastAccuracy, extend_known_horizon
+from house_battery.forecast import (
+    ForecastAccuracy,
+    assess_external_forecast,
+    extend_known_horizon,
+)
 from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 from house_battery.price import normalize_price_rows
@@ -147,3 +151,43 @@ def test_forecast_uncertainty_rejects_a_marginal_forecast_discharge() -> None:
     )
 
     assert all(slot.action is not Action.BATTERY for slot in plan.slots)
+
+
+def test_invalid_external_forecast_is_rejected_without_affecting_known_prices() -> None:
+    """Malformed external forecast data is unusable, not a partial plan input."""
+    assessment = assess_external_forecast(
+        [
+            {
+                "start": "2026-01-01T02:00:00+00:00",
+                "end": "2026-01-01T03:00:00+00:00",
+                "price": 0.50,
+            },
+            {"start": "not-a-date", "price": "broken"},
+        ],
+        now=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        reported_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        maximum_age=timedelta(hours=3),
+    )
+
+    assert assessment.status == "invalid"
+    assert not assessment.usable
+    assert assessment.slots == ()
+
+
+def test_stale_external_forecast_is_rejected_even_when_its_rows_are_valid() -> None:
+    """Old forecast data cannot extend an otherwise healthy known-price plan."""
+    assessment = assess_external_forecast(
+        [
+            {
+                "start": "2026-01-01T02:00:00+00:00",
+                "end": "2026-01-01T03:00:00+00:00",
+                "price": 0.50,
+            }
+        ],
+        now=datetime(2026, 1, 1, 4, tzinfo=UTC),
+        reported_at=datetime(2026, 1, 1, 0, tzinfo=UTC),
+        maximum_age=timedelta(hours=3),
+    )
+
+    assert assessment.status == "stale"
+    assert not assessment.usable

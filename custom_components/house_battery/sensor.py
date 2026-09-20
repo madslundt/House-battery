@@ -451,6 +451,8 @@ class FbpPriceForecastAccuracySensor(Fbp1200Entity, SensorEntity):
         keys = (
             "price_forecast_enabled",
             "price_forecast_source",
+            "price_forecast_status",
+            "price_forecast_last_updated",
             "price_forecast_available_slots",
             "price_forecast_used_slots",
             "price_forecast_samples",

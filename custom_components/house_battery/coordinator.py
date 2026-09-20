@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -31,7 +31,7 @@ from .const import (
     UPDATE_INTERVAL,
 )
 from .evidence import EvidenceCollector
-from .forecast import extend_known_horizon
+from .forecast import assess_external_forecast, extend_known_horizon
 from .health import get_health_problems
 from .models import Action, Plan, PlannerSettings, PriceSlot
 from .planner import optimize
@@ -69,6 +69,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_slot_count = 0
         self._forecast_used_slot_count = 0
         self._forecast_source: str | None = None
+        self._forecast_status = "not_configured"
+        self._forecast_last_updated: str | None = None
         self.actuator = LocalControlAdapter(
             hass,
             lambda: self.config,
@@ -144,10 +146,27 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         forecast_state = (
             self.hass.states.get(forecast_entity) if forecast_entity else None
         )
-        if forecast_state:
-            forecast_slots = normalize_price_rows(
-                extract_rows(dict(forecast_state.attributes))
+        self._forecast_last_updated = None
+        if forecast_entity is None:
+            self._forecast_status = "not_configured"
+        elif forecast_state is None or forecast_state.state.lower() in _BAD_STATES:
+            self._forecast_status = "unavailable"
+        else:
+            reported_at = (
+                getattr(forecast_state, "last_reported", None)
+                or forecast_state.last_updated
             )
+            self._forecast_last_updated = reported_at.isoformat()
+            assessment = assess_external_forecast(
+                extract_rows(dict(forecast_state.attributes)),
+                now=now,
+                reported_at=reported_at,
+                maximum_age=timedelta(
+                    minutes=self.runtime.settings["forecast_max_age_minutes"]
+                ),
+            )
+            self._forecast_status = assessment.status
+            forecast_slots = list(assessment.slots)
         self._forecast_slot_count = len(forecast_slots)
         before = self.runtime.forecast_accuracy.as_dict()
         if forecast_slots:
@@ -175,6 +194,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_used_slot_count = sum(
             slot.source == "forecast" for slot in slots
         )
+        if self._forecast_status == "available":
+            if not self.runtime.forecast_enabled:
+                self._forecast_status = "disabled"
+            elif not self._forecast_used_slot_count:
+                self._forecast_status = "no_contiguous_extension"
+            else:
+                self._forecast_status = "used"
         result: list[PriceSlot] = []
         for slot in slots:
             if slot.end <= now:
@@ -454,6 +480,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "learning_observations": self.runtime.load_learner.observations,
             "price_forecast_enabled": self.runtime.forecast_enabled,
             "price_forecast_source": self._forecast_source,
+            "price_forecast_status": self._forecast_status,
+            "price_forecast_last_updated": self._forecast_last_updated,
             "price_forecast_available_slots": self._forecast_slot_count,
             "price_forecast_used_slots": self._forecast_used_slot_count,
             "price_forecast_accuracy": self.runtime.forecast_accuracy.quality,

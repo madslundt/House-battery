@@ -33,6 +33,9 @@ off, forecast data are collected only for accuracy evidence. When it is on,
 the optimizer may use only an uninterrupted sequence of forecast intervals
 starting immediately after the last known interval. It never overwrites known
 prices, fills a gap in them, or uses forecasts without a known-price horizon.
+It also rejects an unavailable/unknown entity, malformed row, empty or expired
+horizon, and data older than **External price forecast maximum age**. These are
+forecast-only conditions: valid known-price planning remains in service.
 
 Set **External price forecast uncertainty** to the likely absolute forecast
 error in DKK/kWh. In a forecast interval, the optimizer evaluates charging at
@@ -54,6 +57,12 @@ buffer. Positive bias means forecasts tend to overstate prices. If the source
 cadences differ, the comparison uses the duration-weighted actual price over
 each forecast interval. Use its evidence even while the forecast switch is
 disabled.
+
+Check the forecast switch's `status` attribute before relying on a late-horizon
+plan. `used` means valid forecast slots extended the known horizon. `stale`,
+`invalid`, `empty`, `expired`, and `unavailable` mean they were deliberately
+ignored; `no_contiguous_extension` means valid rows did not join the published
+horizon exactly.
 
 ## A realistic week
 

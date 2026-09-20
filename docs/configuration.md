@@ -73,7 +73,15 @@ default through **Use external price forecast**. While disabled, the forecast
 is still compared to subsequently known prices for the **External price
 forecast accuracy** entity. When enabled, it can add only a contiguous sequence
 starting at the end of the known horizon; it cannot overwrite a known price or
-fill a gap.
+fill a gap. It is optional and isolated: an unavailable, malformed, empty,
+expired, or stale forecast is discarded without degrading known-price planning.
+
+The entity must have reported an update within **External price forecast maximum
+age** (180 minutes by default). Use a value that matches the forecast source's
+normal update cadence. The forecast entity's status exposes `used`, `disabled`,
+`unavailable`, `stale`, `invalid`, `empty`, `expired`, or
+`no_contiguous_extension`; only `used` contributes forecast intervals to a
+plan.
 
 Set **External price forecast uncertainty** (DKK/kWh) to a conservative
 absolute error allowance. The planner treats a forecast charge price as

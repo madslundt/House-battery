@@ -13,7 +13,7 @@ entity picker; names below are the stable, user-facing names.
 | **Grid available** | Whether an on-grid supply physically exists. | This is not grid import. `off` produces `OUTAGE` and stops economic control. |
 | **Optimizer problem** | `on` when required telemetry is stale, invalid, faulted, offline, or grid status is unknown. | Treat it as a stop signal. Its `problems` attribute names the failed binding. |
 | **Automatic control** | Explicit permission for House Battery to issue local mode/limit writes. | Leave off during setup. It cannot turn on until the entry is commissioned and native SOC controls pass validation. |
-| **Use external price forecast** | Enables forecast intervals after the end of known prices. | Leave it off while measuring forecast quality; when on, known prices still win and gaps remain unsafe. |
+| **Use external price forecast** | Enables valid, fresh forecast intervals after the end of known prices. | Leave it off while measuring forecast quality. Its `status` attribute explains `used`, `stale`, `invalid`, `empty`, or another non-use result; none of these affects known-price planning. |
 | **Force safe mode** | Button that turns automatic control off and requests the configured safe local mode. | Use immediately if real battery behavior disagrees with the plan. |
 
 Example: if **Current decision** says `battery` but **Battery mode** is `grid`, do
@@ -56,7 +56,7 @@ cycling is not worth it.
 | **Battery learning** | `learning` until both capacity and efficiency are reliable; attributes show sample counts/readiness. |
 | **Load learning coverage** | Percentage of the 7-day, 15-minute demand profile with enough observations. Higher is better. |
 | **Load forecast mean absolute error** | Typical absolute load-forecast error in W. A persistent high value means inspect the load sensor scope or add scheduled loads. |
-| **External price forecast accuracy** | `unknown`, `excellent`, `good`, `fair`, or `poor` based on forecast-versus-known-price samples. Attributes provide MAE, bias, sample count, buffer coverage, and forecast slot coverage. | A positive 0.18 DKK/kWh bias means the forecast is normally 0.18 too high; raise the uncertainty buffer or keep use disabled if that makes marginal cycles unsafe. |
+| **External price forecast accuracy** | `unknown`, `excellent`, `good`, `fair`, or `poor` based on forecast-versus-known-price samples. Attributes provide MAE, bias, sample count, buffer coverage, forecast slot coverage, source update time, and validation status. | A positive 0.18 DKK/kWh bias means the forecast is normally 0.18 too high; raise the uncertainty buffer or keep use disabled if that makes marginal cycles unsafe. |
 
 Example: if cycles rise by 12/month while realized monthly savings stay near
 zero, raise **Minimum required profit** from 0.75 to 1.00 DKK/kWh or raise
@@ -102,6 +102,7 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **Maximum daily mode transitions** | Daily switching budget. | Lower 4→2 for a quieter, more conservative system. |
 | **Cycle-life reference** | Fallback degradation model denominator. | Set it to the manufacturer-supported cycle rating; it does not change physical battery behavior. |
 | **External price forecast uncertainty** | Conservative error allowance for external price forecasts. | Set 0.25 DKK/kWh if the forecast's MAE is about 0.20; forecast charging is evaluated 0.25 higher and discharge 0.25 lower. |
+| **External price forecast maximum age** | How recent the configured forecast entity must be before it is usable. | Keep 180 minutes for a source that refreshes hourly; reduce it to 60 for a fast-changing intraday feed, or raise it only if the provider is reliably slower. |
 
 Change one number at a time. Observe at least several similar tariff days, then
 compare **realized savings**, **equivalent cycles**, forecast error, and the

@@ -78,6 +78,7 @@ class FbpExternalForecastSwitch(Fbp1200Entity, SwitchEntity):
                 "price_forecast_available_slots", 0
             ),
             "used_slots": self.coordinator.data.get("price_forecast_used_slots", 0),
+            "status": self.coordinator.data.get("price_forecast_status"),
             "safety": "Known prices always win; only a contiguous extension is used.",
         }
 

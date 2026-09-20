@@ -3,12 +3,48 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .models import PriceSlot
+from .price import normalize_price_rows_with_report
 
 _MAX_SAMPLES = 1_000
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastAssessment:
+    """Validation result for an optional external forecast source."""
+
+    status: str
+    slots: tuple[PriceSlot, ...] = ()
+
+    @property
+    def usable(self) -> bool:
+        return self.status == "available"
+
+
+def assess_external_forecast(
+    rows: list[Any],
+    *,
+    now: datetime,
+    reported_at: datetime | None,
+    maximum_age: timedelta,
+) -> ForecastAssessment:
+    """Fail closed for an optional forecast while leaving known prices untouched."""
+    if reported_at is None or reported_at.tzinfo is None:
+        return ForecastAssessment("unavailable")
+    if now - reported_at > maximum_age:
+        return ForecastAssessment("stale")
+    report = normalize_price_rows_with_report(rows)
+    if report.source_rows == 0:
+        return ForecastAssessment("empty")
+    if report.invalid_rows:
+        return ForecastAssessment("invalid")
+    slots = tuple(slot for slot in report.slots if slot.end > now)
+    if not slots:
+        return ForecastAssessment("expired")
+    return ForecastAssessment("available", slots)
 
 
 def _key(slot: PriceSlot) -> str:
