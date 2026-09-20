@@ -1,6 +1,6 @@
 {
-  "domain": "fossibot_fbp1200",
-  "name": "FOSSiBOT FBP1200 Optimizer",
+  "domain": "house_battery",
+  "name": "House Battery",
   "after_dependencies": ["aecc_battery", "recorder"],
   "codeowners": ["@madslundt"],
   "config_flow": true,

@@ -1,4 +1,4 @@
-# FOSSiBOT FBP1200 Optimizer for Home Assistant
+# House Battery for Home Assistant
 
 Local, deterministic battery arbitrage for a FOSSiBOT FBP1200. The integration
 learns the connected load, evaluates every currently known electricity-price
@@ -59,16 +59,16 @@ integration directory into your Home Assistant configuration directory, then
 restart Home Assistant:
 
 ```text
-<config>/custom_components/fossibot_fbp1200/
+<config>/custom_components/house_battery/
 ```
 
-Add **FOSSiBOT FBP1200 Optimizer** from *Settings → Devices & services → Add
+Add **House Battery** from *Settings → Devices & services → Add
 integration*. It does not discover a battery; instead, its config flow binds
 the local entities already supplied by your FBP1200/local-control setup and
 your electricity-price integration.
 
 For development, this repository keeps the component in
-`custom_components/fossibot_fbp1200` so Home Assistant can load it directly
+`custom_components/house_battery` so Home Assistant can load it directly
 from the project configuration directory.
 
 ## First configuration
@@ -191,9 +191,9 @@ load, data export, and tuning are in [docs/examples.md](docs/examples.md).
 
 ## Evidence and troubleshooting
 
-Use *Settings → Devices & services → FOSSiBOT FBP1200 Optimizer → Download
+Use *Settings → Devices & services → House Battery → Download
 diagnostics* for a redacted snapshot. The
-`fossibot_fbp1200.export_data` service returns a structured JSON evidence
+`house_battery.export_data` service returns a structured JSON evidence
 bundle with settings, current status, load/battery models, interval ledger,
 decisions, and scheduled loads for offline or LLM analysis.
 
@@ -201,12 +201,21 @@ decisions, and scheduled loads for offline or LLM analysis.
 Do not bypass it by inventing a state or switching on automatic control; repair
 the entity mapping or local battery connection first.
 
+## Rename migration
+
+This release changes the Home Assistant integration domain from
+`fossibot_fbp1200` to `house_battery`. Home Assistant does not migrate a custom
+integration domain in place. Before installing this version, disable automatic
+control, remove the old entry, install `custom_components/house_battery`,
+restart Home Assistant, and add **House Battery** again. Re-enter the bindings
+and commission only after validating the replacement entry in shadow mode.
+
 ## Development
 
 ```bash
-uvx ruff check custom_components/fossibot_fbp1200 tests/test_fossibot_fbp1200_*.py
+uvx ruff check custom_components/house_battery tests/test_house_battery_*.py
 uv run --with pytest --with 'homeassistant>=2025.1' \
-  pytest -q tests/test_fossibot_fbp1200_*.py
+  pytest -q tests/test_house_battery_*.py
 ```
 
 The core planner, policy, learning, and accounting behavior is covered by unit

@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from fossibot_fbp1200.models import PlannerSettings, PriceSlot
-from fossibot_fbp1200.policy import apply_storage_policy, parse_grid_available
+from house_battery.models import PlannerSettings, PriceSlot
+from house_battery.policy import apply_storage_policy, parse_grid_available
 
 
 def settings() -> PlannerSettings:

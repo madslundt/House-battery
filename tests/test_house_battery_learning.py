@@ -7,8 +7,8 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from fossibot_fbp1200.learning import BatteryLearner, LoadLearner
-from fossibot_fbp1200.price import normalize_price_rows
+from house_battery.learning import BatteryLearner, LoadLearner
+from house_battery.price import normalize_price_rows
 
 
 def test_load_profile_ramps_historical_weight_after_four_observations() -> None:

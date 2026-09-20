@@ -2,8 +2,8 @@
 
 from datetime import timedelta
 
-DOMAIN = "fossibot_fbp1200"
-NAME = "FOSSiBOT FBP1200 Optimizer"
+DOMAIN = "house_battery"
+NAME = "House Battery"
 PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button"]
 UPDATE_INTERVAL = timedelta(minutes=1)
 STORAGE_VERSION = 1

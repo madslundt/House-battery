@@ -7,7 +7,7 @@ from homeassistant.components.sensor import SensorStateClass
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from fossibot_fbp1200.sensor import SENSORS
+from house_battery.sensor import SENSORS
 
 
 def test_lifetime_charge_is_exposed_as_cumulative_energy() -> None:

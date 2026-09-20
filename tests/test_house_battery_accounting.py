@@ -8,8 +8,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from fossibot_fbp1200.accounting import EnergyLedger, IntervalAccumulator
-from fossibot_fbp1200.models import Action
+from house_battery.accounting import EnergyLedger, IntervalAccumulator
+from house_battery.models import Action
 
 
 def test_complete_battery_interval_books_net_savings_after_wear() -> None:

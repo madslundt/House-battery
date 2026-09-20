@@ -13,9 +13,9 @@ import voluptuous as vol
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from fossibot_fbp1200.actuator import LocalControlAdapter
-from fossibot_fbp1200.config_flow import _schema
-from fossibot_fbp1200.const import (
+from house_battery.actuator import LocalControlAdapter
+from house_battery.config_flow import _schema
+from house_battery.const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
@@ -28,9 +28,9 @@ from fossibot_fbp1200.const import (
     CONF_PRICE_ENTITIES,
     CONF_SOC,
 )
-from fossibot_fbp1200.coordinator import Fbp1200Coordinator
-from fossibot_fbp1200.models import Action
-from fossibot_fbp1200.runtime import RuntimeState
+from house_battery.coordinator import Fbp1200Coordinator
+from house_battery.models import Action
+from house_battery.runtime import RuntimeState
 
 
 class FakeStates:

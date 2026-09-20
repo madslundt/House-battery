@@ -80,7 +80,7 @@ When a planned load is known, add it to the learned forecast. This service
 replans immediately:
 
 ```yaml
-service: fossibot_fbp1200.schedule_load
+service: house_battery.schedule_load
 data:
   start: "2026-09-21T01:00:00+02:00"
   end: "2026-09-21T03:00:00+02:00"
@@ -91,7 +91,7 @@ data:
 With more than one optimizer entry, include its config-entry ID:
 
 ```yaml
-service: fossibot_fbp1200.schedule_load
+service: house_battery.schedule_load
 data:
   config_entry_id: 01JABCDEF0123456789
   start: "2026-09-21T22:00:00+02:00"
@@ -103,7 +103,7 @@ data:
 Clear outstanding scheduled loads when they are no longer relevant:
 
 ```yaml
-service: fossibot_fbp1200.clear_scheduled_loads
+service: house_battery.clear_scheduled_loads
 data: {}
 ```
 
@@ -113,7 +113,7 @@ Run this from Developer Tools → Actions. Home Assistant displays the returned
 JSON response, which can be saved for offline analysis:
 
 ```yaml
-service: fossibot_fbp1200.export_data
+service: house_battery.export_data
 data: {}
 ```
 
@@ -135,3 +135,28 @@ without reviewing the data first.
    first fresh refresh intentionally sends no write.
 6. Keep the Force safe mode button accessible. Use it immediately if telemetry,
    device behavior, or electrical behavior differs from the plan.
+
+## One realistic fluctuating-price week
+
+Assume a 1.958 kWh battery, 20% arbitrage reserve, 90% normal target, 100%
+extra-storage target, 85% round-trip efficiency, 0.35 DKK/kWh degradation
+cost, and 0.75 DKK/kWh minimum profit. The connected load is typically
+250–450 W overnight and 500–900 W in the evening. These examples show the
+decision shape; the actual plan still uses the learned load profile and every
+known 15-minute interval.
+
+| Day | Known price pattern, DKK/kWh | Expected optimizer outcome | Why |
+| --- | --- | --- | --- |
+| Monday | 1.92 overnight, 2.08 midday, 2.31 evening | `grid` throughout | The 0.39 spread is below losses, degradation, and required profit. Cycling would cost more than it saves. |
+| Tuesday | 0.42 at 02:00–05:00, 2.75 at 17:00–20:00 | Charge only toward 90%, then discharge to the 20% reserve in the evening | The effective margin is large enough to pay for a cycle, but the extra-storage threshold is not necessarily needed once the planned evening load is covered. |
+| Wednesday | 0.68 overnight, 1.05 evening | Mostly `grid`; perhaps retain energy acquired earlier | The 0.37 spread does not justify a new charge/discharge cycle. |
+| Thursday | 0.18 from 01:00–04:00, 4.35 from 17:00–21:00 | Enable extra storage up to 100%, then discharge only against forecast load | Raw spread exceeds the configured 2.00 DKK/kWh threshold and remains profitable after efficiency and wear. The extra target permits, but does not force, more charging. |
+| Friday | 1.45 most of the day, 2.10 evening | `grid` or hold reserve | Avoids chattering for a marginal 0.65 spread. |
+| Saturday | -0.05 for two hours, 1.80 later | Charge if SOC headroom and known future load justify it; otherwise hold | Negative/very low input price can be attractive, but the planner still respects the target, minimum mode duration, and transition budget. |
+| Sunday | 0.55 overnight, 3.20 evening, large scheduled dishwasher load at 19:00 | Charge ahead of the high-price window and reserve energy for the scheduled load | `house_battery.schedule_load` adds the dishwasher demand to the forecast, making the decision explainable rather than accidental. |
+
+For Thursday, the visible **Extra storage policy** attributes should show
+`active`, the effective target as `100`, the known spread near `4.17`, and a
+positive effective margin. For Monday and Friday it should remain `normal`.
+The **Operation plan** blocks show when the plan chose `charge`, `grid`, or
+`battery`, with the SOC range and expected savings for each block.

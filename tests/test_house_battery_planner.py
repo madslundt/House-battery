@@ -8,8 +8,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from fossibot_fbp1200.models import Action, PlannerSettings, PriceSlot
-from fossibot_fbp1200.planner import optimize
+from house_battery.models import Action, PlannerSettings, PriceSlot
+from house_battery.planner import optimize
 
 BASE = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
 

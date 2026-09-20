@@ -105,7 +105,7 @@ groups adjacent identical actions into readable blocks. A bounded decision
 history stores changes in state/reason with timestamp, SOC, price, and command
 outcome.
 
-Call `fossibot_fbp1200.export_data` to return the complete local evidence
+Call `house_battery.export_data` to return the complete local evidence
 bundle:
 
 - current settings and status;
