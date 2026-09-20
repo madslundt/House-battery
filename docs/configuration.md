@@ -2,13 +2,11 @@
 
 ## Prerequisites
 
-Before adding this integration, expose the battery through a **local** Home
-Assistant integration/control path that provides a verified Operating Mode
-`select` entity and the relevant telemetry. The implementation is designed to
-layer on that local device provider while the direct local-TCP path completes
-hardware validation. Install and validate the provider before enabling the
-optimizer. The optimizer
-project is maintained at
+Before adding this integration, give the FBP1200 a stable local IP address.
+House Battery connects to its local TCP interface directly: enter the IP,
+port (normally `8080`), and device name, then complete the read-only telemetry
+check. It creates battery telemetry, native SOC-limit, and operating-mode
+entities itself. The optimizer project is maintained at
 [github.com/madslundt/House-battery](https://github.com/madslundt/House-battery).
 
 You also need an electricity-price integration that exposes dated **known**
@@ -16,26 +14,21 @@ rows. A current-price-only entity is insufficient because the planner compares
 future intervals. An external forecast entity is optional and never replaces
 those known rows.
 
-## Required bindings
+## Household and tariff inputs
 
 | Config-flow field | Expected entity | Notes |
 | --- | --- | --- |
-| Battery state of charge | `sensor` | Numeric percentage from 0 to 100. |
 | Connected/house load power | `sensor` | Watts for load served by this battery. Do not use whole-house demand if the battery cannot serve all of it. |
 | Grid import power | `sensor` | Numeric watts. Used for accounting/telemetry. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
-| Battery Operating Mode | `select` | Must offer the verified local options `Charge`, `Idle`, and `Self-Gen/Zero Export`. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
 | External price forecast entity | optional `sensor` | Same row format; can extend the horizon only after the last known interval. |
-| Battery charge power | `sensor` | Measured W; required for evidence and learning. |
-| Battery discharge power | `sensor` | Measured W; required for evidence and learning. |
 
-Grid export power, PV power, fault state, online state, charge-power control,
-and discharge-power control are optional. Native minimum-SOC and maximum-SOC
-controls are optional while initially creating a shadow-only entry, but they
-are required before commissioning or enabling automatic control. Their native
-bounds are checked before control is enabled and their state is read back after
-an automatic limit write.
+Grid export power, PV power, fault state, and online state are optional.
+Battery SOC, charge/discharge power, the **Operating mode** selector, and the
+native minimum/maximum SOC controls come from the direct connection. Native
+SOC limits are read back after every automatic limit write and checked again
+before control can be enabled.
 
 ## Grid availability is not grid use
 
@@ -100,21 +93,21 @@ The adapter uses exactly these proven local options:
 | `battery` | `Self-Gen/Zero Export` |
 | `safe` | `Self-Gen/Zero Export` |
 
-The configured Operating Mode is read back immediately after a command. The
-measured charge/discharge-power entities are the physical confirmation of what
-the battery is actually doing.
+**Operating mode** shows the last command acknowledged by the battery's local
+interface. The vendor app can change the mode separately, so measured
+charge/discharge power remains the physical confirmation of actual behaviour.
 
 ## Commissioning checklist
 
 New entries remain in `SHADOW` and cannot turn on **Automatic control** until
 you mark the integration commissioned in its Options. Commission only after:
 
-1. Confirming all required entities are current and represent the actual
-   battery/load path.
+1. Confirming the direct battery entities and the selected household inputs are
+   current and represent the actual battery/load path.
 2. Verifying that the grid-available entity changes accurately during an
    on-grid/off-grid test or approved simulation.
-3. Manually checking each mode through the local battery control and confirming
-   the Operating Mode read-back and measured power response.
+3. Manually checking each mode through **Operating mode** and confirming the
+   local command and measured power response.
 4. Checking the native minimum/maximum SOC controls and the resulting device
    behavior. In particular, understand what the battery does at its minimum
    SOC when the grid is absent.

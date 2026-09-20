@@ -10,10 +10,13 @@ controller, or battery-management system. Battery firmware and the installed
 local device provider remain responsible for electrical protection and hard
 limits.
 
-The integration binds to local Home Assistant entities supplied by your
-battery provider. A fail-closed local-TCP compatibility layer is included but
-is still being validated on real hardware; use a proven local provider until
-direct setup is released. There is no cloud account or external optimizer.
+The integration connects directly to a compatible FBP1200 through its local
+TCP interface. Setup starts with the battery IP address, port (normally 8080),
+and a device name; it then creates the battery telemetry, native SOC-limit,
+and operating-mode entities itself. Home load, physical on-grid state, and
+electricity-price entities are still selected separately because they are not
+reported reliably by the battery protocol. There is no cloud account or
+external optimizer.
 
 ## Start here
 

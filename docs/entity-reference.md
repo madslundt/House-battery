@@ -9,7 +9,8 @@ entity picker; names below are the stable, user-facing names.
 | --- | --- | --- |
 | **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. Read its `reason` attribute first when it is not active. |
 | **Current decision** | The action the current plan wants now: `charge`, `grid`, `battery`, or `safe`. | Compare it with **Battery mode** to see planned versus observed behavior. |
-| **Battery mode** | Mode read back from the configured local battery control. | `charge` maps to `Charge`; `grid` maps to `Idle`; `battery` maps to self-consumption/zero-export. Physical power sensors remain the final evidence. |
+| **Battery mode** | Last local operating-mode command. | `charge` maps to `Charge`; `grid` maps to `Idle`; `battery` maps to self-consumption/zero-export. Physical power sensors remain the final evidence. |
+| **Operating mode** | Direct local TCP selector for `Charge`, `Idle`, and `Self-Gen/Zero Export`. | This is a commanded state; vendor-app changes are not guaranteed to appear here. |
 | **Grid available** | Whether an on-grid supply physically exists. | This is not grid import. `off` produces `OUTAGE` and stops economic control. |
 | **Optimizer problem** | `on` when required telemetry is stale, invalid, faulted, offline, or grid status is unknown. | Treat it as a stop signal. Its `problems` attribute names the failed binding. |
 | **Automatic control** | Explicit permission for House Battery to issue local mode/limit writes. | Leave off during setup. It cannot turn on until the entry is commissioned and native SOC controls pass validation. |
@@ -24,10 +25,11 @@ provider, and the mode read-back before re-enabling automatic control.
 
 | Entity | Plain-language description |
 | --- | --- |
-| **Battery state of charge** | Current usable battery percentage reported by the bound battery sensor. |
+| **Battery state of charge** | Current usable battery percentage reported directly by the FBP1200. |
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
 | **Grid import/export power** | Current power bought from/sent to the grid; used for evidence and accounting. |
 | **Battery charge/discharge power** | Measured instantaneous battery flow; used for learning, throughput, and realized savings estimates. |
+| **Native minimum/maximum SOC** | Allowlisted battery hardware SOC registers. | They are read back after changes and used as the direct control limits. |
 | **PV input power** | Optional measured solar input used to reduce expected net load. |
 | **Current electricity price** | Price for the current known price interval. |
 | **Expected plan savings** | Forecast saving across the current known horizon versus buying expected load from grid. It is a forecast, not cash earned. |

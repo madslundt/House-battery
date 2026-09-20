@@ -211,6 +211,48 @@ def test_command_confirms_limits_then_mode_after_event_queue_drains() -> None:
     assert hass.flushes >= 2
 
 
+def test_direct_tcp_command_uses_allowlisted_client_and_updates_commanded_mode() -> None:
+    class DirectClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def async_set_limits(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("limits", minimum, maximum))
+
+        async def async_set_mode(
+            self, mode: str, power: int, *, min_soc: int, max_soc: int
+        ) -> None:
+            self.calls.append(("mode", mode, power, min_soc, max_soc))
+
+        async def async_set_self_consumption(self) -> None:
+            self.calls.append(("self_consumption",))
+
+    state = runtime()
+    direct = DirectClient()
+    modes: list[str] = []
+
+    async def save() -> None:
+        return None
+
+    adapter = LocalControlAdapter(
+        FakeHass(FakeStates({}), FakeServices(FakeStates({}))),
+        config,
+        lambda: state,
+        save,
+        lambda: direct,
+        modes.append,
+    )
+
+    success, result = asyncio.run(
+        adapter.async_command(Action.CHARGE, datetime.now(UTC), target_soc=90)
+    )
+
+    assert success
+    assert "SOC limits read back" in result
+    assert direct.calls == [("limits", 10, 90), ("mode", "Charge", 1200, 10, 90)]
+    assert modes == ["Charge"]
+
+
 def test_command_disables_control_when_operating_mode_readback_is_stale() -> None:
     control, state, services, hass = adapter(apply_updates=False)
     hass.states.get("number.fbp_min_soc").state = "10"

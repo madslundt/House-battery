@@ -111,6 +111,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload platforms and persist the latest local evidence."""
     coordinator: Fbp1200Coordinator = entry.runtime_data
     await coordinator.store.save(coordinator.runtime)
+    if coordinator.local_client is not None:
+        await coordinator.local_client.async_close()
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)

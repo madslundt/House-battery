@@ -3,10 +3,12 @@
   "config": {
     "step": {
       "user": {
-        "title": "Configure local battery optimization",
-        "description": "Bind sensors and controls from your local battery provider and your whole-home meter. Automatic control remains disabled until commissioned in Options.",
+        "title": "Connect FBP1200 locally",
+        "description": "Enter the battery connection details. House Battery checks local telemetry before creating the device; automatic control remains disabled until commissioned in Options.",
         "data": {
           "name": "Name",
+          "host": "Battery IP address",
+          "port": "TCP port",
           "soc_entity": "Battery state of charge",
           "load_power_entity": "Connected/house load power",
           "grid_import_power_entity": "Grid import power",
@@ -25,14 +27,32 @@
           "minimum_soc_control_entity": "Discharge limit control (required before commissioning)",
           "maximum_soc_control_entity": "Charge limit control (required before commissioning)"
         }
+      },
+      "household": {
+        "title": "Connect household and tariff data",
+        "description": "Battery telemetry and controls are created directly from the local FBP1200 connection. Select only the independent household and tariff sources.",
+        "data": {
+          "load_power_entity": "Connected/house load power",
+          "grid_import_power_entity": "Grid import power",
+          "grid_available_entity": "Grid available / on-grid state",
+          "price_entities": "Known electricity-price entities",
+          "price_forecast_entity": "External price forecast entity (optional)",
+          "grid_export_power_entity": "Grid export power (optional)",
+          "pv_power_entity": "PV power (optional)",
+          "fault_entity": "Battery fault entity (optional)",
+          "online_entity": "Battery online entity (optional)"
+        }
       }
+    },
+    "error": {
+      "cannot_connect": "Could not read compatible local battery telemetry. Check the IP address, port, and that the vendor app is not holding the only local session."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Battery bindings and commissioning",
-        "description": "Commissioned permits the Active control switch to write only through the bound local Operating Mode entity. Verify each mode and read-back before enabling it.",
+        "description": "Commissioned permits the Active control switch to issue local battery commands. Verify each mode, SOC limit, and physical power response before enabling it.",
         "data": {
           "soc_entity": "Battery state of charge",
           "load_power_entity": "Connected/house load power",

@@ -4,7 +4,7 @@ from datetime import timedelta
 
 DOMAIN = "house_battery"
 NAME = "House Battery"
-PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button"]
+PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch", "button"]
 UPDATE_INTERVAL = timedelta(minutes=1)
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.state"
@@ -27,6 +27,10 @@ CONF_MAX_SOC_CONTROL = "maximum_soc_control_entity"
 CONF_PRICE_ENTITIES = "price_entities"
 CONF_PRICE_FORECAST_ENTITY = "price_forecast_entity"
 CONF_COMMISSIONED = "commissioned"
+
+# A direct local connection is the default setup path. The entity keys above
+# remain supported for entries created before direct local support existed.
+DEFAULT_PORT = 8080
 
 ACTION_CHARGE = "charge"
 ACTION_GRID = "grid"

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from homeassistant.components.number import NumberEntity, NumberMode
+from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -52,7 +53,17 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: Fbp1200Coordinator = entry.runtime_data
-    async_add_entities(FbpSettingNumber(coordinator, key) for key in SETTING_NAMES)
+    entities: list[NumberEntity] = [
+        FbpSettingNumber(coordinator, key) for key in SETTING_NAMES
+    ]
+    if coordinator.is_direct_local:
+        entities.extend(
+            [
+                FbpNativeSocNumber(coordinator, "minimum"),
+                FbpNativeSocNumber(coordinator, "maximum"),
+            ]
+        )
+    async_add_entities(entities)
 
 
 class FbpSettingNumber(Fbp1200Entity, NumberEntity):
@@ -95,3 +106,36 @@ class FbpSettingNumber(Fbp1200Entity, NumberEntity):
                 "Absolute emergency SOC ≤ arbitrage reserve < normal target ≤ extra-storage target is required"
             )
         await self.coordinator.async_set_setting(self.key, value)
+
+
+class FbpNativeSocNumber(Fbp1200Entity, NumberEntity):
+    """Directly expose the battery's two allowlisted native SOC registers."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_device_class = NumberDeviceClass.BATTERY
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, coordinator: Fbp1200Coordinator, key: str) -> None:
+        super().__init__(coordinator, f"native_{key}_soc")
+        self.key = key
+        self._attr_name = (
+            "Native minimum SOC" if key == "minimum" else "Native maximum SOC"
+        )
+        self._attr_icon = (
+            "mdi:battery-lock" if key == "minimum" else "mdi:battery-charging-100"
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.data.get(f"native_{self.key}_soc")
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.data.get(f"native_{self.key}_soc") is not None
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_native_soc_limit(self.key, value)

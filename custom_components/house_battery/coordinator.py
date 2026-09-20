@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -27,12 +28,18 @@ from .const import (
     CONF_PV_POWER,
     CONF_SOC,
     DECISION_HISTORY_LIMIT,
+    DEFAULT_PORT,
     DOMAIN,
+    MODE_BATTERY,
+    MODE_CHARGE,
+    MODE_GRID,
+    MODE_SAFE,
     UPDATE_INTERVAL,
 )
 from .evidence import EvidenceCollector
 from .forecast import assess_external_forecast, extend_known_horizon
 from .health import get_health_problems
+from .local_tcp import FbpLocalSnapshot, FbpLocalTcpClient, LocalProtocolError
 from .models import Action, Plan, PlannerSettings, PriceSlot
 from .planner import optimize
 from .policy import (
@@ -71,11 +78,23 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_source: str | None = None
         self._forecast_status = "not_configured"
         self._forecast_last_updated: str | None = None
+        self.local_client = (
+            FbpLocalTcpClient(
+                entry.data[CONF_HOST], int(entry.data.get("port", DEFAULT_PORT))
+            )
+            if entry.data.get(CONF_HOST)
+            else None
+        )
+        self._local_snapshot: FbpLocalSnapshot | None = None
+        self._local_controls: dict[str, str] = {}
+        self._commanded_local_mode = MODE_SAFE
         self.actuator = LocalControlAdapter(
             hass,
             lambda: self.config,
             lambda: self.runtime,
             lambda: self.store.save(self.runtime),
+            lambda: self.local_client,
+            self._set_commanded_local_mode,
         )
         self.evidence = EvidenceCollector(
             lambda: self.runtime,
@@ -86,6 +105,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     @property
     def config(self) -> dict[str, Any]:
         return {**self.entry.data, **self.entry.options}
+
+    @property
+    def is_direct_local(self) -> bool:
+        return self.local_client is not None
+
+    def _set_commanded_local_mode(self, mode: str) -> None:
+        self._commanded_local_mode = mode
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -103,12 +129,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         )
         if self.runtime.execution_enabled:
-            problems = soc_control_problems(
-                self.hass,
-                self.config,
-                absolute_min_soc=self.runtime.settings["absolute_min_soc"],
-                maximum_soc=self.runtime.settings["opportunistic_target_soc"],
-            )
+            problems = await self.async_soc_control_problems()
             if not self.config.get(CONF_COMMISSIONED, False) or problems:
                 self.runtime.execution_enabled = False
                 await self.store.save(self.runtime)
@@ -118,6 +139,14 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self.hass.states.get(entity_id) if entity_id else None
 
     def _float(self, key: str, default: float | None = None) -> float | None:
+        if self._local_snapshot is not None:
+            local_values = {
+                CONF_SOC: self._local_snapshot.soc,
+                CONF_BATTERY_CHARGE_POWER: self._local_snapshot.charge_power_w,
+                CONF_BATTERY_DISCHARGE_POWER: self._local_snapshot.discharge_power_w,
+            }
+            if key in local_values:
+                return local_values[key]
         state = self._state(key)
         try:
             return (
@@ -266,6 +295,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     def _observed_action(self) -> Action:
+        if self.is_direct_local:
+            return action_from_operating_mode(self._commanded_local_mode)
         state = self._state(CONF_OPERATING_MODE)
         return action_from_operating_mode(state.state if state else None)
 
@@ -293,7 +324,18 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         now = datetime.now(UTC)
+        local_problem: str | None = None
+        if self.local_client is not None:
+            try:
+                self._local_snapshot = await self.local_client.async_snapshot()
+                self._local_controls = await self.local_client.async_read_controls()
+            except LocalProtocolError as exc:
+                self._local_snapshot = None
+                self._local_controls = {}
+                local_problem = f"battery local TCP unavailable: {exc}"
         problems = get_health_problems(self.hass, self.config, now)
+        if local_problem:
+            problems.append(local_problem)
         soc = self._float(CONF_SOC)
         slots = self._price_slots(now)
         action = self._observed_action()
@@ -431,6 +473,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "grid_export_power_w": self._float(CONF_GRID_EXPORT_POWER, 0),
             "battery_charge_power_w": self._float(CONF_BATTERY_CHARGE_POWER, 0),
             "battery_discharge_power_w": self._float(CONF_BATTERY_DISCHARGE_POWER, 0),
+            "local_connected": self._local_snapshot is not None,
+            "native_min_soc": _control_number(self._local_controls, "3023"),
+            "native_max_soc": _control_number(self._local_controls, "3024"),
+            "local_operating_mode": self._commanded_local_mode
+            if self.is_direct_local
+            else None,
             "pv_power_w": self._float(CONF_PV_POWER, 0),
             "current_price_dkk_per_kwh": price,
             "expected_savings_dkk": self.plan.expected_savings_dkk
@@ -514,14 +562,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ValueError(
                 "Commission the integration in Options before enabling control"
             )
-        if enabled and (
-            problems := soc_control_problems(
-                self.hass,
-                self.config,
-                absolute_min_soc=self.runtime.settings["absolute_min_soc"],
-                maximum_soc=self.runtime.settings["opportunistic_target_soc"],
-            )
-        ):
+        if enabled and (problems := await self.async_soc_control_problems()):
             raise ValueError(
                 "Automatic control requires commissioned native minimum and maximum "
                 f"SOC controls: {'; '.join(problems)}"
@@ -544,6 +585,72 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_set_setting(self, key: str, value: float) -> None:
         self.runtime.settings[key] = value
         await self.store.save(self.runtime)
+        await self.async_request_refresh()
+
+    async def async_soc_control_problems(self) -> list[str]:
+        """Validate direct controls or legacy bound controls before writes."""
+        if not self.is_direct_local:
+            return soc_control_problems(
+                self.hass,
+                self.config,
+                absolute_min_soc=self.runtime.settings["absolute_min_soc"],
+                maximum_soc=self.runtime.settings["opportunistic_target_soc"],
+            )
+        try:
+            assert self.local_client is not None
+            controls = await self.local_client.async_read_controls()
+            minimum = _control_number(controls, "3023")
+            maximum = _control_number(controls, "3024")
+        except (AssertionError, LocalProtocolError):
+            return ["native SOC controls are unavailable over local TCP"]
+        if minimum is None or maximum is None or not 0 <= minimum <= maximum <= 100:
+            return ["native SOC controls report invalid bounds"]
+        requested_min = self.runtime.settings["absolute_min_soc"]
+        requested_max = self.runtime.settings["opportunistic_target_soc"]
+        if not 0 <= requested_min <= requested_max <= 100:
+            return ["configured SOC limits are invalid"]
+        self._local_controls = controls
+        return []
+
+    async def async_set_native_soc_limit(self, key: str, value: float) -> None:
+        if not self.local_client:
+            raise ValueError("This entity is only available for direct local setup")
+        controls = await self.local_client.async_read_controls()
+        minimum = round(_control_number(controls, "3023") or 0)
+        maximum = round(_control_number(controls, "3024") or 100)
+        if key == "minimum":
+            minimum = round(value)
+        elif key == "maximum":
+            maximum = round(value)
+        else:
+            raise ValueError(f"Unknown native SOC limit: {key}")
+        await self.local_client.async_set_limits(minimum, maximum)
+        self._local_controls = {"3023": str(minimum), "3024": str(maximum)}
+        await self.async_request_refresh()
+
+    async def async_set_manual_mode(self, mode: str) -> None:
+        if not self.local_client:
+            raise ValueError("This entity is only available for direct local setup")
+        controls = await self.local_client.async_read_controls()
+        minimum = round(_control_number(controls, "3023") or 0)
+        maximum = round(_control_number(controls, "3024") or 100)
+        if mode == MODE_BATTERY:
+            await self.local_client.async_set_self_consumption()
+        elif mode == MODE_CHARGE:
+            await self.local_client.async_set_mode(
+                "Charge",
+                round(self.runtime.settings["charge_power_w"]),
+                min_soc=minimum,
+                max_soc=maximum,
+            )
+        elif mode == MODE_GRID:
+            await self.local_client.async_set_mode(
+                "Idle", 0, min_soc=minimum, max_soc=maximum
+            )
+        else:
+            raise ValueError(f"Unsupported local operating mode: {mode}")
+        self._local_controls = controls
+        self._set_commanded_local_mode(mode)
         await self.async_request_refresh()
 
     async def async_force_safe(self) -> None:
@@ -572,3 +679,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def export_data(self) -> dict[str, Any]:
         return self.runtime.export(self.entry.title, self.data)
+
+
+def _control_number(controls: dict[str, str], key: str) -> float | None:
+    try:
+        value = float(controls[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if 0 <= value <= 100 else None

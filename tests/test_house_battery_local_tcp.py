@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 from house_battery.local_tcp import (
     REG_MAX_SOC,
     REG_MIN_SOC,
+    FbpLocalTcpClient,
     LocalProtocolError,
     decode_controls,
     decode_energy_parameter,
@@ -49,3 +50,22 @@ def test_extracts_only_complete_soc_control_readback() -> None:
     }
     with pytest.raises(LocalProtocolError):
         decode_controls({"ControlInfo": {REG_MIN_SOC: 10}})
+
+
+def test_self_consumption_command_is_limited_to_known_registers() -> None:
+    class RecordingClient(FbpLocalTcpClient):
+        def __init__(self) -> None:
+            pass
+
+        async def _request(self, command: dict):
+            self.command = command
+            return {}
+
+    client = RecordingClient()
+    import asyncio
+
+    asyncio.run(client.async_set_self_consumption())
+
+    values = client.command["SetControlInfo"]
+    assert client.command["Set"] == "Energycontrolparameters"
+    assert set(values) == {"3000", "3020", "3021", "3022", "3030", "3003"}

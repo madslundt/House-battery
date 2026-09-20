@@ -44,9 +44,14 @@ def get_health_problems(
     def state(key: str):
         return hass.states.get(config[key]) if config.get(key) else None
 
+    required = _REQUIRED
+    if config.get("host"):
+        # Battery SOC, charge/discharge power, and operating mode come from
+        # the built-in TCP adapter rather than pre-existing HA entities.
+        required = (CONF_LOAD_POWER, CONF_GRID_IMPORT_POWER, CONF_GRID_AVAILABLE)
     problems = [
         f"{key} unavailable"
-        for key in _REQUIRED
+        for key in required
         if (value := state(key)) is None or value.state.lower() in _BAD_STATES
     ]
     grid = state(CONF_GRID_AVAILABLE)

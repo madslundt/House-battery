@@ -6,7 +6,7 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.const import CONF_NAME
+from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 
@@ -29,9 +29,11 @@ from .const import (
     CONF_PRICE_FORECAST_ENTITY,
     CONF_PV_POWER,
     CONF_SOC,
+    DEFAULT_PORT,
     DOMAIN,
     NAME,
 )
+from .local_tcp import FbpLocalTcpClient, LocalProtocolError
 
 
 def _entity(domain: str | list[str]) -> selector.EntitySelector:
@@ -93,10 +95,39 @@ def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
     return vol.Schema(fields)
 
 
+def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
+    """Fields still supplied by Home Assistant, not by the battery TCP API."""
+    fields: dict[Any, Any] = {
+        _required(CONF_LOAD_POWER, defaults): _entity("sensor"),
+        _required(CONF_GRID_IMPORT_POWER, defaults): _entity("sensor"),
+        _required(CONF_GRID_AVAILABLE, defaults): _entity(["sensor", "binary_sensor"]),
+        _required(CONF_PRICE_ENTITIES, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(
+                domain=["sensor", "binary_sensor"], multiple=True
+            )
+        ),
+        _optional(CONF_PRICE_FORECAST_ENTITY, defaults): _entity("sensor"),
+        _optional(CONF_GRID_EXPORT_POWER, defaults): _entity("sensor"),
+        _optional(CONF_PV_POWER, defaults): _entity("sensor"),
+        _optional(CONF_FAULT, defaults): _entity(["sensor", "binary_sensor"]),
+        _optional(CONF_ONLINE, defaults): _entity(["sensor", "binary_sensor"]),
+    }
+    if options:
+        fields[
+            vol.Required(
+                CONF_COMMISSIONED, default=defaults.get(CONF_COMMISSIONED, False)
+            )
+        ] = bool
+    return vol.Schema(fields)
+
+
 class Fbp1200ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Bind an optimizer entry to locally managed FBP1200 entities."""
 
     VERSION = 1
+
+    def __init__(self) -> None:
+        self._connection: dict[str, Any] = {}
 
     @staticmethod
     def async_get_options_flow(
@@ -108,18 +139,59 @@ class Fbp1200ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         if user_input is not None:
-            mode_entity = user_input[CONF_OPERATING_MODE]
-            await self.async_set_unique_id(mode_entity)
+            host = user_input[CONF_HOST].strip()
+            port = user_input[CONF_PORT]
+            errors: dict[str, str] = {}
+            try:
+                client = FbpLocalTcpClient(host, port)
+                await client.async_snapshot()
+                await client.async_close()
+            except (LocalProtocolError, ValueError):
+                errors["base"] = "cannot_connect"
+            if errors:
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=self._connection_schema(user_input),
+                    errors=errors,
+                )
+            await self.async_set_unique_id(f"{host}:{port}")
             self._abort_if_unique_id_configured()
-            title = user_input.pop(CONF_NAME).strip() or NAME
-            user_input = {
-                key: value
-                for key, value in user_input.items()
-                if value not in (None, "")
+            self._connection = {
+                CONF_HOST: host,
+                CONF_PORT: port,
+                CONF_NAME: user_input[CONF_NAME].strip() or NAME,
             }
-            user_input[CONF_COMMISSIONED] = False
-            return self.async_create_entry(title=title, data=user_input)
-        return self.async_show_form(step_id="user", data_schema=_schema({}))
+            return await self.async_step_household()
+        return self.async_show_form(
+            step_id="user", data_schema=self._connection_schema({})
+        )
+
+    def _connection_schema(self, defaults: dict[str, Any]) -> vol.Schema:
+        return vol.Schema(
+            {
+                vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
+                vol.Required(
+                    CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT)
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+                vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, NAME)): str,
+            }
+        )
+
+    async def async_step_household(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if user_input is not None:
+            data = {
+                **self._connection,
+                **{
+                    key: value
+                    for key, value in user_input.items()
+                    if value not in (None, "")
+                },
+                CONF_COMMISSIONED: False,
+            }
+            return self.async_create_entry(title=data[CONF_NAME], data=data)
+        return self.async_show_form(step_id="household", data_schema=_direct_schema({}))
 
 
 class Fbp1200OptionsFlow(config_entries.OptionsFlow):
@@ -134,6 +206,10 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
         defaults = {**self._entry.data, **self._entry.options}
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
+        if self._entry.data.get(CONF_HOST):
+            return self.async_show_form(
+                step_id="init", data_schema=_direct_schema(defaults, options=True)
+            )
         return self.async_show_form(
             step_id="init", data_schema=_schema(defaults, options=True)
         )

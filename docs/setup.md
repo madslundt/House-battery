@@ -17,39 +17,39 @@ The GitHub repository is the installation source. Adding it as a HACS custom
 repository lets HACS install and update the integration without a manual file
 copy or a local repository checkout on Home Assistant.
 
-House Battery does not yet discover or connect to a battery during its config
-flow. First install and prove a local provider for the FBP1200; then bind the
-provider's entities in House Battery. The included TCP research layer is
-fail-closed and not a replacement for that proven connection.
+House Battery connects to the FBP1200 itself. In the first setup screen, enter
+the battery's local IP address, TCP port (normally `8080`), and a display name.
+The flow performs a read-only telemetry handshake before it creates the entry.
+It then creates the battery SOC, charging/discharging-power, native SOC-limit,
+and operating-mode entities under the new device. No separate battery-provider
+integration is needed.
 
 ## Connect the battery locally
 
-1. Give the FBP1200 a DHCP reservation/static IP and prove local monitoring.
-2. Confirm the provider reads SOC, charging/discharging power, on-grid status,
-   and Operating Mode even when the vendor application is not holding the
-   device session. AECC-compatible devices commonly use TCP port `8080`; use
-   your provider's documented connection test rather than assuming a protocol.
-3. Identify local, writable native minimum- and maximum-SOC controls.
+1. Give the FBP1200 a DHCP reservation/static IP.
+2. Add **House Battery**, enter its IP address, TCP port, and name, then let
+   the read-only connection check complete.
+3. Verify the created **Battery state of charge**, **Battery charge power**,
+   **Battery discharge power**, **Native minimum SOC**, **Native maximum SOC**,
+   and **Operating mode** entities.
 4. Verify each intended mode manually: `Charge`, `Idle`/grid, and
-   `Self-Gen/Zero Export`/battery. Check the provider's read-back and physical
-   power sensors after each command.
+   `Self-Gen/Zero Export`/battery. The operating-mode entity is a local
+   commanded state; check the physical power sensors after every command.
 
 ## Bind the required entities
 
 | Binding | What it must mean |
 | --- | --- |
-| Battery state of charge | Current battery SOC in percent. |
 | Connected/house load power | The load the battery can genuinely serve, in W. |
 | Grid import power | Imported power, in W. |
 | Grid available / on-grid state | Physical/device-reported supply availability, not grid use. |
-| Battery Operating Mode | Verified local `select` used for the three modes. |
 | Known electricity-price entities | Actual published intervals in a supported list attribute. |
-| Battery charge/discharge power | Measured physical battery power, in W. |
 
-Grid export, PV input, fault/online status, and charge/discharge power controls
-are optional. Native minimum/maximum SOC controls become mandatory when you
-commission automatic control. See [configuration.md](configuration.md) for
-accepted values and the full field reference.
+Grid export, PV input, fault, and online status are optional. The direct
+adapter supplies the battery telemetry and native SOC controls; the latter are
+validated again when you enable automatic control. See
+[configuration.md](configuration.md) for accepted values and the full field
+reference.
 
 ## Commission safely
 

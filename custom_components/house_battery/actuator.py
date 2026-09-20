@@ -87,11 +87,65 @@ class LocalControlAdapter:
         config: Callable[[], dict[str, Any]],
         runtime: Callable[[], RuntimeState],
         save: Callable[[], Awaitable[None]],
+        direct_client: Callable[[], Any | None] | None = None,
+        direct_mode_changed: Callable[[str], None] | None = None,
     ) -> None:
         self._hass = hass
         self._config = config
         self._runtime = runtime
         self._save = save
+        self._direct_client = direct_client
+        self._direct_mode_changed = direct_mode_changed
+
+    async def _async_direct_command(
+        self, action: Action, now: datetime, target_soc: float | None
+    ) -> tuple[bool, str] | None:
+        """Use the built-in TCP adapter when this is a direct-local entry."""
+        client = self._direct_client() if self._direct_client else None
+        if client is None:
+            return None
+        runtime = self._runtime()
+        limits_warning: str | None = None
+        try:
+            minimum = round(runtime.settings["absolute_min_soc"])
+            maximum = round(
+                target_soc if target_soc is not None else runtime.settings["target_soc"]
+            )
+            await client.async_set_limits(minimum, maximum)
+        except Exception as exc:
+            if action is not Action.SAFE:
+                _LOGGER.exception("FBP1200 local TCP SOC-limit command failed")
+                runtime.execution_enabled = False
+                await self._save()
+                return False, f"local TCP command failed: {exc}"
+            limits_warning = f"SOC limits not confirmed: {exc}"
+            _LOGGER.warning("%s; continuing with requested safe mode", limits_warning)
+        mode = _ACTION_TO_MODE[action]
+        try:
+            if action is Action.BATTERY or action is Action.SAFE:
+                await client.async_set_self_consumption()
+            elif action is Action.CHARGE:
+                await client.async_set_mode(
+                    "Charge",
+                    round(runtime.settings["charge_power_w"]),
+                    min_soc=minimum,
+                    max_soc=maximum,
+                )
+            else:
+                await client.async_set_mode("Idle", 0, min_soc=minimum, max_soc=maximum)
+        except Exception as exc:
+            _LOGGER.exception("FBP1200 local TCP mode command failed")
+            runtime.execution_enabled = False
+            await self._save()
+            return False, f"local TCP command failed: {exc}"
+        if self._direct_mode_changed:
+            self._direct_mode_changed(mode)
+        runtime.last_action = action.value
+        runtime.last_action_at = now.isoformat()
+        runtime.transitions.append(now.isoformat())
+        await self._save()
+        result = "local TCP command acknowledged; SOC limits read back"
+        return True, result if limits_warning is None else f"{result}; {limits_warning}"
 
     async def _set_number(
         self, key: str, value: float, *, required: bool = False
@@ -162,6 +216,9 @@ class LocalControlAdapter:
         self, action: Action, now: datetime, *, target_soc: float | None = None
     ) -> tuple[bool, str]:
         """Apply limits, issue one mode change, and require immediate read-back."""
+        direct_result = await self._async_direct_command(action, now, target_soc)
+        if direct_result is not None:
+            return direct_result
         mode = _ACTION_TO_MODE[action]
         mode_entity = self._config()[CONF_OPERATING_MODE]
         runtime = self._runtime()

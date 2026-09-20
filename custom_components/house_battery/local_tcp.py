@@ -106,6 +106,27 @@ class FbpLocalTcpClient:
             }
         )
 
+    async def async_set_self_consumption(self) -> None:
+        """Return to the device's local self-consumption / zero-export mode.
+
+        This is the small, allowlisted AI restore sequence used by compatible
+        AECC devices. It intentionally does not retry: an ambiguous write is
+        always safer than issuing the same battery command again.
+        """
+        await self._request(
+            {
+                "Set": "Energycontrolparameters",
+                "SetControlInfo": {
+                    REG_EMS_ENABLE: "1",
+                    REG_SCHEDULE_MODE: "3",
+                    REG_AI_SMART_CHARGE: "0",
+                    REG_AI_SMART_DISCHARGE: "1",
+                    REG_CUSTOM_MODE: "0",
+                    REG_CONTROL_TIME_1: "0,00:00,00:00,0,0,0,0,0,0,100,10",
+                },
+            }
+        )
+
     async def _request(self, command: dict[str, Any]) -> dict[str, Any]:
         async with self._lock:
             try:
