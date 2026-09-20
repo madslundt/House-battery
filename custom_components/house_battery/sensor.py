@@ -241,6 +241,7 @@ async def async_setup_entry(
             FbpPlanSensor(coordinator),
             FbpStoragePolicySensor(coordinator),
             FbpBatteryLearningSensor(coordinator),
+            FbpPriceForecastAccuracySensor(coordinator),
             FbpDecisionHistorySensor(coordinator),
             *(FbpValueSensor(coordinator, description) for description in SENSORS),
         ]
@@ -430,6 +431,37 @@ class FbpBatteryLearningSensor(Fbp1200Entity, SensorEntity):
             "learned_efficiency_pct",
         )
         return {key: self.coordinator.data.get(key) for key in keys}
+
+
+class FbpPriceForecastAccuracySensor(Fbp1200Entity, SensorEntity):
+    """Show whether the external price forecast has been accurate in practice."""
+
+    _attr_name = "External price forecast accuracy"
+    _attr_icon = "mdi:chart-bell-curve-cumulative"
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "external_price_forecast_accuracy")
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.data.get("price_forecast_accuracy", "unknown")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        keys = (
+            "price_forecast_enabled",
+            "price_forecast_source",
+            "price_forecast_available_slots",
+            "price_forecast_used_slots",
+            "price_forecast_samples",
+            "price_forecast_mae_dkk_per_kwh",
+            "price_forecast_bias_dkk_per_kwh",
+            "price_forecast_within_uncertainty_pct",
+        )
+        return {key: self.coordinator.data.get(key) for key in keys} | {
+            "meaning": "MAE is the average absolute forecast error. Bias is forecast minus actual; positive means over-prediction.",
+            "uncertainty_setting": "External price forecast uncertainty number",
+        }
 
 
 class FbpDecisionHistorySensor(Fbp1200Entity, SensorEntity):

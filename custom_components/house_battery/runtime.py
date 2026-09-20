@@ -10,6 +10,7 @@ from homeassistant.helpers.storage import Store
 
 from .accounting import EnergyLedger
 from .const import DEFAULT_SETTINGS, DOMAIN, STORAGE_KEY, STORAGE_VERSION
+from .forecast import ForecastAccuracy
 from .learning import BatteryLearner, LoadLearner
 
 
@@ -27,6 +28,8 @@ class RuntimeState:
     last_action: str = "safe"
     last_action_at: str | None = None
     transitions: list[str] = field(default_factory=list)
+    forecast_enabled: bool = False
+    forecast_accuracy: ForecastAccuracy = field(default_factory=ForecastAccuracy)
 
     def transitions_used(self, now: datetime) -> int:
         """Prune and count the rolling 24-hour transition budget."""
@@ -60,6 +63,8 @@ class RuntimeState:
             "last_action": self.last_action,
             "last_action_at": self.last_action_at,
             "transitions": self.transitions[-100:],
+            "forecast_enabled": self.forecast_enabled,
+            "forecast_accuracy": self.forecast_accuracy.as_dict(),
         }
 
     def export(self, entry_title: str, status: dict[str, Any]) -> dict[str, Any]:
@@ -75,6 +80,10 @@ class RuntimeState:
             "ledger": self.ledger.as_dict(),
             "decisions": self.decisions,
             "scheduled_loads": self.scheduled_loads,
+            "forecast": {
+                "enabled": self.forecast_enabled,
+                "accuracy": self.forecast_accuracy.as_dict(),
+            },
         }
 
     @classmethod
@@ -98,6 +107,10 @@ class RuntimeState:
             last_action=str(data.get("last_action", "safe")),
             last_action_at=data.get("last_action_at"),
             transitions=list(data.get("transitions", []))[-100:],
+            forecast_enabled=bool(data.get("forecast_enabled", False)),
+            forecast_accuracy=ForecastAccuracy.from_dict(
+                data.get("forecast_accuracy", {})
+            ),
         )
 
 

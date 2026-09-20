@@ -11,9 +11,10 @@ optimizer. The optimizer
 project is maintained at
 [github.com/madslundt/House-battery](https://github.com/madslundt/House-battery).
 
-You also need an electricity-price integration that exposes dated forecast
-rows. A current-price-only entity is insufficient for optimization because the
-planner must compare future intervals.
+You also need an electricity-price integration that exposes dated **known**
+rows. A current-price-only entity is insufficient because the planner compares
+future intervals. An external forecast entity is optional and never replaces
+those known rows.
 
 ## Required bindings
 
@@ -24,7 +25,8 @@ planner must compare future intervals.
 | Grid import power | `sensor` | Numeric watts. Used for accounting/telemetry. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Battery Operating Mode | `select` | Must offer the verified local options `Charge`, `Idle`, and `Self-Gen/Zero Export`. |
-| Electricity price forecast entities | one or more `sensor` entities | Must contain dated price rows. |
+| Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
+| External price forecast entity | optional `sensor` | Same row format; can extend the horizon only after the last known interval. |
 | Battery charge power | `sensor` | Measured W; required for evidence and learning. |
 | Battery discharge power | `sensor` | Measured W; required for evidence and learning. |
 
@@ -50,7 +52,7 @@ Any other state is unsafe and makes the optimizer degraded. Use a direct device
 or inverter on-grid/AC-input status when available. If you need a template,
 derive it from such a status—not from `grid_import_power > 0`.
 
-## Price input
+## Price input and external forecasts
 
 The integration reads common list attributes named `prices`, `raw_today`,
 `raw_tomorrow`, `today`, or `tomorrow`. Each row needs:
@@ -62,6 +64,19 @@ The integration reads common list attributes named `prices`, `raw_today`,
 Rows must use timezone-aware timestamps. Valid rows are normalized into
 15-minute slots. The optimizer uses only a contiguous future horizon and never
 invent missing price data.
+
+The optional external forecast uses exactly this format. It is disabled by
+default through **Use external price forecast**. While disabled, the forecast
+is still compared to subsequently known prices for the **External price
+forecast accuracy** entity. When enabled, it can add only a contiguous sequence
+starting at the end of the known horizon; it cannot overwrite a known price or
+fill a gap.
+
+Set **External price forecast uncertainty** (DKK/kWh) to a conservative
+absolute error allowance. The planner treats a forecast charge price as
+forecast plus that amount and a forecast discharge price as forecast minus it.
+For example, a 0.20 DKK/kWh forecast with a 0.25 allowance is evaluated as
+0.45 when charging; a 2.00 forecast is evaluated as 1.75 when discharging.
 
 ## Mode mapping
 

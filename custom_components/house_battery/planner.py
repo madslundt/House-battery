@@ -49,6 +49,8 @@ def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
                 slot.price,
                 slot.expected_load_wh * remaining_fraction,
                 slot.expected_pv_wh * remaining_fraction,
+                slot.source,
+                slot.uncertainty_dkk_per_kwh,
             )
         if valid and slot.start != expected_start:
             break
@@ -59,7 +61,7 @@ def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
 
 def _terminal_price(slots: list[PriceSlot]) -> float:
     tail = slots[-min(len(slots), 48) :]
-    return median(slot.price for slot in tail)
+    return median(slot.discharge_price_dkk_per_kwh for slot in tail)
 
 
 def _allowed_actions(state: _State, settings: PlannerSettings) -> tuple[Action, ...]:
@@ -116,7 +118,10 @@ def _slot_transition(
             grid_wh += input_wh
             reason = "Known low price justifies charging after losses, wear and profit threshold"
     elif action is Action.BATTERY:
-        if slot.price + 1e-9 < discharge_price_floor and not is_locked_continuation:
+        if (
+            slot.discharge_price_dkk_per_kwh + 1e-9 < discharge_price_floor
+            and not is_locked_continuation
+        ):
             return None
         available_wh = max(0.0, energy_wh - minimum_step * settings.energy_step_wh)
         deliverable_wh = min(
@@ -150,7 +155,14 @@ def _slot_transition(
         grid_wh = max(0.0, load_wh - delivered_wh)
 
     interval_cost = grid_wh / 1000 * slot.price
-    optimization_cost = interval_cost
+    optimization_price = (
+        slot.charge_price_dkk_per_kwh
+        if action is Action.CHARGE
+        else slot.discharge_price_dkk_per_kwh
+        if action is Action.BATTERY
+        else slot.price
+    )
+    optimization_cost = grid_wh / 1000 * optimization_price
     if action is Action.BATTERY:
         delivered_kwh = discharged_wh * discharge_efficiency / 1000
         interval_cost += delivered_kwh * settings.degradation_cost_dkk_per_kwh
@@ -199,7 +211,7 @@ def optimize(
     initial_lock = max(0, mode_lock_remaining_minutes)
     initial = _State(initial_step, current_action, initial_lock, transitions_used)
     layers: list[dict[_State, _Node]] = [{initial: _Node(0.0, 0.0, None, None)}]
-    cheapest_price = min(slot.price for slot in valid)
+    cheapest_price = min(slot.charge_price_dkk_per_kwh for slot in valid)
     discharge_price_floor = (
         cheapest_price / settings.round_trip_efficiency
         + settings.degradation_cost_dkk_per_kwh

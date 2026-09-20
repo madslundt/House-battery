@@ -26,6 +26,7 @@ from .const import (
     CONF_ONLINE,
     CONF_OPERATING_MODE,
     CONF_PRICE_ENTITIES,
+    CONF_PRICE_FORECAST_ENTITY,
     CONF_PV_POWER,
     CONF_SOC,
     DOMAIN,
@@ -65,6 +66,7 @@ def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
                 domain=["sensor", "binary_sensor"], multiple=True
             )
         ),
+        _optional(CONF_PRICE_FORECAST_ENTITY, defaults): _entity("sensor"),
         _optional(CONF_GRID_EXPORT_POWER, defaults): _entity("sensor"),
         _required(CONF_BATTERY_CHARGE_POWER, defaults): _entity("sensor"),
         _required(CONF_BATTERY_DISCHARGE_POWER, defaults): _entity("sensor"),

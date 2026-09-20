@@ -25,6 +25,7 @@ CONF_DISCHARGE_POWER_CONTROL = "discharge_power_control_entity"
 CONF_MIN_SOC_CONTROL = "minimum_soc_control_entity"
 CONF_MAX_SOC_CONTROL = "maximum_soc_control_entity"
 CONF_PRICE_ENTITIES = "price_entities"
+CONF_PRICE_FORECAST_ENTITY = "price_forecast_entity"
 CONF_COMMISSIONED = "commissioned"
 
 ACTION_CHARGE = "charge"
@@ -53,6 +54,7 @@ DEFAULT_SETTINGS: dict[str, float] = {
     "minimum_mode_minutes": 30.0,
     "maximum_transitions_per_day": 4.0,
     "cycle_life": 6000.0,
+    "forecast_uncertainty_dkk_per_kwh": 0.25,
 }
 
 SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
@@ -71,6 +73,7 @@ SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
     "minimum_mode_minutes": (15.0, 120.0, 15.0, "min"),
     "maximum_transitions_per_day": (1.0, 12.0, 1.0, None),
     "cycle_life": (500.0, 15000.0, 100.0, "cycles"),
+    "forecast_uncertainty_dkk_per_kwh": (0.0, 10.0, 0.01, "DKK/kWh"),
 }
 
 TELEMETRY_STALE_AFTER = timedelta(minutes=5)

@@ -19,17 +19,29 @@ class Action(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class PriceSlot:
-    """Known marginal-price interval with a demand forecast."""
+    """A price interval, optionally extended from an external forecast."""
 
     start: datetime
     end: datetime
     price: float
     expected_load_wh: float = 0.0
     expected_pv_wh: float = 0.0
+    source: str = "known"
+    uncertainty_dkk_per_kwh: float = 0.0
 
     @property
     def hours(self) -> float:
         return (self.end - self.start).total_seconds() / 3600
+
+    @property
+    def charge_price_dkk_per_kwh(self) -> float:
+        """Conservative price used when evaluating a forecast-driven charge."""
+        return self.price + self.uncertainty_dkk_per_kwh
+
+    @property
+    def discharge_price_dkk_per_kwh(self) -> float:
+        """Conservative price used when evaluating a forecast-driven discharge."""
+        return self.price - self.uncertainty_dkk_per_kwh
 
 
 @dataclass(frozen=True, slots=True)

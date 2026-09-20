@@ -23,6 +23,7 @@ from .const import (
     CONF_LOAD_POWER,
     CONF_OPERATING_MODE,
     CONF_PRICE_ENTITIES,
+    CONF_PRICE_FORECAST_ENTITY,
     CONF_PV_POWER,
     CONF_SOC,
     DECISION_HISTORY_LIMIT,
@@ -30,6 +31,7 @@ from .const import (
     UPDATE_INTERVAL,
 )
 from .evidence import EvidenceCollector
+from .forecast import extend_known_horizon
 from .health import get_health_problems
 from .models import Action, Plan, PlannerSettings, PriceSlot
 from .planner import optimize
@@ -63,6 +65,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.plan: Plan | None = None
         self._startup_guard_passed = False
         self._last_decision_key: tuple[str, str] | None = None
+        self._forecast_evidence_changed = False
+        self._forecast_slot_count = 0
+        self._forecast_used_slot_count = 0
+        self._forecast_source: str | None = None
         self.actuator = LocalControlAdapter(
             hass,
             lambda: self.config,
@@ -131,7 +137,44 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             state = self.hass.states.get(entity_id)
             if state:
                 rows.extend(extract_rows(dict(state.attributes)))
-        slots = normalize_price_rows(rows)
+        known_slots = normalize_price_rows(rows)
+        forecast_slots: list[PriceSlot] = []
+        forecast_entity = self.config.get(CONF_PRICE_FORECAST_ENTITY)
+        self._forecast_source = forecast_entity
+        forecast_state = (
+            self.hass.states.get(forecast_entity) if forecast_entity else None
+        )
+        if forecast_state:
+            forecast_slots = normalize_price_rows(
+                extract_rows(dict(forecast_state.attributes))
+            )
+        self._forecast_slot_count = len(forecast_slots)
+        before = self.runtime.forecast_accuracy.as_dict()
+        if forecast_slots:
+            self.runtime.forecast_accuracy.record_forecasts(forecast_slots)
+            self.runtime.forecast_accuracy.score_actual_prices(
+                known_slots,
+                uncertainty_dkk_per_kwh=self.runtime.settings[
+                    "forecast_uncertainty_dkk_per_kwh"
+                ],
+            )
+        self._forecast_evidence_changed = (
+            before != self.runtime.forecast_accuracy.as_dict()
+        )
+        slots = (
+            extend_known_horizon(
+                known_slots,
+                forecast_slots,
+                uncertainty_dkk_per_kwh=self.runtime.settings[
+                    "forecast_uncertainty_dkk_per_kwh"
+                ],
+            )
+            if self.runtime.forecast_enabled and forecast_slots
+            else known_slots
+        )
+        self._forecast_used_slot_count = sum(
+            slot.source == "forecast" for slot in slots
+        )
         result: list[PriceSlot] = []
         for slot in slots:
             if slot.end <= now:
@@ -147,6 +190,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     slot.price,
                     expected_load_wh=load_w * slot.hours + scheduled_wh,
                     expected_pv_wh=0.0,
+                    source=slot.source,
+                    uncertainty_dkk_per_kwh=slot.uncertainty_dkk_per_kwh,
                 )
             )
         return result
@@ -296,7 +341,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )[1]
 
         decision_key = (state, reason)
-        if decision_key != self._last_decision_key:
+        decision_changed = decision_key != self._last_decision_key
+        if decision_changed:
             self.runtime.decisions.append(
                 {
                     "timestamp": now.isoformat(),
@@ -312,6 +358,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self.runtime.decisions = self.runtime.decisions[-DECISION_HISTORY_LIMIT:]
             self._last_decision_key = decision_key
+        if decision_changed or self._forecast_evidence_changed:
             await self.store.save(self.runtime)
 
         local_now = dt_util.as_local(now)
@@ -405,6 +452,21 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "load_learning_confidence_pct": self.runtime.load_learner.confidence * 100,
             "load_forecast_error_w": self.runtime.load_learner.mean_absolute_error_w,
             "learning_observations": self.runtime.load_learner.observations,
+            "price_forecast_enabled": self.runtime.forecast_enabled,
+            "price_forecast_source": self._forecast_source,
+            "price_forecast_available_slots": self._forecast_slot_count,
+            "price_forecast_used_slots": self._forecast_used_slot_count,
+            "price_forecast_accuracy": self.runtime.forecast_accuracy.quality,
+            "price_forecast_samples": self.runtime.forecast_accuracy.samples,
+            "price_forecast_mae_dkk_per_kwh": (
+                self.runtime.forecast_accuracy.mean_absolute_error_dkk_per_kwh
+            ),
+            "price_forecast_bias_dkk_per_kwh": (
+                self.runtime.forecast_accuracy.mean_bias_dkk_per_kwh
+            ),
+            "price_forecast_within_uncertainty_pct": (
+                self.runtime.forecast_accuracy.within_uncertainty_pct
+            ),
             "capacity_learning_samples": len(
                 self.runtime.battery_learner.capacity_samples_wh
             ),
@@ -441,6 +503,14 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.store.save(self.runtime)
         if was_enabled and not enabled:
             await self.actuator.async_command(Action.SAFE, datetime.now(UTC))
+        await self.async_request_refresh()
+
+    async def async_set_forecast_enabled(self, enabled: bool) -> None:
+        """Opt in to planning beyond known prices with the configured forecast."""
+        if enabled and not self.config.get(CONF_PRICE_FORECAST_ENTITY):
+            raise ValueError("Configure an external price forecast entity first")
+        self.runtime.forecast_enabled = enabled
+        await self.store.save(self.runtime)
         await self.async_request_refresh()
 
     async def async_set_setting(self, key: str, value: float) -> None:

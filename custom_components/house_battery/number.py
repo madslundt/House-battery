@@ -37,6 +37,10 @@ SETTING_NAMES = {
     "minimum_mode_minutes": ("Minimum mode duration", "mdi:timer-lock"),
     "maximum_transitions_per_day": ("Maximum daily mode transitions", "mdi:counter"),
     "cycle_life": ("Cycle-life reference", "mdi:sync"),
+    "forecast_uncertainty_dkk_per_kwh": (
+        "External price forecast uncertainty",
+        "mdi:chart-bell-curve-cumulative",
+    ),
 }
 
 
