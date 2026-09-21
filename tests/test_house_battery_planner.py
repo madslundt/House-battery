@@ -156,6 +156,23 @@ def test_transition_budget_keeps_current_mode() -> None:
     assert all(item.action is Action.GRID for item in plan.slots)
 
 
+def test_transition_budget_allows_battery_pass_through_at_reserve() -> None:
+    """A hard transition cap keeps an executable battery mode at the reserve."""
+    plan = optimize(
+        slots([1.0, 1.0], load_w=800),
+        now=BASE - timedelta(seconds=1),
+        soc=30,
+        settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
+        current_action=Action.BATTERY,
+        mode_lock_remaining_minutes=15,
+        transitions_used=4,
+    )
+
+    assert [item.action for item in plan.slots] == [Action.BATTERY, Action.BATTERY]
+    assert plan.slots[-1].battery_discharge_wh == 0
+    assert plan.slots[-1].grid_import_wh > 0
+
+
 def test_current_partial_interval_is_planned_from_now() -> None:
     plan = optimize(
         slots([0.1, 5.0, 5.0]),

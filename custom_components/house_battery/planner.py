@@ -68,6 +68,9 @@ def _allowed_actions(state: _State, settings: PlannerSettings) -> tuple[Action, 
     if state.locked_minutes > 0:
         return (state.action,)
     if state.transitions >= settings.maximum_transitions:
+        # A daily transition budget is a hard operational limit.  The current
+        # action may need to continue without energy movement at the SOC
+        # reserve/target, but it must not cause a further mode change.
         return (state.action,)
     return (Action.GRID, Action.BATTERY, Action.CHARGE)
 
@@ -87,6 +90,12 @@ def _slot_transition(
     discharge_efficiency = charge_efficiency
     changed = action != state.action
     is_locked_continuation = not changed and state.locked_minutes > 0
+    is_transition_limited_continuation = (
+        not changed and state.transitions >= settings.maximum_transitions
+    )
+    permits_energy_neutral_continuation = (
+        is_locked_continuation or is_transition_limited_continuation
+    )
     transitions = state.transitions + int(changed)
     elapsed_minutes = max(1, round(slot.hours * 60))
     locked = (
@@ -107,11 +116,11 @@ def _slot_transition(
             settings.charge_power_w * slot.hours, headroom_wh / charge_efficiency
         )
         if input_wh <= settings.energy_step_wh / 4:
-            if not is_locked_continuation:
+            if not permits_energy_neutral_continuation:
                 return None
             reason = (
-                "Energy-neutral continuation while minimum mode duration is locked "
-                "at the charge target"
+                "Energy-neutral continuation at the charge target while mode "
+                "changes are constrained"
             )
         else:
             charged_wh = input_wh * charge_efficiency
@@ -120,7 +129,7 @@ def _slot_transition(
     elif action is Action.BATTERY:
         if (
             slot.discharge_price_dkk_per_kwh + 1e-9 < discharge_price_floor
-            and not is_locked_continuation
+            and not permits_energy_neutral_continuation
         ):
             return None
         available_wh = max(0.0, energy_wh - minimum_step * settings.energy_step_wh)
@@ -130,11 +139,11 @@ def _slot_transition(
             available_wh * discharge_efficiency,
         )
         if deliverable_wh <= settings.energy_step_wh / 4:
-            if not is_locked_continuation:
+            if not permits_energy_neutral_continuation:
                 return None
             reason = (
-                "Energy-neutral continuation while minimum mode duration is locked "
-                "at the reserve"
+                "Energy-neutral continuation at the reserve while mode changes "
+                "are constrained"
             )
         else:
             discharged_wh = deliverable_wh / discharge_efficiency

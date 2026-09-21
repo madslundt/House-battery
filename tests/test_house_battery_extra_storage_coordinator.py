@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 from house_battery.coordinator import _strict_extra_storage_rejection
 from house_battery.models import Action, Plan, PlannedSlot, PriceSlot
 
-
 NOW = datetime(2026, 9, 21, 10, tzinfo=UTC)
 
 
