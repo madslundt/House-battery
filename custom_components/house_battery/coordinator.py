@@ -738,6 +738,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_charge_power_w": self._float(CONF_BATTERY_CHARGE_POWER, 0),
             "battery_discharge_power_w": self._float(CONF_BATTERY_DISCHARGE_POWER, 0),
             "local_connected": self._local_snapshot is not None,
+            "local_load_diagnostics": (
+                self._local_snapshot.load_diagnostics
+                if self._local_snapshot is not None
+                else None
+            ),
             "native_min_soc": _control_number(self._local_controls, "3023"),
             "native_max_soc": _control_number(self._local_controls, "3024"),
             "local_operating_mode": self._commanded_local_mode

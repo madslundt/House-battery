@@ -27,6 +27,7 @@ provider, and the mode read-back before re-enabling automatic control.
 | --- | --- |
 | **Battery state of charge** | Current usable battery percentage reported directly by the battery. |
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
+| **Local load diagnostics** | Direct-local entries only. Read-only comparison of the FOSSiBOT whole-site meter, smart-load total, backup-load total, and per-storage off-grid load. It is not used for learning or control until the battery-served scope is confirmed. |
 | **Grid import/export power** | Current power bought from/sent to the grid; used for evidence and accounting. |
 | **Battery charge/discharge power** | Measured instantaneous battery flow; used for learning, throughput, and realized savings estimates. |
 | **Native minimum/maximum SOC** | Allowlisted battery hardware SOC registers. | They are read back after changes and used as the direct control limits. |

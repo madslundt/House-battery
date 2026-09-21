@@ -55,6 +55,24 @@ class FbpLocalSnapshot:
     pv_power_w: float | None
     raw: dict[str, Any]
 
+    @property
+    def load_diagnostics(self) -> dict[str, float | None]:
+        """Expose distinct local load readings without choosing one as truth.
+
+        The grid meter, smart-load total, and backup-load total represent
+        different electrical scopes.  They are intentionally kept separate
+        until the installed battery's response can identify the correct input
+        for the optimizer's connected-load model.
+        """
+        summary = _first_mapping(self.raw.get("SSumInfoList"))
+        storage = _first_mapping(self.raw.get("Storage_list"))
+        return {
+            "meter_total_active_power_w": _number(summary, "MeterTotalActivePower"),
+            "smart_load_power_w": _number(summary, "TotalSmartLoadElectricalPower"),
+            "backup_load_power_w": _number(summary, "TotalBackUpPower"),
+            "off_grid_load_power_w": _number(storage, "OffGridLoadPower"),
+        }
+
 
 class FbpTelemetryValidator:
     """Reject telemetry that is demonstrably incompatible with battery physics.

@@ -31,6 +31,8 @@ def test_decodes_summary_telemetry_without_per_unit_zero_values() -> None:
                     "TotalChargePower": 0,
                     "TotalBatteryOutputPower": 420,
                     "MeterTotalActivePower": 350,
+                    "TotalSmartLoadElectricalPower": 106,
+                    "TotalBackUpPower": 24,
                     "TotalPVPower": 0,
                 }
             ],
@@ -41,6 +43,12 @@ def test_decodes_summary_telemetry_without_per_unit_zero_values() -> None:
     assert snapshot.soc == 63
     assert snapshot.discharge_power_w == 420
     assert snapshot.grid_power_w == 350
+    assert snapshot.load_diagnostics == {
+        "meter_total_active_power_w": 350,
+        "smart_load_power_w": 106,
+        "backup_load_power_w": 24,
+        "off_grid_load_power_w": None,
+    }
 
 
 def test_rejects_missing_or_impossible_soc() -> None:

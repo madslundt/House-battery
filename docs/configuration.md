@@ -18,7 +18,7 @@ those known rows.
 
 | Config-flow field | Expected entity | Notes |
 | --- | --- | --- |
-| Connected/house load power | `sensor` | Watts for load served by this battery. Do not use whole-house demand if the battery cannot serve all of it. |
+| Connected/house load power | `sensor` | Watts for load served by this battery. Do not use whole-house demand if the battery cannot serve all of it. Direct-local entries expose separate local load diagnostics before choosing a battery-served source. |
 | Grid import power | `sensor` | Numeric watts. Used for accounting/telemetry. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |

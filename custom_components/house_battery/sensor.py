@@ -13,6 +13,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import Fbp1200Coordinator
@@ -250,6 +251,11 @@ async def async_setup_entry(
             FbpBatteryLearningSensor(coordinator),
             FbpPriceForecastAccuracySensor(coordinator),
             FbpDecisionHistorySensor(coordinator),
+            *(
+                [FbpLocalLoadDiagnosticsSensor(coordinator)]
+                if coordinator.is_direct_local
+                else []
+            ),
             *(FbpValueSensor(coordinator, description) for description in SENSORS),
         ]
     )
@@ -497,6 +503,41 @@ class FbpDecisionHistorySensor(Fbp1200Entity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"recent": self.coordinator.data.get("recent_decisions", [])}
+
+
+class FbpLocalLoadDiagnosticsSensor(Fbp1200Entity, SensorEntity):
+    """Expose local load scopes without feeding them into control yet."""
+
+    _attr_name = "Local load diagnostics"
+    _attr_icon = "mdi:meter-electric-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "local_load_diagnostics")
+
+    @property
+    def native_value(self) -> str:
+        return (
+            "ready"
+            if self.coordinator.data.get("local_load_diagnostics") is not None
+            else "unavailable"
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            **(self.coordinator.data.get("local_load_diagnostics") or {}),
+            "selection_status": (
+                "Read-only values; none is used for load learning or automatic "
+                "control until the battery-served scope is confirmed."
+            ),
+            "field_meanings": {
+                "meter_total_active_power_w": "Whole-site meter total; never a battery-load candidate.",
+                "smart_load_power_w": "FOSSiBOT smart-load total.",
+                "backup_load_power_w": "FOSSiBOT backup/off-grid output total.",
+                "off_grid_load_power_w": "Per-storage off-grid load reported by the local protocol.",
+            },
+        }
 
 
 class FbpValueSensor(Fbp1200Entity, SensorEntity):
