@@ -140,9 +140,10 @@ class LocalControlAdapter:
             return False, f"local TCP command failed: {exc}"
         if self._direct_mode_changed:
             self._direct_mode_changed(mode)
-        runtime.last_action = action.value
-        runtime.last_action_at = now.isoformat()
-        runtime.transitions.append(now.isoformat())
+        if runtime.last_action != action.value:
+            runtime.last_action = action.value
+            runtime.last_action_at = now.isoformat()
+            runtime.transitions.append(now.isoformat())
         await self._save()
         result = "local TCP command acknowledged; SOC limits read back"
         return True, result if limits_warning is None else f"{result}; {limits_warning}"
@@ -257,9 +258,10 @@ class LocalControlAdapter:
             runtime.execution_enabled = False
             await self._save()
             return False, f"mode read-back did not confirm {mode}"
-        runtime.last_action = action.value
-        runtime.last_action_at = now.isoformat()
-        runtime.transitions.append(now.isoformat())
+        if runtime.last_action != action.value:
+            runtime.last_action = action.value
+            runtime.last_action_at = now.isoformat()
+            runtime.transitions.append(now.isoformat())
         await self._save()
         detail = "command confirmed by Operating Mode entity"
         return True, detail if limits_warning is None else f"{detail}; {limits_warning}"

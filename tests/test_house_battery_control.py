@@ -272,6 +272,42 @@ def test_direct_tcp_command_uses_allowlisted_client_and_updates_commanded_mode()
     assert modes == ["Charge"]
 
 
+def test_repeated_direct_command_does_not_consume_transition_budget() -> None:
+    class DirectClient:
+        async def async_set_limits(self, minimum: int, maximum: int) -> None:
+            del minimum, maximum
+
+        async def async_set_mode(
+            self, mode: str, power: int, *, min_soc: int, max_soc: int
+        ) -> None:
+            del mode, power, min_soc, max_soc
+
+        async def async_set_self_consumption(self) -> None:
+            return None
+
+    state = runtime()
+
+    async def save() -> None:
+        return None
+
+    adapter = LocalControlAdapter(
+        FakeHass(FakeStates({}), FakeServices(FakeStates({}))),
+        config,
+        lambda: state,
+        save,
+        DirectClient,
+    )
+    first = datetime(2026, 9, 21, 16, tzinfo=UTC)
+
+    asyncio.run(adapter.async_command(Action.CHARGE, first, target_soc=90))
+    asyncio.run(
+        adapter.async_command(Action.CHARGE, first.replace(minute=1), target_soc=90)
+    )
+
+    assert state.transitions == [first.isoformat()]
+    assert state.last_action_at == first.isoformat()
+
+
 def test_command_disables_control_when_operating_mode_readback_is_stale() -> None:
     control, state, services, hass = adapter(apply_updates=False)
     hass.states.get("number.fbp_min_soc").state = "10"
