@@ -63,7 +63,18 @@ def _terminal_price(slots: list[PriceSlot]) -> float:
     return median(slot.discharge_price_dkk_per_kwh for slot in tail)
 
 
-def _allowed_actions(state: _State, settings: PlannerSettings) -> tuple[Action, ...]:
+def _allowed_actions(
+    state: _State, settings: PlannerSettings, *, force_grid_exit: bool = False
+) -> tuple[Action, ...]:
+    """Return executable actions, letting the price floor override a battery lock.
+
+    A direct battery's self-consumption mode can physically discharge whenever
+    it remains selected. A synthetic zero-energy ``battery`` plan therefore
+    cannot protect the stored energy above reserve; the local mode must change
+    to Idle/grid when the economic discharge floor is no longer met.
+    """
+    if force_grid_exit:
+        return (Action.GRID,)
     if state.locked_minutes > 0:
         return (state.action,)
     if state.transitions >= settings.maximum_transitions:
@@ -129,7 +140,7 @@ def _slot_transition(
         below_price_floor = (
             slot.discharge_price_dkk_per_kwh + 1e-9 < discharge_price_floor
         )
-        if below_price_floor and not permits_energy_neutral_continuation:
+        if below_price_floor and energy_wh > minimum_step * settings.energy_step_wh:
             return None
         available_wh = max(0.0, energy_wh - minimum_step * settings.energy_step_wh)
         deliverable_wh = (
@@ -238,7 +249,14 @@ def optimize(
             key=lambda item: (item.energy_step, item.action.value, item.transitions),
         ):
             node = previous_layer[state]
-            for action in _allowed_actions(state, settings):
+            force_grid_exit = (
+                state.action is Action.BATTERY
+                and state.energy_step > minimum_step
+                and slot.discharge_price_dkk_per_kwh + 1e-9 < discharge_price_floor
+            )
+            for action in _allowed_actions(
+                state, settings, force_grid_exit=force_grid_exit
+            ):
                 result = _slot_transition(
                     state,
                     action,

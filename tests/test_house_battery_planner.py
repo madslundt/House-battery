@@ -145,8 +145,8 @@ def test_locked_battery_at_reserve_keeps_an_executable_energy_neutral_plan() -> 
     assert "Energy-neutral" in plan.slots[0].reason
 
 
-def test_locked_battery_does_not_discharge_below_the_economic_price_floor() -> None:
-    """A mode lock may preserve the mode, never force an unprofitable cycle."""
+def test_locked_battery_exits_to_grid_below_the_economic_price_floor() -> None:
+    """A mode lock cannot leave hardware in a self-discharging mode."""
     plan = optimize(
         slots([2.0, 2.0]),
         now=BASE - timedelta(seconds=1),
@@ -156,10 +156,10 @@ def test_locked_battery_does_not_discharge_below_the_economic_price_floor() -> N
         mode_lock_remaining_minutes=30,
     )
 
-    assert plan.slots[0].action is Action.BATTERY
+    assert plan.slots[0].action is Action.GRID
     assert plan.slots[0].battery_discharge_wh == 0
     assert plan.slots[0].grid_import_wh == 125
-    assert "Energy-neutral" in plan.slots[0].reason
+    assert "Grid supplies" in plan.slots[0].reason
 
 
 def test_transition_budget_keeps_current_mode() -> None:
@@ -173,8 +173,8 @@ def test_transition_budget_keeps_current_mode() -> None:
     assert all(item.action is Action.GRID for item in plan.slots)
 
 
-def test_transition_budget_allows_battery_pass_through_at_reserve() -> None:
-    """A hard transition cap keeps an executable battery mode at the reserve."""
+def test_transition_budget_yields_to_grid_when_battery_mode_would_lose_money() -> None:
+    """Transition limits cannot retain a self-discharging battery above reserve."""
     plan = optimize(
         slots([1.0, 1.0], load_w=800),
         now=BASE - timedelta(seconds=1),
@@ -185,9 +185,9 @@ def test_transition_budget_allows_battery_pass_through_at_reserve() -> None:
         transitions_used=4,
     )
 
-    assert [item.action for item in plan.slots] == [Action.BATTERY, Action.BATTERY]
-    assert plan.slots[-1].battery_discharge_wh == 0
-    assert plan.slots[-1].grid_import_wh > 0
+    assert [item.action for item in plan.slots] == [Action.GRID, Action.GRID]
+    assert all(item.battery_discharge_wh == 0 for item in plan.slots)
+    assert all(item.grid_import_wh > 0 for item in plan.slots)
 
 
 def test_current_partial_interval_is_planned_from_now() -> None:
