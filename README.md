@@ -77,8 +77,8 @@ integration presentation.
 
 ## Quick safety rules
 
-Keep automatic control off until each local mode, SOC limit, read-back, load
-path, and electrical/export setting has been tested. Bind **Grid available**
+Keep automatic control off until each local mode, SOC limit, read-back,
+battery-served load source, and electrical setting has been tested. Bind **Grid available**
 to a physical on-grid/device status, never a power sensor. Stale telemetry,
 faults, an unknown on-grid status, or an outage fail safe and latch automatic
 control off.

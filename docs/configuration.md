@@ -18,7 +18,7 @@ those known rows.
 
 | Config-flow field | Expected entity | Notes |
 | --- | --- | --- |
-| Connected/house load power | `sensor` | Watts for load served by this battery. Do not use whole-house demand if the battery cannot serve all of it. Direct-local entries expose separate local load diagnostics before choosing a battery-served source. |
+| Battery-served local load source | Options selection | Direct-local entries expose smart-load, backup-load, and complete per-storage total diagnostics. Select one only after verifying its scope, then explicitly confirm it. Until then, learning, planning, and automatic control stay fail-closed. |
 | Grid import power | `sensor` | Numeric watts. Used for accounting/telemetry. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
@@ -92,8 +92,8 @@ The adapter uses exactly these proven local options:
 | --- | --- |
 | `charge` | `Charge` |
 | `grid` | `Idle` |
-| `battery` | `Self-Gen/Zero Export` |
-| `safe` | `Self-Gen/Zero Export` |
+| `battery` | `Self-Gen/Zero Export` (vendor label) |
+| `safe` | `Self-Gen/Zero Export` (vendor label) |
 
 **Operating mode** shows the last command acknowledged by the battery's local
 interface. The vendor app can change the mode separately, so measured
@@ -113,7 +113,7 @@ you mark the integration commissioned in its Options. Commission only after:
 4. Checking the native minimum/maximum SOC controls and the resulting device
    behavior. In particular, understand what the battery does at its minimum
    SOC when the grid is absent.
-5. Confirming export, charging, electrical installation, and tariff behavior
+5. Confirming charging, electrical installation, and tariff behavior
    comply with your local requirements.
 6. Setting capacity, power, reserve, profit, and degradation values to
    conservative values for your battery.

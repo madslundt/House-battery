@@ -25,7 +25,6 @@ class PriceSlot:
     end: datetime
     price: float
     expected_load_wh: float = 0.0
-    expected_pv_wh: float = 0.0
     source: str = "known"
     uncertainty_dkk_per_kwh: float = 0.0
 

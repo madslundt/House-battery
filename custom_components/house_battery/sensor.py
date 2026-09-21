@@ -518,9 +518,18 @@ class FbpLocalLoadDiagnosticsSensor(Fbp1200Entity, SensorEntity):
 
     @property
     def native_value(self) -> str:
+        diagnostics = self.coordinator.data.get("local_load_diagnostics")
         return (
             "ready"
-            if self.coordinator.data.get("local_load_diagnostics") is not None
+            if diagnostics
+            and any(
+                isinstance(diagnostics.get(key), (int, float))
+                for key in (
+                    "smart_load_power_w",
+                    "backup_load_power_w",
+                    "off_grid_load_power_total_w",
+                )
+            )
             else "unavailable"
         )
 
@@ -529,14 +538,19 @@ class FbpLocalLoadDiagnosticsSensor(Fbp1200Entity, SensorEntity):
         return {
             **(self.coordinator.data.get("local_load_diagnostics") or {}),
             "selection_status": (
-                "Read-only values; none is used for load learning or automatic "
-                "control until the battery-served scope is confirmed."
+                "Selected source is used only after it is explicitly confirmed; "
+                "otherwise learning, planning, and automatic control fail closed."
+            ),
+            "selected_source": self.coordinator.config.get("direct_load_source"),
+            "selection_confirmed": bool(
+                self.coordinator.config.get("direct_load_confirmed", False)
             ),
             "field_meanings": {
                 "meter_total_active_power_w": "Whole-site meter total; never a battery-load candidate.",
                 "smart_load_power_w": "FOSSiBOT smart-load total.",
                 "backup_load_power_w": "FOSSiBOT backup/off-grid output total.",
-                "off_grid_load_power_w": "Per-storage off-grid load reported by the local protocol.",
+                "off_grid_load_power_per_unit_w": "Per-storage off-grid readings in Storage_list order; null means that unit did not report it.",
+                "off_grid_load_power_total_w": "Sum of every per-storage reading, available only when every unit reported one.",
             },
         }
 

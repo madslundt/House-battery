@@ -41,15 +41,15 @@ integration is needed.
 3. Verify the created **Battery state of charge**, **Battery charge power**,
    **Battery discharge power**, **Native minimum SOC**, **Native maximum SOC**,
    and **Operating mode** entities.
-4. Verify each intended mode manually: `Charge`, `Idle`/grid, and
-   `Self-Gen/Zero Export`/battery. The operating-mode entity is a local
+4. Verify each intended mode manually: `Charge`, `Idle`, and
+   `Self-Gen/Zero Export`. The operating-mode entity is a local
    commanded state; check the physical power sensors after every command.
 
 ## Bind the required entities
 
 | Binding | What it must mean |
 | --- | --- |
-| Connected/house load power | The load the battery can genuinely serve, in W. |
+| Battery-served local load source | For direct-local entries, select one local diagnostic source in Options only after verifying that it covers the load the battery can genuinely serve. |
 | Grid import power | Imported power, in W. |
 | Grid available / on-grid state | Physical/device-reported supply availability, not grid use. |
 | Known electricity-price entities | Actual published intervals in a supported list attribute. |
@@ -64,7 +64,7 @@ reference.
 
 New entries run in **SHADOW** mode: they build a plan but never write to the
 battery. Leave it there through at least one representative price horizon and
-compare **Current decision**, **Battery mode**, **Operation plan**, and the
+compare **Current decision**, **Battery activity**, **Operation plan**, and the
 power sensors.
 
 Before setting *I verified…* in Options and enabling **Automatic control**:
@@ -73,7 +73,7 @@ Before setting *I verified…* in Options and enabling **Automatic control**:
 - Confirm the native SOC limits are writable and the device honours them.
 - Confirm an outage changes **Grid available** to unavailable; do not test an
   electrical outage unless it is safe and planned.
-- Check that local electrical protection and export rules are already correct.
+- Check that local electrical protection and operating requirements are already correct.
 
 If grid state becomes unknown/unavailable, data are stale, or the device is
 faulted/offline, the optimizer stops economic control. An outage clears the

@@ -18,7 +18,6 @@ class IntervalAccumulator:
     seconds: float = 0.0
     load_wh: float = 0.0
     grid_import_wh: float = 0.0
-    grid_export_wh: float = 0.0
     charge_wh: float = 0.0
     discharge_wh: float = 0.0
     price_seconds: float = 0.0
@@ -34,7 +33,6 @@ class IntervalAccumulator:
         seconds: float,
         load_w: float,
         grid_import_w: float,
-        grid_export_w: float,
         charge_w: float,
         discharge_w: float,
         price: float | None,
@@ -45,7 +43,6 @@ class IntervalAccumulator:
         self.seconds += seconds
         self.load_wh += max(0.0, load_w) * hours
         self.grid_import_wh += max(0.0, grid_import_w) * hours
-        self.grid_export_wh += max(0.0, grid_export_w) * hours
         self.charge_wh += max(0.0, charge_w) * hours
         self.discharge_wh += max(0.0, discharge_w) * hours
         if price is not None:
@@ -68,7 +65,6 @@ class LedgerInterval:
     price_dkk_per_kwh: float | None
     load_kwh: float
     grid_import_kwh: float
-    grid_export_kwh: float
     battery_charge_kwh: float
     battery_discharge_kwh: float
     soc_start: float | None
@@ -105,13 +101,12 @@ class EnergyLedger:
         )
         load_kwh = accumulator.load_wh / 1000
         import_kwh = accumulator.grid_import_wh / 1000
-        export_kwh = accumulator.grid_export_wh / 1000
         charge_kwh = accumulator.charge_wh / 1000
         discharge_kwh = accumulator.discharge_wh / 1000
         degradation = discharge_kwh * degradation_cost
         baseline = load_kwh * price if price is not None and quality == "good" else None
         actual = (
-            (import_kwh - export_kwh) * price
+            import_kwh * price
             if price is not None and quality == "good"
             else None
         )
@@ -127,7 +122,6 @@ class EnergyLedger:
             price_dkk_per_kwh=price,
             load_kwh=load_kwh,
             grid_import_kwh=import_kwh,
-            grid_export_kwh=export_kwh,
             battery_charge_kwh=charge_kwh,
             battery_discharge_kwh=discharge_kwh,
             soc_start=accumulator.soc_first,
@@ -172,6 +166,7 @@ class EnergyLedger:
         intervals = []
         for value in data.get("intervals", []):
             try:
+                value = {key: item for key, item in value.items() if key != "grid_export_kwh"}
                 intervals.append(LedgerInterval(**value))
             except (TypeError, ValueError):
                 continue

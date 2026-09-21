@@ -47,8 +47,33 @@ def test_decodes_summary_telemetry_without_per_unit_zero_values() -> None:
         "meter_total_active_power_w": 350,
         "smart_load_power_w": 106,
         "backup_load_power_w": 24,
-        "off_grid_load_power_w": None,
+        "off_grid_load_power_per_unit_w": [None],
+        "off_grid_load_power_total_w": None,
     }
+
+
+def test_load_diagnostics_keeps_every_storage_unit_and_only_aggregates_complete_data() -> None:
+    snapshot = decode_energy_parameter(
+        {
+            "SSumInfoList": [{"AverageBatteryAverageSOC": 63}],
+            "Storage_list": [
+                {"OffGridLoadPower": 40},
+                {"OffGridLoadPower": 66},
+            ],
+        }
+    )
+
+    assert snapshot.load_diagnostics["off_grid_load_power_per_unit_w"] == [40, 66]
+    assert snapshot.load_diagnostics["off_grid_load_power_total_w"] == 106
+
+    partial = decode_energy_parameter(
+        {
+            "SSumInfoList": [{"AverageBatteryAverageSOC": 63}],
+            "Storage_list": [{"OffGridLoadPower": 40}, {}],
+        }
+    )
+    assert partial.load_diagnostics["off_grid_load_power_per_unit_w"] == [40, None]
+    assert partial.load_diagnostics["off_grid_load_power_total_w"] is None
 
 
 def test_rejects_missing_or_impossible_soc() -> None:

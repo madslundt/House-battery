@@ -55,7 +55,7 @@ class FbpLocalSnapshot:
     raw: dict[str, Any]
 
     @property
-    def load_diagnostics(self) -> dict[str, float | None]:
+    def load_diagnostics(self) -> dict[str, Any]:
         """Expose distinct local load readings without choosing one as truth.
 
         The grid meter, smart-load total, and backup-load total represent
@@ -64,12 +64,20 @@ class FbpLocalSnapshot:
         for the optimizer's connected-load model.
         """
         summary = _first_mapping(self.raw.get("SSumInfoList"))
-        storage = _first_mapping(self.raw.get("Storage_list"))
+        units = _storage_units(self.raw)
+        off_grid_per_unit = [_number(unit, "OffGridLoadPower") for unit in units]
+        # A partial frame must never be presented as a complete stack total.
+        off_grid_total = (
+            sum(value for value in off_grid_per_unit if value is not None)
+            if off_grid_per_unit and all(value is not None for value in off_grid_per_unit)
+            else None
+        )
         return {
             "meter_total_active_power_w": _number(summary, "MeterTotalActivePower"),
             "smart_load_power_w": _number(summary, "TotalSmartLoadElectricalPower"),
             "backup_load_power_w": _number(summary, "TotalBackUpPower"),
-            "off_grid_load_power_w": _number(storage, "OffGridLoadPower"),
+            "off_grid_load_power_per_unit_w": off_grid_per_unit,
+            "off_grid_load_power_total_w": off_grid_total,
         }
 
 

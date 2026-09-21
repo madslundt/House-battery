@@ -15,6 +15,8 @@ from .const import (
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
+    CONF_DIRECT_LOAD_CONFIRMED,
+    CONF_DIRECT_LOAD_SOURCE,
     CONF_DISCHARGE_POWER_CONTROL,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
@@ -29,6 +31,7 @@ from .const import (
     CONF_PRICE_FORECAST_ENTITY,
     CONF_SOC,
     DEFAULT_PORT,
+    DIRECT_LOAD_SOURCES,
     DOMAIN,
     NAME,
 )
@@ -121,6 +124,23 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
         ),
     }
     if options:
+        fields[
+            vol.Required(
+                CONF_DIRECT_LOAD_SOURCE,
+                default=defaults.get(CONF_DIRECT_LOAD_SOURCE, ""),
+            )
+        ] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=list(DIRECT_LOAD_SOURCES),
+                mode=selector.SelectSelectorMode.DROPDOWN,
+            )
+        )
+        fields[
+            vol.Required(
+                CONF_DIRECT_LOAD_CONFIRMED,
+                default=defaults.get(CONF_DIRECT_LOAD_CONFIRMED, False),
+            )
+        ] = bool
         fields[
             vol.Required(
                 CONF_COMMISSIONED, default=defaults.get(CONF_COMMISSIONED, False)

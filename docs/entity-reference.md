@@ -8,18 +8,18 @@ entity picker; names below are the stable, user-facing names.
 | Entity | What it means | How to use it |
 | --- | --- | --- |
 | **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. Read its `reason` attribute first when it is not active. |
-| **Current decision** | The action the current plan wants now: `charge`, `grid`, `battery`, or `safe`. | Compare it with **Battery mode** to see planned versus observed behavior. |
+| **Current decision** | The action the current plan wants now: `charge`, `grid`, `battery`, or `safe`. | Compare it with **Battery activity** to distinguish a planned mode from measured physical movement. |
 | **Battery activity** | Actual battery movement from local charge/discharge telemetry. | `charging`, `discharging`, or `idle`; configured operating mode remains an attribute because it does not prove physical energy movement. |
-| **Operating mode** | Direct local TCP selector for `Charge`, `Idle`, and `Self-Gen/Zero Export`. | This is a commanded state; vendor-app changes are not guaranteed to appear here. |
+| **Operating mode** | Direct local TCP selector for `Charge`, `Idle`, and the vendor-labelled `Self-Gen/Zero Export`. | This is a commanded state; vendor-app changes are not guaranteed to appear here. |
 | **Grid available** | Whether an on-grid supply physically exists. | This is not grid import. `off` produces `OUTAGE` and stops economic control. |
 | **Optimizer problem** | `on` when required telemetry is stale, invalid, faulted, offline, or grid status is unknown. | Treat it as a stop signal. Its `problems` attribute names the failed binding. |
 | **Automatic control** | Explicit permission for House Battery to issue local mode/limit writes. | Leave off during setup. It cannot turn on until the entry is commissioned and native SOC controls pass validation. |
 | **Use external price forecast** | Enables valid, fresh forecast intervals after the end of known prices. | Leave it off while measuring forecast quality. Its `status` attribute explains `used`, `stale`, `invalid`, `empty`, or another non-use result; none of these affects known-price planning. |
 | **Force safe mode** | Button that turns automatic control off and requests the configured safe local mode. | Use immediately if real battery behavior disagrees with the plan. |
 
-Example: if **Current decision** says `battery` but **Battery mode** is `grid`, do
-not “fix” it by changing settings. Inspect **Optimizer problem**, the local
-provider, and the mode read-back before re-enabling automatic control.
+Example: if **Current decision** says `battery` while **Battery activity** is
+`idle`, do not “fix” it by changing settings. Inspect **Optimizer problem**,
+the local provider, and the mode read-back before re-enabling automatic control.
 
 ## Telemetry and economics
 
@@ -27,7 +27,7 @@ provider, and the mode read-back before re-enabling automatic control.
 | --- | --- |
 | **Battery state of charge** | Current usable battery percentage reported directly by the battery. |
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
-| **Local load diagnostics** | Direct-local entries only. Read-only comparison of the FOSSiBOT whole-site meter, smart-load total, backup-load total, and per-storage off-grid load. It is not used for learning or control until the battery-served scope is confirmed. |
+| **Local load diagnostics** | Direct-local entries only. Comparison of the FOSSiBOT whole-site meter, smart-load total, backup-load total, and every storage unit's off-grid reading. It is `ready` only when at least one candidate exists. Select and confirm a source in Options before it can affect learning, planning, or automatic control. |
 | **Grid import power** | Current whole-site power bought from the grid; used for evidence and accounting. |
 | **Battery charge/discharge power** | Measured instantaneous battery flow; used for learning, throughput, and realized savings estimates. |
 | **Native minimum/maximum SOC** | Allowlisted battery hardware SOC registers. | They are read back after changes and used as the direct control limits. |

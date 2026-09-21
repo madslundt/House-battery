@@ -52,16 +52,36 @@ def test_local_load_diagnostics_exposes_scopes_without_selecting_one() -> None:
                 "meter_total_active_power_w": 442,
                 "smart_load_power_w": 106,
                 "backup_load_power_w": 0,
-                "off_grid_load_power_w": 0,
+                "off_grid_load_power_per_unit_w": [0],
+                "off_grid_load_power_total_w": 0,
             }
-        }
+        },
+        config={},
     )
     sensor = SimpleNamespace(coordinator=coordinator)
 
     assert FbpLocalLoadDiagnosticsSensor.native_value.fget(sensor) == "ready"
     attributes = FbpLocalLoadDiagnosticsSensor.extra_state_attributes.fget(sensor)
     assert attributes["smart_load_power_w"] == 106
-    assert "Read-only" in attributes["selection_status"]
+    assert "fail closed" in attributes["selection_status"]
+
+
+def test_local_load_diagnostics_are_unavailable_without_any_candidate_value() -> None:
+    coordinator = SimpleNamespace(
+        data={
+            "local_load_diagnostics": {
+                "meter_total_active_power_w": 442,
+                "smart_load_power_w": None,
+                "backup_load_power_w": None,
+                "off_grid_load_power_per_unit_w": [None, None],
+                "off_grid_load_power_total_w": None,
+            }
+        },
+        config={},
+    )
+    sensor = SimpleNamespace(coordinator=coordinator)
+
+    assert FbpLocalLoadDiagnosticsSensor.native_value.fget(sensor) == "unavailable"
 
 
 def test_battery_activity_uses_physical_power_not_configured_mode() -> None:

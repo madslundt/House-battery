@@ -28,6 +28,16 @@ CONF_PRICE_ENTITIES = "price_entities"
 CONF_PRICE_FORECAST_ENTITY = "price_forecast_entity"
 CONF_PRICE_FORECAST_ENTITIES = "price_forecast_entities"
 CONF_COMMISSIONED = "commissioned"
+CONF_DIRECT_LOAD_SOURCE = "direct_load_source"
+CONF_DIRECT_LOAD_CONFIRMED = "direct_load_confirmed"
+
+# The direct TCP protocol offers several readings with different electrical
+# scopes.  None is safe to assume as the load supplied by this battery.
+DIRECT_LOAD_SOURCES = {
+    "smart_load": "smart_load_power_w",
+    "backup_load": "backup_load_power_w",
+    "off_grid_total": "off_grid_load_power_total_w",
+}
 
 # A direct local connection is the default setup path. The entity keys above
 # remain supported for entries created before direct local support existed.

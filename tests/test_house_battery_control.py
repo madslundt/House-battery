@@ -28,7 +28,7 @@ from house_battery.const import (
     CONF_PRICE_ENTITIES,
     CONF_SOC,
 )
-from house_battery.coordinator import Fbp1200Coordinator, derive_direct_load_power
+from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.local_tcp import FbpLocalSnapshot
 from house_battery.models import Action
 from house_battery.runtime import RuntimeState
@@ -145,12 +145,32 @@ def test_options_require_native_soc_controls_before_commissioning() -> None:
         _schema({}, options=True)(incomplete)
 
 
-def test_direct_load_is_derived_from_grid_and_battery_power() -> None:
-    charging = FbpLocalSnapshot(50, 900, 0, None, {})
-    assert derive_direct_load_power(1907, charging) == 1007
+def test_direct_load_requires_explicit_local_source_confirmation() -> None:
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
 
-    discharging = FbpLocalSnapshot(50, 0, 800, None, {})
-    assert derive_direct_load_power(1907, discharging) == 2707
+        coordinator = Fbp1200Coordinator(
+            HomeAssistant("/tmp"), Entry({"host": "192.168.30.90"})
+        )
+        coordinator._local_snapshot = FbpLocalSnapshot(
+            50,
+            0,
+            800,
+            1907,
+            {"SSumInfoList": [{"TotalSmartLoadElectricalPower": 106}]},
+        )
+
+        assert coordinator._load_power() is None
+        assert "not selected" in (coordinator._direct_load_problem() or "")
+
+        coordinator.entry.options = {
+            "direct_load_source": "smart_load",
+            "direct_load_confirmed": True,
+        }
+        assert coordinator._load_power() == 106
+        assert coordinator._direct_load_problem() is None
+
+    asyncio.run(scenario())
 
 
 def test_direct_setup_requires_only_grid_and_price_sources() -> None:
@@ -406,6 +426,7 @@ def test_enabling_direct_control_recovers_legacy_rapid_transition_burst() -> Non
         coordinator.store = StaticStore(RuntimeState())
         coordinator.async_request_refresh = _no_refresh
         coordinator.async_soc_control_problems = _no_soc_control_problems
+        coordinator._direct_load_problem = lambda: None
         first = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=4)
         coordinator.runtime.transitions = [
             (first + timedelta(minutes=minute)).isoformat() for minute in range(4)
@@ -433,6 +454,27 @@ def test_restart_disables_persisted_control_without_native_soc_controls() -> Non
 
         assert not coordinator.runtime.execution_enabled
         assert store.saved
+
+    asyncio.run(scenario())
+
+
+def test_direct_restart_preserves_control_until_fresh_telemetry_validates_it() -> None:
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        coordinator = Fbp1200Coordinator(
+            hass, Entry({"host": "192.168.30.90", "commissioned": True})
+        )
+        persisted = RuntimeState(execution_enabled=True)
+        store = StaticStore(persisted)
+        coordinator.store = store
+
+        await coordinator.async_initialize()
+
+        assert coordinator.runtime.execution_enabled
+        assert not store.saved
+        assert coordinator._startup_control_gate_reason is not None
 
     asyncio.run(scenario())
 

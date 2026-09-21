@@ -48,7 +48,6 @@ def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
                 slot.end,
                 slot.price,
                 slot.expected_load_wh * remaining_fraction,
-                slot.expected_pv_wh * remaining_fraction,
                 slot.source,
                 slot.uncertainty_dkk_per_kwh,
             )
@@ -85,7 +84,7 @@ def _slot_transition(
     discharge_price_floor: float,
 ) -> tuple[_State, tuple[float, float, float, float, float, str], float] | None:
     energy_wh = state.energy_step * settings.energy_step_wh
-    load_wh = max(0.0, slot.expected_load_wh - slot.expected_pv_wh)
+    load_wh = max(0.0, slot.expected_load_wh)
     charge_efficiency = sqrt(settings.round_trip_efficiency)
     discharge_efficiency = charge_efficiency
     changed = action != state.action
@@ -320,7 +319,7 @@ def optimize(
         )
         next_energy = next_state.energy_step * step_wh
         baseline = (
-            max(0.0, slot.expected_load_wh - slot.expected_pv_wh) / 1000 * slot.price
+            max(0.0, slot.expected_load_wh) / 1000 * slot.price
         )
         planned.append(
             PlannedSlot(

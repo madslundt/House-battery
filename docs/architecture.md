@@ -54,7 +54,7 @@ For each slot it considers `grid`, `charge`, and `battery`, constrained by:
 - round-trip efficiency;
 - minimum mode duration;
 - maximum daily transitions; and
-- expected load minus expected PV.
+- expected battery-served load.
 
 Ties are resolved deterministically by cost, transition count, throughput, and
 action name. Given the same telemetry, stored learning state, settings, and

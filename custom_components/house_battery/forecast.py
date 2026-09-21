@@ -78,7 +78,6 @@ def extend_known_horizon(
                 slot.end,
                 slot.price,
                 slot.expected_load_wh,
-                slot.expected_pv_wh,
                 source="forecast",
                 uncertainty_dkk_per_kwh=max(0.0, uncertainty_dkk_per_kwh),
             )

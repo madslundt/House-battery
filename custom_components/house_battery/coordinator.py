@@ -19,6 +19,8 @@ from .const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
+    CONF_DIRECT_LOAD_CONFIRMED,
+    CONF_DIRECT_LOAD_SOURCE,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
     CONF_LOAD_POWER,
@@ -29,6 +31,7 @@ from .const import (
     CONF_SOC,
     DECISION_HISTORY_LIMIT,
     DEFAULT_PORT,
+    DIRECT_LOAD_SOURCES,
     DOMAIN,
     MODE_BATTERY,
     MODE_CHARGE,
@@ -161,22 +164,6 @@ def _strict_extra_storage_rejection(
     return None
 
 
-def derive_direct_load_power(
-    grid_import_w: float, snapshot: FbpLocalSnapshot
-) -> float:
-    """Estimate served load from a positive-only grid-import meter.
-
-    The direct adapter supplies battery charge and discharge power. With a
-    whole-house import meter, subtract charging and add discharging to recover
-    the load behind that meter. A negative result is physically impossible and
-    is clamped rather than treated as an export measurement.
-    """
-    return max(
-        0.0,
-        grid_import_w + snapshot.discharge_power_w - snapshot.charge_power_w,
-    )
-
-
 class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Present one deep interface over the optimizer implementation."""
 
@@ -214,6 +201,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._local_telemetry_validator = FbpTelemetryValidator()
         self._commanded_local_mode = MODE_SAFE
         self._observed_local_mode: str | None = None
+        self._startup_control_gate_reason: str | None = None
         self.actuator = LocalControlAdapter(
             hass,
             lambda: self.config,
@@ -252,7 +240,14 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.runtime.load_learner.configure_time_zone(
             dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         )
-        if self.runtime.execution_enabled:
+        if self.runtime.execution_enabled and self.is_direct_local:
+            # Do not revoke persisted consent merely because the battery has
+            # not finished accepting its local TCP session during HA startup.
+            # The first fresh refresh validates controls and sends no command.
+            self._startup_control_gate_reason = (
+                "Awaiting fresh local telemetry and SOC-control validation after restart"
+            )
+        elif self.runtime.execution_enabled:
             problems = await self.async_soc_control_problems()
             if not self.config.get(CONF_COMMISSIONED, False) or problems:
                 self.runtime.execution_enabled = False
@@ -282,14 +277,46 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return default
 
     def _load_power(self, default: float | None = None) -> float | None:
-        """Return a configured load sensor or derive it for direct-local setup."""
+        """Return only a configured or explicitly confirmed served-load value."""
         configured = self._float(CONF_LOAD_POWER)
-        if configured is not None:
+        if configured is not None and not self.is_direct_local:
             return configured
-        grid_import = self._float(CONF_GRID_IMPORT_POWER)
-        if self._local_snapshot is not None and grid_import is not None:
-            return derive_direct_load_power(grid_import, self._local_snapshot)
+        if self.is_direct_local and self._local_snapshot is not None:
+            source = self.config.get(CONF_DIRECT_LOAD_SOURCE)
+            field = DIRECT_LOAD_SOURCES.get(source)
+            diagnostics = self._local_snapshot.load_diagnostics
+            if self.config.get(CONF_DIRECT_LOAD_CONFIRMED) and field:
+                value = diagnostics.get(field)
+                if isinstance(value, (int, float)):
+                    return float(value)
         return default
+
+    def _direct_load_problem(self) -> str | None:
+        """Explain why direct-local load data is not safe for the model yet."""
+        if not self.is_direct_local:
+            return None
+        source = self.config.get(CONF_DIRECT_LOAD_SOURCE)
+        field = DIRECT_LOAD_SOURCES.get(source)
+        if not field or not self.config.get(CONF_DIRECT_LOAD_CONFIRMED):
+            return "battery-served load source is not selected and confirmed"
+        if self._local_snapshot is None:
+            return "battery-served load source cannot be read without local telemetry"
+        value = self._local_snapshot.load_diagnostics.get(field)
+        if not isinstance(value, (int, float)):
+            return f"confirmed battery-served load source {source} is unavailable"
+        return None
+
+    def _direct_soc_control_problems_from_snapshot(self) -> list[str]:
+        """Validate controls read with the fresh telemetry frame, without a race."""
+        minimum = _control_number(self._local_controls, "3023")
+        maximum = _control_number(self._local_controls, "3024")
+        if minimum is None or maximum is None or not 0 <= minimum <= maximum <= 100:
+            return ["native SOC controls report invalid or unavailable bounds"]
+        requested_min = self.runtime.settings["absolute_min_soc"]
+        requested_max = self.runtime.settings["opportunistic_target_soc"]
+        if not 0 <= requested_min <= requested_max <= 100:
+            return ["configured SOC limits are invalid"]
+        return []
 
     def _observed_power(self, key: str, default: float | None = None) -> float | None:
         if key == CONF_LOAD_POWER:
@@ -453,7 +480,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     slot.end,
                     slot.price,
                     expected_load_wh=load_w * slot.hours + scheduled_wh,
-                    expected_pv_wh=0.0,
                     source=slot.source,
                     uncertainty_dkk_per_kwh=slot.uncertainty_dkk_per_kwh,
                 )
@@ -556,12 +582,24 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         problems = get_health_problems(self.hass, self.config, now)
         if local_problem:
             problems.append(local_problem)
+        if direct_load_problem := self._direct_load_problem():
+            problems.append(direct_load_problem)
+        direct_control_problems: list[str] = []
+        if self.runtime.execution_enabled and self.is_direct_local:
+            direct_control_problems = self._direct_soc_control_problems_from_snapshot()
+            problems.extend(direct_control_problems)
+        if (
+            self._startup_control_gate_reason is not None
+            and not local_problem
+            and not direct_control_problems
+        ):
+            self._startup_control_gate_reason = None
         soc = self._float(CONF_SOC)
         slots = self._price_slots(now)
         action = self._observed_action()
         grid_available = self._grid_available()
         price = self._current_price(slots, now)
-        if soc is not None:
+        if soc is not None and not direct_load_problem:
             await self.evidence.async_observe(now, price, action, soc)
 
         state = "BOOTSTRAP"
@@ -726,6 +764,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             else Action.SAFE.value,
             "observed_action": action.value,
             "execution_enabled": self.runtime.execution_enabled,
+            "automatic_control_startup_gate": self._startup_control_gate_reason,
             "commissioned": bool(self.config.get(CONF_COMMISSIONED, False)),
             "grid_available": grid_available,
             "command_result": command_result,
@@ -857,6 +896,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"SOC controls: {'; '.join(problems)}"
             )
         if enabled and self.is_direct_local:
+            if problem := self._direct_load_problem():
+                raise ValueError(
+                    "Automatic control requires a confirmed battery-served local "
+                    f"load source: {problem}"
+                )
             self.runtime.collapse_rapid_transition_burst(
                 datetime.now(UTC),
                 maximum_transitions=round(
@@ -865,6 +909,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         was_enabled = self.runtime.execution_enabled
         self.runtime.execution_enabled = enabled
+        self._startup_control_gate_reason = None
         await self.store.save(self.runtime)
         if was_enabled and not enabled:
             await self.actuator.async_command(Action.SAFE, datetime.now(UTC))
