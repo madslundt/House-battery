@@ -64,8 +64,11 @@ class FbpLocalSnapshot:
         for the optimizer's connected-load model.
         """
         summary = _first_mapping(self.raw.get("SSumInfoList"))
-        units = _storage_units(self.raw)
-        off_grid_per_unit = [_number(unit, "OffGridLoadPower") for unit in units]
+        units = _storage_entries(self.raw)
+        off_grid_per_unit = [
+            _number(unit, "OffGridLoadPower") if unit is not None else None
+            for unit in units
+        ]
         # A partial frame must never be presented as a complete stack total.
         off_grid_total = (
             sum(value for value in off_grid_per_unit if value is not None)
@@ -294,7 +297,14 @@ class FbpLocalTcpClient:
 def decode_energy_parameter(response: dict[str, Any]) -> FbpLocalSnapshot:
     """Decode only conservative, known summary/storage fields."""
     summary = _first_mapping(response.get("SSumInfoList"))
-    storage = _first_mapping(response.get("Storage_list"))
+    storage_entries = _storage_entries(response)
+    # System summaries are authoritative for a stack.  A multi-unit fallback
+    # would silently turn unit 0 into the whole battery, so reject it instead.
+    storage = (
+        _first_mapping(response.get("Storage_list"))
+        if len(storage_entries) <= 1
+        else {}
+    )
     soc = _number(summary, "AverageBatteryAverageSOC") or _number(storage, "BatterySoc")
     if soc is None or not 0 <= soc <= 100:
         raise LocalProtocolError("missing or invalid battery SOC")
@@ -362,6 +372,14 @@ def _first_mapping(value: Any) -> dict[str, Any]:
 def _storage_units(response: dict[str, Any]) -> list[dict[str, Any]]:
     value = response.get("Storage_list")
     return [unit for unit in value if isinstance(unit, dict)] if isinstance(value, list) else []
+
+
+def _storage_entries(response: dict[str, Any]) -> list[dict[str, Any] | None]:
+    """Preserve every Storage_list position for transparent stack diagnostics."""
+    value = response.get("Storage_list")
+    if not isinstance(value, list):
+        return []
+    return [unit if isinstance(unit, dict) else None for unit in value]
 
 
 def _control_value_matches(key: str, expected: str, observed: str | None) -> bool:

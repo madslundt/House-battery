@@ -16,6 +16,7 @@ from .const import (
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
     CONF_DIRECT_LOAD_CONFIRMED,
+    CONF_DIRECT_LOAD_CONFIRMED_SOURCE,
     CONF_DIRECT_LOAD_SOURCE,
     CONF_DISCHARGE_POWER_CONTROL,
     CONF_FAULT,
@@ -233,6 +234,18 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         defaults = {**self._entry.data, **self._entry.options}
         if user_input is not None:
+            if self._entry.data.get(CONF_HOST):
+                previous_source = defaults.get(CONF_DIRECT_LOAD_SOURCE)
+                source = user_input.get(CONF_DIRECT_LOAD_SOURCE)
+                if source != previous_source:
+                    # A checkbox approval applies to the source it was shown
+                    # with; changing scope always needs a fresh confirmation.
+                    user_input[CONF_DIRECT_LOAD_CONFIRMED] = False
+                    user_input[CONF_DIRECT_LOAD_CONFIRMED_SOURCE] = None
+                elif user_input.get(CONF_DIRECT_LOAD_CONFIRMED):
+                    user_input[CONF_DIRECT_LOAD_CONFIRMED_SOURCE] = source
+                else:
+                    user_input[CONF_DIRECT_LOAD_CONFIRMED_SOURCE] = None
             return self.async_create_entry(title="", data=user_input)
         if self._entry.data.get(CONF_HOST):
             return self.async_show_form(

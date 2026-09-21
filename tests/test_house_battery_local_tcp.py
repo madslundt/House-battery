@@ -75,6 +75,27 @@ def test_load_diagnostics_keeps_every_storage_unit_and_only_aggregates_complete_
     assert partial.load_diagnostics["off_grid_load_power_per_unit_w"] == [40, None]
     assert partial.load_diagnostics["off_grid_load_power_total_w"] is None
 
+    malformed = decode_energy_parameter(
+        {
+            "SSumInfoList": [{"AverageBatteryAverageSOC": 63}],
+            "Storage_list": [{"OffGridLoadPower": 40}, None],
+        }
+    )
+    assert malformed.load_diagnostics["off_grid_load_power_per_unit_w"] == [40, None]
+    assert malformed.load_diagnostics["off_grid_load_power_total_w"] is None
+
+
+def test_rejects_multi_unit_fallback_without_a_proven_summary() -> None:
+    with pytest.raises(LocalProtocolError, match="SOC"):
+        decode_energy_parameter(
+            {
+                "Storage_list": [
+                    {"BatterySoc": 50, "BatteryDischargingPower": 8000},
+                    {"BatterySoc": 50, "BatteryDischargingPower": 8000},
+                ]
+            }
+        )
+
 
 def test_rejects_missing_or_impossible_soc() -> None:
     with pytest.raises(LocalProtocolError, match="SOC"):

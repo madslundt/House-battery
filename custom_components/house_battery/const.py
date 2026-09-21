@@ -30,6 +30,7 @@ CONF_PRICE_FORECAST_ENTITIES = "price_forecast_entities"
 CONF_COMMISSIONED = "commissioned"
 CONF_DIRECT_LOAD_SOURCE = "direct_load_source"
 CONF_DIRECT_LOAD_CONFIRMED = "direct_load_confirmed"
+CONF_DIRECT_LOAD_CONFIRMED_SOURCE = "direct_load_confirmed_source"
 
 # The direct TCP protocol offers several readings with different electrical
 # scopes.  None is safe to assume as the load supplied by this battery.

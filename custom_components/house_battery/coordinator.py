@@ -20,6 +20,7 @@ from .const import (
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
     CONF_DIRECT_LOAD_CONFIRMED,
+    CONF_DIRECT_LOAD_CONFIRMED_SOURCE,
     CONF_DIRECT_LOAD_SOURCE,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
@@ -42,6 +43,7 @@ from .const import (
 from .evidence import EvidenceCollector
 from .forecast import assess_external_forecast, extend_known_horizon
 from .health import get_health_problems
+from .learning import LoadLearner
 from .local_tcp import (
     FbpLocalSnapshot,
     FbpLocalTcpClient,
@@ -240,6 +242,21 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.runtime.load_learner.configure_time_zone(
             dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         )
+        if self.is_direct_local:
+            source = self.config.get(CONF_DIRECT_LOAD_SOURCE)
+            confirmed = self.config.get(CONF_DIRECT_LOAD_CONFIRMED_SOURCE)
+            learner_source = (
+                f"direct:{source}"
+                if source and source == confirmed and self.config.get(CONF_DIRECT_LOAD_CONFIRMED)
+                else "direct:unconfirmed"
+            )
+            if self.runtime.load_learner_source != learner_source:
+                self.runtime.load_learner = LoadLearner()
+                self.runtime.load_learner.configure_time_zone(
+                    dt_util.get_time_zone(self.hass.config.time_zone) or UTC
+                )
+                self.runtime.load_learner_source = learner_source
+                await self.store.save(self.runtime)
         if self.runtime.execution_enabled and self.is_direct_local:
             # Do not revoke persisted consent merely because the battery has
             # not finished accepting its local TCP session during HA startup.
@@ -297,7 +314,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         source = self.config.get(CONF_DIRECT_LOAD_SOURCE)
         field = DIRECT_LOAD_SOURCES.get(source)
-        if not field or not self.config.get(CONF_DIRECT_LOAD_CONFIRMED):
+        if (
+            not field
+            or not self.config.get(CONF_DIRECT_LOAD_CONFIRMED)
+            or self.config.get(CONF_DIRECT_LOAD_CONFIRMED_SOURCE) != source
+        ):
             return "battery-served load source is not selected and confirmed"
         if self._local_snapshot is None:
             return "battery-served load source cannot be read without local telemetry"
@@ -588,12 +609,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.runtime.execution_enabled and self.is_direct_local:
             direct_control_problems = self._direct_soc_control_problems_from_snapshot()
             problems.extend(direct_control_problems)
-        if (
-            self._startup_control_gate_reason is not None
-            and not local_problem
-            and not direct_control_problems
-        ):
-            self._startup_control_gate_reason = None
         soc = self._float(CONF_SOC)
         slots = self._price_slots(now)
         action = self._observed_action()
@@ -607,7 +622,20 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         command_result = "no command"
         effective_settings: PlannerSettings | None = None
         storage_policy: StoragePolicy | None = None
-        if grid_available is False:
+        startup_waiting = (
+            self._startup_control_gate_reason is not None
+            and direct_load_problem is None
+            and (bool(problems) or grid_available is not True)
+        )
+        if startup_waiting:
+            self.plan = None
+            state = "BOOTSTRAP"
+            reason = (
+                "Awaiting fresh post-restart telemetry and control validation: "
+                + "; ".join(problems or ["grid availability is not confirmed"])
+            )
+            command_result = "startup gate is inhibiting writes"
+        elif grid_available is False:
             self.plan = None
             state = "OUTAGE"
             reason = "Grid is unavailable; optimizer is preserving the absolute emergency SOC"
@@ -678,10 +706,20 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.plan = None
                 problems.append(str(exc))
             if not self.plan or not self.plan.slots:
-                state = "DEGRADED"
-                reason = self.plan.reason if self.plan else "; ".join(problems)
-                command_result = await self._force_safe_if_needed(now)
+                if self._startup_control_gate_reason is not None:
+                    state = "BOOTSTRAP"
+                    reason = (
+                        "Awaiting a valid post-restart plan before allowing "
+                        "automatic writes: "
+                        + (self.plan.reason if self.plan else "; ".join(problems))
+                    )
+                    command_result = "startup gate is inhibiting writes"
+                else:
+                    state = "DEGRADED"
+                    reason = self.plan.reason if self.plan else "; ".join(problems)
+                    command_result = await self._force_safe_if_needed(now)
             else:
+                self._startup_control_gate_reason = None
                 commissioned = bool(self.config.get(CONF_COMMISSIONED, False))
                 state = (
                     "ACTIVE"

@@ -166,6 +166,7 @@ def test_direct_load_requires_explicit_local_source_confirmation() -> None:
         coordinator.entry.options = {
             "direct_load_source": "smart_load",
             "direct_load_confirmed": True,
+            "direct_load_confirmed_source": "smart_load",
         }
         assert coordinator._load_power() == 106
         assert coordinator._direct_load_problem() is None
@@ -473,8 +474,38 @@ def test_direct_restart_preserves_control_until_fresh_telemetry_validates_it() -
         await coordinator.async_initialize()
 
         assert coordinator.runtime.execution_enabled
-        assert not store.saved
+        assert store.saved  # Learner provenance is migrated before validation.
         assert coordinator._startup_control_gate_reason is not None
+
+    asyncio.run(scenario())
+
+
+def test_direct_load_history_is_reset_when_the_confirmed_source_changes() -> None:
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        coordinator = Fbp1200Coordinator(
+            hass,
+            Entry(
+                {
+                    "host": "192.168.30.90",
+                    "direct_load_source": "off_grid_total",
+                    "direct_load_confirmed": True,
+                    "direct_load_confirmed_source": "off_grid_total",
+                }
+            ),
+        )
+        persisted = RuntimeState(load_learner_source="direct:smart_load")
+        persisted.load_learner.recent_w = 442
+        store = StaticStore(persisted)
+        coordinator.store = store
+
+        await coordinator.async_initialize()
+
+        assert coordinator.runtime.load_learner_source == "direct:off_grid_total"
+        assert not coordinator.runtime.load_learner.recent_w
+        assert store.saved
 
     asyncio.run(scenario())
 

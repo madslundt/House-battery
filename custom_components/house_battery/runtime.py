@@ -20,6 +20,7 @@ class RuntimeState:
 
     settings: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SETTINGS))
     load_learner: LoadLearner = field(default_factory=LoadLearner)
+    load_learner_source: str | None = None
     battery_learner: BatteryLearner = field(default_factory=BatteryLearner)
     ledger: EnergyLedger = field(default_factory=EnergyLedger)
     decisions: list[dict[str, Any]] = field(default_factory=list)
@@ -98,6 +99,7 @@ class RuntimeState:
         return {
             "settings": self.settings,
             "load_learner": self.load_learner.as_dict(),
+            "load_learner_source": self.load_learner_source,
             "battery_learner": self.battery_learner.as_dict(),
             "ledger": self.ledger.as_dict(),
             "decisions": self.decisions[-500:],
@@ -155,6 +157,11 @@ class RuntimeState:
         return cls(
             settings=settings,
             load_learner=LoadLearner.from_dict(data.get("load_learner", {})),
+            load_learner_source=(
+                data.get("load_learner_source")
+                if isinstance(data.get("load_learner_source"), str)
+                else None
+            ),
             battery_learner=BatteryLearner.from_dict(data.get("battery_learner", {})),
             ledger=EnergyLedger.from_dict(data.get("ledger", {})),
             decisions=list(data.get("decisions", []))[-500:],
