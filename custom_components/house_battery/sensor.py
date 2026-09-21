@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
@@ -23,6 +27,7 @@ class FbpSensorDescription:
     icon: str
     unit: str | None = None
     precision: int | None = None
+    device_class: SensorDeviceClass | None = None
     state_class: SensorStateClass | None = None
 
 
@@ -166,6 +171,7 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
     FbpSensorDescription(
@@ -174,6 +180,7 @@ SENSORS = (
         icon="mdi:battery-sync",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
     FbpSensorDescription(
@@ -499,6 +506,7 @@ class FbpValueSensor(Fbp1200Entity, SensorEntity):
         self._attr_icon = description.icon
         self._attr_native_unit_of_measurement = description.unit
         self._attr_suggested_display_precision = description.precision
+        self._attr_device_class = description.device_class
         self._attr_state_class = description.state_class
 
     @property
