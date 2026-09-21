@@ -52,7 +52,6 @@ class FbpLocalSnapshot:
     charge_power_w: float
     discharge_power_w: float
     grid_power_w: float | None
-    pv_power_w: float | None
     raw: dict[str, Any]
 
     @property
@@ -306,7 +305,6 @@ def decode_energy_parameter(response: dict[str, Any]) -> FbpLocalSnapshot:
         max(0, charge),
         max(0, discharge),
         _number(summary, "MeterTotalActivePower"),
-        _number(summary, "TotalPVPower"),
         response,
     )
 

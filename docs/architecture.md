@@ -86,7 +86,7 @@ higher ceiling.
 ## Accounting and degradation
 
 The evidence ledger is updated in 15-minute intervals from sampled observed
-connected-load power, grid import/export power, battery charge/discharge power,
+connected-load power, grid-import power, battery charge/discharge power,
 SOC, the current price, and the optimizer's current action. It records
 estimated realized savings and charge/discharge energy for today, month, and
 lifetime. Forecast load and future plan values are not treated as observed

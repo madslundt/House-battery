@@ -9,7 +9,7 @@ entity picker; names below are the stable, user-facing names.
 | --- | --- | --- |
 | **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. Read its `reason` attribute first when it is not active. |
 | **Current decision** | The action the current plan wants now: `charge`, `grid`, `battery`, or `safe`. | Compare it with **Battery mode** to see planned versus observed behavior. |
-| **Battery mode** | Last local operating-mode command. | `charge` maps to `Charge`; `grid` maps to `Idle`; `battery` maps to self-consumption/zero-export. Physical power sensors remain the final evidence. |
+| **Battery activity** | Actual battery movement from local charge/discharge telemetry. | `charging`, `discharging`, or `idle`; configured operating mode remains an attribute because it does not prove physical energy movement. |
 | **Operating mode** | Direct local TCP selector for `Charge`, `Idle`, and `Self-Gen/Zero Export`. | This is a commanded state; vendor-app changes are not guaranteed to appear here. |
 | **Grid available** | Whether an on-grid supply physically exists. | This is not grid import. `off` produces `OUTAGE` and stops economic control. |
 | **Optimizer problem** | `on` when required telemetry is stale, invalid, faulted, offline, or grid status is unknown. | Treat it as a stop signal. Its `problems` attribute names the failed binding. |
@@ -28,10 +28,9 @@ provider, and the mode read-back before re-enabling automatic control.
 | **Battery state of charge** | Current usable battery percentage reported directly by the battery. |
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
 | **Local load diagnostics** | Direct-local entries only. Read-only comparison of the FOSSiBOT whole-site meter, smart-load total, backup-load total, and per-storage off-grid load. It is not used for learning or control until the battery-served scope is confirmed. |
-| **Grid import/export power** | Current power bought from/sent to the grid; used for evidence and accounting. |
+| **Grid import power** | Current whole-site power bought from the grid; used for evidence and accounting. |
 | **Battery charge/discharge power** | Measured instantaneous battery flow; used for learning, throughput, and realized savings estimates. |
 | **Native minimum/maximum SOC** | Allowlisted battery hardware SOC registers. | They are read back after changes and used as the direct control limits. |
-| **PV input power** | Optional measured solar input used to reduce expected net load. |
 | **Current electricity price** | Price for the current known price interval. |
 | **Expected plan savings** | Forecast saving across the current known horizon versus buying expected load from grid. It is a forecast, not cash earned. |
 | **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Compare matching tariff periods, not one unusual day. |

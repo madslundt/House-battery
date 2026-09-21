@@ -146,10 +146,10 @@ def test_options_require_native_soc_controls_before_commissioning() -> None:
 
 
 def test_direct_load_is_derived_from_grid_and_battery_power() -> None:
-    charging = FbpLocalSnapshot(50, 900, 0, None, None, {})
+    charging = FbpLocalSnapshot(50, 900, 0, None, {})
     assert derive_direct_load_power(1907, charging) == 1007
 
-    discharging = FbpLocalSnapshot(50, 0, 800, None, None, {})
+    discharging = FbpLocalSnapshot(50, 0, 800, None, {})
     assert derive_direct_load_power(1907, discharging) == 2707
 
 

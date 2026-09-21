@@ -54,7 +54,7 @@ integration is needed.
 | Grid available / on-grid state | Physical/device-reported supply availability, not grid use. |
 | Known electricity-price entities | Actual published intervals in a supported list attribute. |
 
-Grid export, PV input, fault, and online status are optional. The direct
+Fault and online status are optional. The direct
 adapter supplies the battery telemetry and native SOC controls; the latter are
 validated again when you enable automatic control. See
 [configuration.md](configuration.md) for accepted values and the full field

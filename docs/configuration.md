@@ -24,7 +24,7 @@ those known rows.
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
 | External price forecast entities | optional ordered `sensor` list | Same row format; each is scored independently; the first usable source that can safely extend the horizon is used for planning. |
 
-Grid export power, PV power, fault state, and online state are optional.
+Fault state and online state are optional.
 Battery SOC, charge/discharge power, the **Operating mode** selector, and the
 native minimum/maximum SOC controls come from the direct connection. Native
 SOC limits are read back after every automatic limit write and checked again

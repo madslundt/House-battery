@@ -10,7 +10,6 @@ from .accounting import IntervalAccumulator
 from .const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
-    CONF_GRID_EXPORT_POWER,
     CONF_GRID_IMPORT_POWER,
     CONF_LOAD_POWER,
 )
@@ -71,7 +70,7 @@ class EvidenceCollector:
             seconds=elapsed,
             load_w=self._value(CONF_LOAD_POWER, 0) or 0,
             grid_import_w=self._value(CONF_GRID_IMPORT_POWER, 0) or 0,
-            grid_export_w=self._value(CONF_GRID_EXPORT_POWER, 0) or 0,
+            grid_export_w=0,
             charge_w=self._value(CONF_BATTERY_CHARGE_POWER, 0) or 0,
             discharge_w=self._value(CONF_BATTERY_DISCHARGE_POWER, 0) or 0,
             price=price,

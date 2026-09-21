@@ -20,14 +20,12 @@ from .const import (
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
     CONF_GRID_AVAILABLE,
-    CONF_GRID_EXPORT_POWER,
     CONF_GRID_IMPORT_POWER,
     CONF_LOAD_POWER,
     CONF_OPERATING_MODE,
     CONF_PRICE_ENTITIES,
     CONF_PRICE_FORECAST_ENTITIES,
     CONF_PRICE_FORECAST_ENTITY,
-    CONF_PV_POWER,
     CONF_SOC,
     DECISION_HISTORY_LIMIT,
     DEFAULT_PORT,
@@ -734,7 +732,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "soc": soc,
             "load_power_w": self._load_power(),
             "grid_import_power_w": self._float(CONF_GRID_IMPORT_POWER),
-            "grid_export_power_w": self._float(CONF_GRID_EXPORT_POWER, 0),
             "battery_charge_power_w": self._float(CONF_BATTERY_CHARGE_POWER, 0),
             "battery_discharge_power_w": self._float(CONF_BATTERY_DISCHARGE_POWER, 0),
             "local_connected": self._local_snapshot is not None,
@@ -751,7 +748,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "local_observed_mode": self._observed_local_mode
             if self.is_direct_local
             else None,
-            "pv_power_w": self._float(CONF_PV_POWER, 0),
             "current_price_dkk_per_kwh": price,
             "expected_savings_dkk": self.plan.expected_savings_dkk
             if self.plan

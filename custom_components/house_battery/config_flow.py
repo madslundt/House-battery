@@ -18,7 +18,6 @@ from .const import (
     CONF_DISCHARGE_POWER_CONTROL,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
-    CONF_GRID_EXPORT_POWER,
     CONF_GRID_IMPORT_POWER,
     CONF_LOAD_POWER,
     CONF_MAX_SOC_CONTROL,
@@ -28,7 +27,6 @@ from .const import (
     CONF_PRICE_ENTITIES,
     CONF_PRICE_FORECAST_ENTITIES,
     CONF_PRICE_FORECAST_ENTITY,
-    CONF_PV_POWER,
     CONF_SOC,
     DEFAULT_PORT,
     DOMAIN,
@@ -83,10 +81,8 @@ def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
         _optional(CONF_PRICE_FORECAST_ENTITIES, defaults): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="sensor", multiple=True)
         ),
-        _optional(CONF_GRID_EXPORT_POWER, defaults): _entity("sensor"),
         _required(CONF_BATTERY_CHARGE_POWER, defaults): _entity("sensor"),
         _required(CONF_BATTERY_DISCHARGE_POWER, defaults): _entity("sensor"),
-        _optional(CONF_PV_POWER, defaults): _entity("sensor"),
         _optional(CONF_FAULT, defaults): _entity(["sensor", "binary_sensor"]),
         _optional(CONF_ONLINE, defaults): _entity(["sensor", "binary_sensor"]),
         _optional(CONF_CHARGE_POWER_CONTROL, defaults): _entity("number"),

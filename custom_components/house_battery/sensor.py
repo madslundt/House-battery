@@ -55,13 +55,6 @@ SENSORS = (
         precision=0,
     ),
     FbpSensorDescription(
-        key="grid_export_power_w",
-        name="Grid export power",
-        icon="mdi:transmission-tower-export",
-        unit=UnitOfPower.WATT,
-        precision=0,
-    ),
-    FbpSensorDescription(
         key="battery_charge_power_w",
         name="Battery charge power",
         icon="mdi:battery-plus",
@@ -72,13 +65,6 @@ SENSORS = (
         key="battery_discharge_power_w",
         name="Battery discharge power",
         icon="mdi:battery-minus",
-        unit=UnitOfPower.WATT,
-        precision=0,
-    ),
-    FbpSensorDescription(
-        key="pv_power_w",
-        name="PV input power",
-        icon="mdi:solar-power",
         unit=UnitOfPower.WATT,
         precision=0,
     ),
@@ -342,13 +328,28 @@ class FbpActionSensor(Fbp1200Entity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             "reason": self.coordinator.data.get("reason"),
-            "observed_action": self.coordinator.data.get("observed_action"),
+            "configured_action": self.coordinator.data.get("observed_action"),
+            "battery_activity": _battery_activity(self.coordinator.data),
             "command_result": self.coordinator.data.get("command_result"),
         }
 
 
+def _battery_activity(data: dict[str, Any]) -> str:
+    """Classify physical battery power, never a configured operating mode."""
+    charge = float(data.get("battery_charge_power_w") or 0)
+    discharge = float(data.get("battery_discharge_power_w") or 0)
+    threshold_w = 10
+    if charge >= threshold_w and discharge >= threshold_w:
+        return "conflict"
+    if charge >= threshold_w:
+        return "charging"
+    if discharge >= threshold_w:
+        return "discharging"
+    return "idle"
+
+
 class FbpModeSensor(Fbp1200Entity, SensorEntity):
-    _attr_name = "Battery mode"
+    _attr_name = "Battery activity"
     _attr_icon = "mdi:battery-sync"
 
     def __init__(self, coordinator: Fbp1200Coordinator) -> None:
@@ -356,19 +357,19 @@ class FbpModeSensor(Fbp1200Entity, SensorEntity):
 
     @property
     def native_value(self) -> str:
-        return self.coordinator.data.get("observed_action", Action.SAFE.value)
+        return _battery_activity(self.coordinator.data)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
-            "source": (
-                "local control-register read-back"
-                if self.coordinator.is_direct_local
-                else self.coordinator.config.get("operating_mode_entity")
-            ),
-            "local_observed_mode": self.coordinator.data.get("local_observed_mode"),
+            "source": "battery charge/discharge power telemetry",
+            "configured_mode": self.coordinator.data.get("local_observed_mode"),
+            "configured_action": self.coordinator.data.get("observed_action"),
             "current_decision": self.coordinator.data.get("current_action"),
-            "note": "Control-register read-back expresses configured mode; charge and discharge power sensors show the physical result.",
+            "charge_power_w": self.coordinator.data.get("battery_charge_power_w"),
+            "discharge_power_w": self.coordinator.data.get("battery_discharge_power_w"),
+            "active_power_threshold_w": 10,
+            "note": "Physical activity is idle below 10 W. Configured mode is shown separately and does not prove energy movement.",
         }
 
 

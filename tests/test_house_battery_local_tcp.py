@@ -216,15 +216,15 @@ def test_mode_command_accepts_equivalent_normalized_slot_readback(
 def test_telemetry_validator_rejects_false_zero_and_implausible_soc_changes() -> None:
     validator = FbpTelemetryValidator()
     now = datetime(2026, 9, 20, tzinfo=UTC)
-    accepted = FbpLocalSnapshot(50, 0, 0, None, None, {"Storage_list": [{}]})
+    accepted = FbpLocalSnapshot(50, 0, 0, None, {"Storage_list": [{}]})
 
     assert validator.validate(accepted, now) is None
     assert "zero" in validator.validate(
-        FbpLocalSnapshot(0, 0, 500, None, None, {"Storage_list": [{}]}),
+        FbpLocalSnapshot(0, 0, 500, None, {"Storage_list": [{}]}),
         now + timedelta(minutes=1),
     )
     assert "implausible" in validator.validate(
-        FbpLocalSnapshot(90, 0, 0, None, None, {"Storage_list": [{}]}),
+        FbpLocalSnapshot(90, 0, 0, None, {"Storage_list": [{}]}),
         now + timedelta(minutes=1),
     )
 
@@ -234,12 +234,12 @@ def test_telemetry_validator_rejects_transiently_missing_stack_units() -> None:
     now = datetime(2026, 9, 20, tzinfo=UTC)
     assert (
         validator.validate(
-            FbpLocalSnapshot(50, 0, 0, None, None, {"Storage_list": [{}, {}]}), now
+            FbpLocalSnapshot(50, 0, 0, None, {"Storage_list": [{}, {}]}), now
         )
         is None
     )
 
     assert "lost" in validator.validate(
-        FbpLocalSnapshot(50, 0, 0, None, None, {"Storage_list": [{}]}),
+        FbpLocalSnapshot(50, 0, 0, None, {"Storage_list": [{}]}),
         now + timedelta(minutes=1),
     )
