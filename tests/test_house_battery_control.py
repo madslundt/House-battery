@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -395,6 +395,30 @@ def test_enabling_control_accepts_commissioned_reachable_native_soc_controls() -
     asyncio.run(scenario())
 
 
+def test_enabling_direct_control_recovers_legacy_rapid_transition_burst() -> None:
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        coordinator = Fbp1200Coordinator(
+            hass, Entry({"host": "192.168.30.90", "commissioned": True})
+        )
+        coordinator.store = StaticStore(RuntimeState())
+        coordinator.async_request_refresh = _no_refresh
+        coordinator.async_soc_control_problems = _no_soc_control_problems
+        first = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=4)
+        coordinator.runtime.transitions = [
+            (first + timedelta(minutes=minute)).isoformat() for minute in range(4)
+        ]
+
+        await coordinator.async_set_execution_enabled(True)
+
+        assert coordinator.runtime.execution_enabled
+        assert coordinator.runtime.transitions == [first.isoformat()]
+
+    asyncio.run(scenario())
+
+
 def test_restart_disables_persisted_control_without_native_soc_controls() -> None:
     async def scenario() -> None:
         from homeassistant.core import HomeAssistant
@@ -415,3 +439,8 @@ def test_restart_disables_persisted_control_without_native_soc_controls() -> Non
 
 async def _no_refresh() -> None:
     """Prevent update scheduling; this test targets the control-enable seam only."""
+
+
+async def _no_soc_control_problems() -> list[str]:
+    """Treat native direct SOC controls as reachable for the recovery seam."""
+    return []

@@ -54,6 +54,34 @@ class RuntimeState:
         ]
         return len(self.transitions)
 
+    def collapse_rapid_transition_burst(
+        self, now: datetime, *, maximum_transitions: int
+    ) -> bool:
+        """Recover transition counters inflated by pre-idempotency direct writes."""
+        self.transitions_used(now)
+        parsed = [
+            (value, _parse_timestamp(value))
+            for value in self.transitions
+        ]
+        parsed = [(value, timestamp) for value, timestamp in parsed if timestamp]
+        if len(parsed) < maximum_transitions:
+            return False
+        latest = max(timestamp for _, timestamp in parsed)
+        window = timedelta(minutes=self.settings["minimum_mode_minutes"])
+        burst = [
+            (value, timestamp)
+            for value, timestamp in parsed
+            if latest - timestamp <= window
+        ]
+        if len(burst) < maximum_transitions:
+            return False
+        burst_values = {value for value, _ in burst}
+        first_value, _ = min(burst, key=lambda item: item[1])
+        self.transitions = [
+            value for value in self.transitions if value not in burst_values
+        ] + [first_value]
+        return True
+
     def mode_lock_remaining(self, now: datetime) -> int:
         """Return the remaining anti-chatter mode lock duration."""
         if not self.last_action_at:
@@ -156,7 +184,12 @@ class RuntimeStore:
 
 
 def _is_recent_timestamp(value: str, cutoff: datetime) -> bool:
+    timestamp = _parse_timestamp(value)
+    return timestamp is not None and timestamp >= cutoff
+
+
+def _parse_timestamp(value: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(value) >= cutoff
+        return datetime.fromisoformat(value)
     except (TypeError, ValueError):
-        return False
+        return None

@@ -704,6 +704,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Automatic control requires commissioned native minimum and maximum "
                 f"SOC controls: {'; '.join(problems)}"
             )
+        if enabled and self.is_direct_local:
+            self.runtime.collapse_rapid_transition_burst(
+                datetime.now(UTC),
+                maximum_transitions=round(
+                    self.runtime.settings["maximum_transitions_per_day"]
+                ),
+            )
         was_enabled = self.runtime.execution_enabled
         self.runtime.execution_enabled = enabled
         await self.store.save(self.runtime)
