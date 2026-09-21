@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from .const import LEDGER_HISTORY_LIMIT
@@ -139,11 +139,19 @@ class EnergyLedger:
             self.total_net_savings_dkk += savings
         return interval
 
-    def totals_since(self, since: datetime) -> dict[str, float]:
+    def totals_between(
+        self, start: datetime, end: datetime | None = None
+    ) -> dict[str, float]:
+        """Return measured totals for a half-open calendar interval.
+
+        Completed intervals are retained in persistent runtime state, so a
+        previous calendar period remains available after a restart.
+        """
         selected = [
             item
             for item in self.intervals
-            if datetime.fromisoformat(item.start) >= since
+            if datetime.fromisoformat(item.start) >= start
+            and (end is None or datetime.fromisoformat(item.start) < end)
         ]
         return {
             "charge_kwh": sum(item.battery_charge_kwh for item in selected),
@@ -152,6 +160,10 @@ class EnergyLedger:
             "baseline_cost_dkk": sum(item.baseline_cost_dkk or 0 for item in selected),
             "actual_cost_dkk": sum(item.actual_cost_dkk or 0 for item in selected),
         }
+
+    def totals_since(self, since: datetime) -> dict[str, float]:
+        """Return measured totals from ``since`` through the retained ledger."""
+        return self.totals_between(since)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -176,3 +188,29 @@ class EnergyLedger:
             total_discharge_kwh=float(data.get("total_discharge_kwh", 0)),
             total_net_savings_dkk=float(data.get("total_net_savings_dkk", 0)),
         )
+
+
+def calendar_period_bounds(now: datetime) -> dict[str, tuple[datetime, datetime]]:
+    """Return local calendar-period bounds for dashboard accounting sensors."""
+    if now.tzinfo is None:
+        raise ValueError("Calendar periods require an aware local datetime")
+
+    def midnight(value: date) -> datetime:
+        return datetime.combine(value, time.min, tzinfo=now.tzinfo)
+
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    yesterday = today - timedelta(days=1)
+    week_start = today - timedelta(days=today.weekday())
+    last_week_start = week_start - timedelta(days=7)
+    month_start = today.replace(day=1)
+    last_month_end = month_start
+    last_month_start = (month_start - timedelta(days=1)).replace(day=1)
+    return {
+        "today": (midnight(today), midnight(tomorrow)),
+        "yesterday": (midnight(yesterday), midnight(today)),
+        "week": (midnight(week_start), midnight(today + timedelta(days=1))),
+        "last_week": (midnight(last_week_start), midnight(week_start)),
+        "month": (midnight(month_start), midnight(tomorrow)),
+        "last_month": (midnight(last_month_start), midnight(last_month_end)),
+    }

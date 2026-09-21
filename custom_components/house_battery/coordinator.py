@@ -14,6 +14,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from .accounting import calendar_period_bounds
 from .actuator import LocalControlAdapter, soc_control_problems
 from .const import (
     CONF_BATTERY_CHARGE_POWER,
@@ -744,14 +745,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.store.save(self.runtime)
 
         local_now = dt_util.as_local(now)
-        today_start = local_now.replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ).astimezone(UTC)
-        month_start = local_now.replace(
-            day=1, hour=0, minute=0, second=0, microsecond=0
-        ).astimezone(UTC)
-        today = self.runtime.ledger.totals_since(today_start)
-        month = self.runtime.ledger.totals_since(month_start)
+        periods = {
+            name: self.runtime.ledger.totals_between(
+                start.astimezone(UTC), end.astimezone(UTC)
+            )
+            for name, (start, end) in calendar_period_bounds(local_now).items()
+        }
         capacity_kwh = self._settings().capacity_wh / 1000
         nominal_capacity_kwh = self.runtime.settings["capacity_kwh"]
         equivalent_cycles = (
@@ -844,8 +843,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "extra_storage_reason": storage_policy.reason if storage_policy else None,
             "plan_created_at": self.plan.created_at.isoformat() if self.plan else None,
             "plan": self.plan.as_dict() if self.plan else None,
-            "today": today,
-            "month": month,
+            **periods,
             "lifetime_charge_kwh": self.runtime.ledger.total_charge_kwh,
             "lifetime_discharge_kwh": self.runtime.ledger.total_discharge_kwh,
             "lifetime_net_savings_dkk": self.runtime.ledger.total_net_savings_dkk,

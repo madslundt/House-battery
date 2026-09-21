@@ -111,8 +111,36 @@ SENSORS = (
         precision=2,
     ),
     FbpSensorDescription(
+        key="yesterday_net_savings_dkk",
+        name="Estimated realized savings yesterday",
+        icon="mdi:cash-check",
+        unit="DKK",
+        precision=2,
+    ),
+    FbpSensorDescription(
+        key="week_net_savings_dkk",
+        name="Estimated realized savings this week",
+        icon="mdi:cash-check",
+        unit="DKK",
+        precision=2,
+    ),
+    FbpSensorDescription(
+        key="last_week_net_savings_dkk",
+        name="Estimated realized savings last week",
+        icon="mdi:cash-check",
+        unit="DKK",
+        precision=2,
+    ),
+    FbpSensorDescription(
         key="month_net_savings_dkk",
         name="Estimated realized savings this month",
+        icon="mdi:calendar-check",
+        unit="DKK",
+        precision=2,
+    ),
+    FbpSensorDescription(
+        key="last_month_net_savings_dkk",
+        name="Estimated realized savings last month",
         icon="mdi:calendar-check",
         unit="DKK",
         precision=2,
@@ -132,6 +160,27 @@ SENSORS = (
         precision=3,
     ),
     FbpSensorDescription(
+        key="yesterday_charge_kwh",
+        name="Battery charge yesterday",
+        icon="mdi:battery-arrow-up",
+        unit=UnitOfEnergy.KILO_WATT_HOUR,
+        precision=3,
+    ),
+    FbpSensorDescription(
+        key="week_charge_kwh",
+        name="Battery charge this week",
+        icon="mdi:battery-arrow-up",
+        unit=UnitOfEnergy.KILO_WATT_HOUR,
+        precision=3,
+    ),
+    FbpSensorDescription(
+        key="last_week_charge_kwh",
+        name="Battery charge last week",
+        icon="mdi:battery-arrow-up",
+        unit=UnitOfEnergy.KILO_WATT_HOUR,
+        precision=3,
+    ),
+    FbpSensorDescription(
         key="today_discharge_kwh",
         name="Battery discharge today",
         icon="mdi:battery-arrow-down",
@@ -141,6 +190,13 @@ SENSORS = (
     FbpSensorDescription(
         key="month_charge_kwh",
         name="Battery charge this month",
+        icon="mdi:battery-arrow-up",
+        unit=UnitOfEnergy.KILO_WATT_HOUR,
+        precision=3,
+    ),
+    FbpSensorDescription(
+        key="last_month_charge_kwh",
+        name="Battery charge last month",
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
@@ -566,7 +622,14 @@ class FbpValueSensor(Fbp1200Entity, SensorEntity):
 
     @property
     def native_value(self) -> Any:
-        for period in ("today", "month"):
+        for period in (
+            "today",
+            "yesterday",
+            "week",
+            "last_week",
+            "month",
+            "last_month",
+        ):
             prefix = f"{period}_"
             if self.description.key.startswith(prefix):
                 return self.coordinator.data.get(period, {}).get(
