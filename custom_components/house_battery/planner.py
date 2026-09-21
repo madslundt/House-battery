@@ -126,16 +126,20 @@ def _slot_transition(
             grid_wh += input_wh
             reason = "Known low price justifies charging after losses, wear and profit threshold"
     elif action is Action.BATTERY:
-        if (
+        below_price_floor = (
             slot.discharge_price_dkk_per_kwh + 1e-9 < discharge_price_floor
-            and not permits_energy_neutral_continuation
-        ):
+        )
+        if below_price_floor and not permits_energy_neutral_continuation:
             return None
         available_wh = max(0.0, energy_wh - minimum_step * settings.energy_step_wh)
-        deliverable_wh = min(
-            load_wh,
-            settings.discharge_power_w * slot.hours,
-            available_wh * discharge_efficiency,
+        deliverable_wh = (
+            0.0
+            if below_price_floor
+            else min(
+                load_wh,
+                settings.discharge_power_w * slot.hours,
+                available_wh * discharge_efficiency,
+            )
         )
         if deliverable_wh <= settings.energy_step_wh / 4:
             if not permits_energy_neutral_continuation:

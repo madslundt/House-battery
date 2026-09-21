@@ -145,6 +145,23 @@ def test_locked_battery_at_reserve_keeps_an_executable_energy_neutral_plan() -> 
     assert "Energy-neutral" in plan.slots[0].reason
 
 
+def test_locked_battery_does_not_discharge_below_the_economic_price_floor() -> None:
+    """A mode lock may preserve the mode, never force an unprofitable cycle."""
+    plan = optimize(
+        slots([2.0, 2.0]),
+        now=BASE - timedelta(seconds=1),
+        soc=60,
+        settings=settings(),
+        current_action=Action.BATTERY,
+        mode_lock_remaining_minutes=30,
+    )
+
+    assert plan.slots[0].action is Action.BATTERY
+    assert plan.slots[0].battery_discharge_wh == 0
+    assert plan.slots[0].grid_import_wh == 125
+    assert "Energy-neutral" in plan.slots[0].reason
+
+
 def test_transition_budget_keeps_current_mode() -> None:
     plan = optimize(
         slots([0.1] * 8 + [5.0] * 8),
