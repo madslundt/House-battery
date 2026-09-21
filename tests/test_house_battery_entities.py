@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.const import CONF_PRICE_FORECAST_ENTITIES
+from house_battery.const import CONF_PRICE_FORECAST_ENTITIES, PLATFORMS
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.number import FbpNativeSocNumber
 from house_battery.sensor import FbpLocalLoadDiagnosticsSensor, FbpModeSensor
@@ -96,3 +96,8 @@ def test_battery_activity_uses_physical_power_not_configured_mode() -> None:
     )
 
     assert FbpModeSensor.native_value.fget(sensor) == "idle"
+
+
+def test_operating_mode_is_not_a_user_writable_entity() -> None:
+    """Only the optimizer may command the direct battery operating mode."""
+    assert "select" not in PLATFORMS

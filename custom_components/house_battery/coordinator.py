@@ -645,7 +645,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     settings=normal_settings,
                     current_action=action if action is not Action.SAFE else Action.GRID,
                     mode_lock_remaining_minutes=self.runtime.mode_lock_remaining(now),
-                    transitions_used=self.runtime.transitions_used(now),
+                    transition_times=self.runtime.active_transition_times(now),
                 )
                 effective_settings = normal_settings
                 self.plan = normal_plan
@@ -661,7 +661,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         mode_lock_remaining_minutes=self.runtime.mode_lock_remaining(
                             now
                         ),
-                        transitions_used=self.runtime.transitions_used(now),
+                        transition_times=self.runtime.active_transition_times(now),
                     )
                     rejection = _strict_extra_storage_rejection(
                         normal_plan=normal_plan,

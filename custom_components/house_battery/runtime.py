@@ -55,6 +55,15 @@ class RuntimeState:
         ]
         return len(self.transitions)
 
+    def active_transition_times(self, now: datetime) -> tuple[datetime, ...]:
+        """Return valid transitions that still consume the rolling budget."""
+        self.transitions_used(now)
+        return tuple(
+            timestamp
+            for value in self.transitions
+            if (timestamp := _parse_timestamp(value)) is not None
+        )
+
     def collapse_rapid_transition_burst(
         self, now: datetime, *, maximum_transitions: int
     ) -> bool:

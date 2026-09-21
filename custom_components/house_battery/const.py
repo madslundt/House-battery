@@ -4,7 +4,7 @@ from datetime import timedelta
 
 DOMAIN = "house_battery"
 NAME = "House Battery"
-PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch", "button"]
+PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button"]
 UPDATE_INTERVAL = timedelta(minutes=1)
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.state"

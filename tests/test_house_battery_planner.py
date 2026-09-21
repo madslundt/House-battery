@@ -173,6 +173,26 @@ def test_transition_budget_keeps_current_mode() -> None:
     assert all(item.action is Action.GRID for item in plan.slots)
 
 
+def test_expired_transition_budget_allows_a_future_profitable_cycle() -> None:
+    """A rolling limit must release capacity when old transitions expire."""
+    now = BASE
+    plan = optimize(
+        slots([1.0] * 96 + [0.1] * 8 + [5.0] * 8),
+        now=now - timedelta(seconds=1),
+        soc=50,
+        settings=settings(),
+        current_action=Action.GRID,
+        transition_times=[
+            now - timedelta(hours=23, minutes=30) + timedelta(minutes=index)
+            for index in range(4)
+        ],
+    )
+
+    actions = [item.action for item in plan.slots]
+    assert Action.CHARGE in actions
+    assert Action.BATTERY in actions
+
+
 def test_transition_budget_yields_to_grid_when_battery_mode_would_lose_money() -> None:
     """Transition limits cannot retain a self-discharging battery above reserve."""
     plan = optimize(

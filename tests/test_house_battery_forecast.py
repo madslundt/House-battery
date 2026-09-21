@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -21,13 +22,31 @@ from house_battery.forecast import (
 )
 from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
-from house_battery.price import normalize_price_rows
+from house_battery.price import extract_rows, normalize_price_rows
 from house_battery.runtime import RuntimeState
 
 
 def _slot(hour: int, price: float) -> PriceSlot:
     start = datetime(2026, 1, 1, hour, tzinfo=UTC)
     return PriceSlot(start, start + timedelta(hours=1), price)
+
+
+def _stromligning_prices(
+    start: datetime,
+    *,
+    intervals: int,
+    cadence: timedelta,
+    default_price: float,
+) -> list[dict[str, float | str]]:
+    """Produce the documented ``prices`` rows used by Strømligning VAT sensors."""
+    return [
+        {
+            "start": (start + cadence * index).isoformat(),
+            "end": (start + cadence * (index + 1)).isoformat(),
+            "price": default_price,
+        }
+        for index in range(intervals)
+    ]
 
 
 class _Entry:
@@ -42,6 +61,136 @@ class _Entry:
 
     def async_on_unload(self, callback: object) -> None:
         del callback
+
+
+def test_stromligning_vat_price_rows_keep_their_explicit_quarter_hour_cadence() -> (
+    None
+):
+    """Current-price and tomorrow-available attributes use a supported format."""
+    start = datetime.fromisoformat("2026-09-22T13:45:00+02:00")
+    attributes = {
+        "forecast_data": False,
+        "prices": [
+            {
+                "start": start.isoformat(),
+                "end": (start + timedelta(minutes=15)).isoformat(),
+                "price": 1.297170,
+            },
+            {
+                "start": (start + timedelta(minutes=15)).isoformat(),
+                "end": (start + timedelta(minutes=30)).isoformat(),
+                "price": 6.619447,
+            },
+        ],
+    }
+
+    slots = normalize_price_rows(extract_rows(attributes))
+
+    assert [slot.hours for slot in slots] == [0.25, 0.25]
+    assert [slot.price for slot in slots] == [1.297170, 6.619447]
+
+
+def test_stromligning_current_tomorrow_and_forecast_entities_extend_the_plan() -> (
+    None
+):
+    """Exercise the live entity shape through parsing, forecast validation and planning."""
+
+    async def scenario() -> None:
+        # The two known-price entities together run until midnight on 23 Sep,
+        # precisely where the hourly forecast entity begins.  This mirrors the
+        # installed Strømligning VAT sources while keeping the test deterministic.
+        now = datetime.fromisoformat("2026-09-21T20:30:00+02:00")
+        midnight = datetime.fromisoformat("2026-09-22T00:00:00+02:00")
+        forecast_start = datetime.fromisoformat("2026-09-23T00:00:00+02:00")
+        current = _stromligning_prices(
+            now,
+            intervals=14,
+            cadence=timedelta(minutes=15),
+            default_price=2.807834,
+        )
+        tomorrow = _stromligning_prices(
+            midnight,
+            intervals=96,
+            cadence=timedelta(minutes=15),
+            default_price=2.20,
+        )
+        tomorrow[55]["price"] = 1.297170  # 13:45–14:00, low-price window
+        tomorrow[77]["price"] = 6.619447  # 19:15–19:30, high-price window
+        forecasts = _stromligning_prices(
+            forecast_start,
+            intervals=144,
+            cadence=timedelta(hours=1),
+            default_price=2.93,
+        )
+        hass = HomeAssistant("/tmp")
+        entry = _Entry(
+            {
+                CONF_PRICE_ENTITIES: [
+                    "sensor.stromligning_current_price_vat",
+                    "binary_sensor.stromligning_tomorrow_available_vat",
+                ],
+                CONF_PRICE_FORECAST_ENTITIES: [
+                    "sensor.stromligning_forecasts_vat"
+                ],
+            }
+        )
+        coordinator = Fbp1200Coordinator(hass, entry)
+        coordinator.runtime.forecast_enabled = True
+        hass.states.async_set(
+            "sensor.stromligning_current_price_vat", "2.807834", {"prices": current}
+        )
+        hass.states.async_set(
+            "binary_sensor.stromligning_tomorrow_available_vat",
+            "on",
+            {"forecast_data": False, "prices": tomorrow},
+        )
+        hass.states.async_set(
+            "sensor.stromligning_forecasts_vat",
+            forecast_start.isoformat(),
+            {"prices": forecasts},
+        )
+
+        slots = coordinator._price_slots(now.astimezone(UTC))
+
+        assert len(slots) == 254
+        assert sum(slot.source == "known" for slot in slots) == 110
+        assert sum(slot.source == "forecast" for slot in slots) == 144
+        assert coordinator._forecast_status == "used"
+        assert coordinator._forecast_used_slot_count == 144
+        assert slots[69].price == 1.297170
+        assert slots[91].price == 6.619447
+        assert all(slot.hours == 0.25 for slot in slots[:110])
+        assert all(slot.hours == 1 for slot in slots[110:])
+
+        # Use the assembled sources with the battery's real operating envelope.
+        # Four old transitions stop blocking a profitable cycle as they expire.
+        plan = optimize(
+            [replace(slot, expected_load_wh=125) for slot in slots],
+            now=now.astimezone(UTC),
+            soc=52.349,
+            settings=PlannerSettings(
+                capacity_wh=1958,
+                reserve_soc=20,
+                target_soc=90,
+                charge_power_w=900,
+                discharge_power_w=800,
+                round_trip_efficiency=0.85,
+                degradation_cost_dkk_per_kwh=0.35,
+                minimum_profit_dkk_per_kwh=0.75,
+                switching_penalty_dkk=0.05,
+                minimum_mode_minutes=30,
+                maximum_transitions=4,
+            ),
+            transition_times=[
+                now.astimezone(UTC) - timedelta(hours=23, minutes=30)
+                for _ in range(4)
+            ],
+        )
+
+        assert any(slot.action is Action.CHARGE for slot in plan.slots)
+        assert any(slot.action is Action.BATTERY for slot in plan.slots)
+
+    asyncio.run(scenario())
 
 
 def test_external_forecast_only_extends_known_horizon_conservatively() -> None:

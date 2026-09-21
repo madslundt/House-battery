@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import ceil, sqrt
 from statistics import median
 
@@ -16,7 +16,7 @@ class _State:
     energy_step: int
     action: Action
     locked_minutes: int
-    transitions: int
+    planned_transitions: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +64,11 @@ def _terminal_price(slots: list[PriceSlot]) -> float:
 
 
 def _allowed_actions(
-    state: _State, settings: PlannerSettings, *, force_grid_exit: bool = False
+    state: _State,
+    settings: PlannerSettings,
+    *,
+    active_transitions: int,
+    force_grid_exit: bool = False,
 ) -> tuple[Action, ...]:
     """Return executable actions, letting physical discharge protection override locks.
 
@@ -77,7 +81,7 @@ def _allowed_actions(
         return (Action.GRID,)
     if state.locked_minutes > 0:
         return (state.action,)
-    if state.transitions >= settings.maximum_transitions:
+    if active_transitions >= settings.maximum_transitions:
         # This is a normal operational limit.  A required Grid exit from an
         # uneconomic battery mode is handled above so the inverter cannot keep
         # drawing stored energy just because the budget was exhausted.
@@ -93,6 +97,7 @@ def _slot_transition(
     minimum_step: int,
     maximum_step: int,
     discharge_price_floor: float,
+    active_transitions: int,
 ) -> tuple[_State, tuple[float, float, float, float, float, str], float] | None:
     energy_wh = state.energy_step * settings.energy_step_wh
     load_wh = max(0.0, slot.expected_load_wh)
@@ -101,12 +106,11 @@ def _slot_transition(
     changed = action != state.action
     is_locked_continuation = not changed and state.locked_minutes > 0
     is_transition_limited_continuation = (
-        not changed and state.transitions >= settings.maximum_transitions
+        not changed and active_transitions >= settings.maximum_transitions
     )
     permits_energy_neutral_continuation = (
         is_locked_continuation or is_transition_limited_continuation
     )
-    transitions = state.transitions + int(changed)
     elapsed_minutes = max(1, round(slot.hours * 60))
     locked = (
         max(0, settings.minimum_mode_minutes - elapsed_minutes)
@@ -194,7 +198,12 @@ def _slot_transition(
         )
     interval_cost += switch_cost
     optimization_cost += switch_cost
-    next_state = _State(new_step, action, locked, transitions)
+    next_state = _State(
+        new_step,
+        action,
+        locked,
+        state.planned_transitions + int(changed),
+    )
     detail = (
         grid_wh,
         charged_wh,
@@ -215,6 +224,7 @@ def optimize(
     current_action: Action = Action.GRID,
     mode_lock_remaining_minutes: int = 0,
     transitions_used: int = 0,
+    transition_times: Iterable[datetime] | None = None,
 ) -> Plan:
     """Return the least-cost executable plan across every known price slot."""
     settings.validate()
@@ -232,7 +242,23 @@ def optimize(
     initial_step = round(settings.capacity_wh * soc / 100 / step_wh)
     initial_step = min(maximum_step, max(minimum_step, initial_step))
     initial_lock = max(0, mode_lock_remaining_minutes)
-    initial = _State(initial_step, current_action, initial_lock, transitions_used)
+    # Keep the legacy count argument for callers that cannot provide timestamps.
+    # A timestamp-aware caller releases *executed* transitions at their true
+    # rolling-24-hour expiry.  Planned transitions remain counted for this
+    # provisional plan; the coordinator replans before executing later slots,
+    # which both bounds the dynamic-programming state space and never exceeds
+    # the configured transition limit.
+    if transition_times is None:
+        historical_expiries = tuple(
+            now + timedelta(hours=24) for _ in range(transitions_used)
+        )
+    else:
+        historical_expiries = tuple(
+            timestamp + timedelta(hours=24)
+            for timestamp in transition_times
+            if timestamp + timedelta(hours=24) > now
+        )
+    initial = _State(initial_step, current_action, initial_lock, 0)
     layers: list[dict[_State, _Node]] = [{initial: _Node(0.0, 0.0, None, None)}]
     cheapest_price = min(slot.charge_price_dkk_per_kwh for slot in valid)
     discharge_price_floor = (
@@ -246,16 +272,26 @@ def optimize(
         layer: dict[_State, _Node] = {}
         for state in sorted(
             previous_layer,
-            key=lambda item: (item.energy_step, item.action.value, item.transitions),
+            key=lambda item: (
+                item.energy_step,
+                item.action.value,
+                item.planned_transitions,
+            ),
         ):
             node = previous_layer[state]
+            active_transitions = sum(
+                expiry > slot.start for expiry in historical_expiries
+            ) + state.planned_transitions
             force_grid_exit = (
                 state.action is Action.BATTERY
                 and state.energy_step > minimum_step
                 and slot.discharge_price_dkk_per_kwh + 1e-9 < discharge_price_floor
             )
             for action in _allowed_actions(
-                state, settings, force_grid_exit=force_grid_exit
+                state,
+                settings,
+                active_transitions=active_transitions,
+                force_grid_exit=force_grid_exit,
             ):
                 result = _slot_transition(
                     state,
@@ -265,6 +301,7 @@ def optimize(
                     minimum_step,
                     maximum_step,
                     discharge_price_floor,
+                    active_transitions,
                 )
                 if result is None:
                     continue
@@ -278,7 +315,7 @@ def optimize(
                 existing = layer.get(next_state)
                 candidate_key = (
                     candidate.cost,
-                    next_state.transitions,
+                    next_state.planned_transitions,
                     candidate.throughput_wh,
                     action.value,
                 )
@@ -287,7 +324,7 @@ def optimize(
                 else:
                     existing_key = (
                         existing.cost,
-                        next_state.transitions,
+                        next_state.planned_transitions,
                         existing.throughput_wh,
                         next_state.action.value,
                     )
@@ -316,7 +353,7 @@ def optimize(
         )
         return (
             node.cost - terminal_value,
-            state.transitions,
+            state.planned_transitions,
             node.throughput_wh,
             state.action.value,
         )
