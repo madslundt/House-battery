@@ -48,6 +48,32 @@ def test_rejects_missing_or_impossible_soc() -> None:
         decode_energy_parameter({"SSumInfoList": [{"AverageBatteryAverageSOC": 101}]})
 
 
+def test_retries_the_read_only_startup_snapshot_after_a_stale_socket() -> None:
+    class RetryingClient(FbpLocalTcpClient):
+        def __init__(self) -> None:
+            self.requests = 0
+            self.closes = 0
+
+        async def _request(self, command: dict):
+            self.requests += 1
+            if self.requests == 1:
+                raise LocalProtocolError("battery closed the TCP connection")
+            return {
+                "SSumInfoList": [{"AverageBatteryAverageSOC": 28}],
+                "Storage_list": [{}],
+            }
+
+        async def async_close(self) -> None:
+            self.closes += 1
+
+    import asyncio
+
+    client = RetryingClient()
+    assert asyncio.run(client.async_snapshot()).soc == 28
+    assert client.requests == 2
+    assert client.closes == 1
+
+
 def test_extracts_only_complete_soc_control_readback() -> None:
     assert decode_controls({"ControlInfo": {REG_MIN_SOC: 10, REG_MAX_SOC: 95}}) == {
         REG_MIN_SOC: "10",

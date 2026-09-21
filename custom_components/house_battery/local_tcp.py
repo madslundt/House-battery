@@ -123,8 +123,21 @@ class FbpLocalTcpClient:
         self._reader = self._writer = None
 
     async def async_snapshot(self) -> FbpLocalSnapshot:
-        response = await self._request({"Get": "EnergyParameter"})
-        return decode_energy_parameter(response)
+        """Read telemetry, retrying one failed read on a fresh TCP socket.
+
+        Some PS240 firmware closes an idle or recently displaced local session
+        before accepting the first request. Retrying this read-only operation
+        is safe; mutating control operations intentionally remain single-shot.
+        """
+        for attempt in range(2):
+            try:
+                response = await self._request({"Get": "EnergyParameter"})
+                return decode_energy_parameter(response)
+            except LocalProtocolError:
+                await self.async_close()
+                if attempt:
+                    raise
+        raise AssertionError("unreachable")
 
     async def async_read_controls(self) -> dict[str, str]:
         response = await self._request(
@@ -210,6 +223,7 @@ class FbpLocalTcpClient:
                 TimeoutError,
                 UnicodeDecodeError,
                 json.JSONDecodeError,
+                LocalProtocolError,
             ) as exc:
                 await self.async_close()
                 raise LocalProtocolError(f"local TCP request failed: {exc}") from exc

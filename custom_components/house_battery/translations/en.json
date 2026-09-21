@@ -45,7 +45,7 @@
       }
     },
     "error": {
-      "cannot_connect": "Could not read compatible local battery telemetry. Check the IP address, port, and that the vendor app is not holding the only local session."
+      "cannot_connect": "Could not read compatible local battery telemetry. Check the IP address and port, then disable AFERIY PS240 (Local) and close the vendor app: this battery permits one local TCP session."
     }
   },
   "options": {
