@@ -25,7 +25,10 @@ CONF_DISCHARGE_POWER_CONTROL = "discharge_power_control_entity"
 CONF_MIN_SOC_CONTROL = "minimum_soc_control_entity"
 CONF_MAX_SOC_CONTROL = "maximum_soc_control_entity"
 CONF_PRICE_ENTITIES = "price_entities"
+# `CONF_PRICE_FORECAST_ENTITY` remains readable for entries created before
+# forecast comparisons supported more than one source.
 CONF_PRICE_FORECAST_ENTITY = "price_forecast_entity"
+CONF_PRICE_FORECAST_ENTITIES = "price_forecast_entities"
 CONF_COMMISSIONED = "commissioned"
 
 # A direct local connection is the default setup path. The entity keys above

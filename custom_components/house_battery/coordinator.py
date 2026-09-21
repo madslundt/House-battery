@@ -24,6 +24,7 @@ from .const import (
     CONF_LOAD_POWER,
     CONF_OPERATING_MODE,
     CONF_PRICE_ENTITIES,
+    CONF_PRICE_FORECAST_ENTITIES,
     CONF_PRICE_FORECAST_ENTITY,
     CONF_PV_POWER,
     CONF_SOC,
@@ -61,6 +62,22 @@ _LOGGER = logging.getLogger(__name__)
 _BAD_STATES = {"unknown", "unavailable", "none", ""}
 
 
+def derive_direct_load_power(
+    grid_import_w: float, snapshot: FbpLocalSnapshot
+) -> float:
+    """Estimate served load from a positive-only grid-import meter.
+
+    The direct adapter supplies battery charge and discharge power. With a
+    whole-house import meter, subtract charging and add discharging to recover
+    the load behind that meter. A negative result is physically impossible and
+    is clamped rather than treated as an export measurement.
+    """
+    return max(
+        0.0,
+        grid_import_w + snapshot.discharge_power_w - snapshot.charge_power_w,
+    )
+
+
 class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Present one deep interface over the optimizer implementation."""
 
@@ -84,6 +101,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_source: str | None = None
         self._forecast_status = "not_configured"
         self._forecast_last_updated: str | None = None
+        self._forecast_sources: dict[str, dict[str, Any]] = {}
+        self._forecast_planning_source: str | None = None
         self.local_client = (
             FbpLocalTcpClient(
                 entry.data[CONF_HOST], int(entry.data.get("port", DEFAULT_PORT))
@@ -106,7 +125,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.evidence = EvidenceCollector(
             lambda: self.runtime,
-            self._float,
+            self._observed_power,
             lambda: self.store.save(self.runtime),
         )
 
@@ -163,10 +182,43 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (TypeError, ValueError):
             return default
 
+    def _load_power(self, default: float | None = None) -> float | None:
+        """Return a configured load sensor or derive it for direct-local setup."""
+        configured = self._float(CONF_LOAD_POWER)
+        if configured is not None:
+            return configured
+        grid_import = self._float(CONF_GRID_IMPORT_POWER)
+        if self._local_snapshot is not None and grid_import is not None:
+            return derive_direct_load_power(grid_import, self._local_snapshot)
+        return default
+
+    def _observed_power(self, key: str, default: float | None = None) -> float | None:
+        if key == CONF_LOAD_POWER:
+            return self._load_power(default)
+        return self._float(key, default)
+
     def _grid_available(self) -> bool | None:
         """Read physical grid availability; never infer it from grid import power."""
         state = self._state(CONF_GRID_AVAILABLE)
         return parse_grid_available(state.state if state else None)
+
+    def _forecast_entities(self) -> list[str]:
+        """Return configured forecast entities, preserving their priority order."""
+        config = self.config
+        raw_sources = config.get(CONF_PRICE_FORECAST_ENTITIES)
+        if raw_sources is None:
+            raw_sources = config.get(CONF_PRICE_FORECAST_ENTITY)
+        if isinstance(raw_sources, str):
+            candidates = [raw_sources]
+        elif isinstance(raw_sources, (list, tuple)):
+            candidates = raw_sources
+        else:
+            candidates = []
+        sources: list[str] = []
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate and candidate not in sources:
+                sources.append(candidate)
+        return sources
 
     def _price_slots(self, now: datetime) -> list[PriceSlot]:
         rows: list[Any] = []
@@ -175,73 +227,125 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             if state:
                 rows.extend(extract_rows(dict(state.attributes)))
         known_slots = normalize_price_rows(rows)
-        forecast_slots: list[PriceSlot] = []
-        forecast_entity = self.config.get(CONF_PRICE_FORECAST_ENTITY)
-        self._forecast_source = forecast_entity
-        forecast_state = (
-            self.hass.states.get(forecast_entity) if forecast_entity else None
-        )
-        self._forecast_last_updated = None
-        if forecast_entity is None:
-            self._forecast_status = "not_configured"
-        elif forecast_state is None or forecast_state.state.lower() in _BAD_STATES:
-            self._forecast_status = "unavailable"
-        else:
-            reported_at = (
-                getattr(forecast_state, "last_reported", None)
-                or forecast_state.last_updated
+        sources = self._forecast_entities()
+        for source in sources:
+            self.runtime.migrate_legacy_forecast_accuracy(source)
+
+        uncertainty = self.runtime.settings["forecast_uncertainty_dkk_per_kwh"]
+        source_data: dict[str, dict[str, Any]] = {}
+        available_forecasts: list[tuple[str, list[PriceSlot]]] = []
+        for source in sources:
+            forecast_state = self.hass.states.get(source)
+            details: dict[str, Any] = {
+                "status": "unavailable",
+                "last_updated": None,
+                "available_slots": 0,
+                "used_slots": 0,
+            }
+            if (
+                forecast_state is not None
+                and forecast_state.state.lower() not in _BAD_STATES
+            ):
+                reported_at = (
+                    getattr(forecast_state, "last_reported", None)
+                    or forecast_state.last_updated
+                )
+                if reported_at is not None:
+                    details["last_updated"] = reported_at.isoformat()
+                assessment = assess_external_forecast(
+                    extract_rows(dict(forecast_state.attributes)),
+                    now=now,
+                    reported_at=reported_at,
+                    maximum_age=timedelta(
+                        minutes=self.runtime.settings["forecast_max_age_minutes"]
+                    ),
+                )
+                details["status"] = assessment.status
+                forecast_slots = list(assessment.slots)
+                details["available_slots"] = len(forecast_slots)
+                if forecast_slots:
+                    available_forecasts.append((source, forecast_slots))
+            source_data[source] = details
+
+        before = {
+            source: accuracy.as_dict()
+            for source, accuracy in self.runtime.forecast_accuracies.items()
+        }
+        # Score every outstanding prediction even when the source has gone
+        # stale; actual prices arriving later must still close its comparison.
+        for accuracy in self.runtime.forecast_accuracies.values():
+            accuracy.score_actual_prices(
+                known_slots, uncertainty_dkk_per_kwh=uncertainty
             )
-            self._forecast_last_updated = reported_at.isoformat()
-            assessment = assess_external_forecast(
-                extract_rows(dict(forecast_state.attributes)),
-                now=now,
-                reported_at=reported_at,
-                maximum_age=timedelta(
-                    minutes=self.runtime.settings["forecast_max_age_minutes"]
-                ),
+        for source, forecast_slots in available_forecasts:
+            accuracy = self.runtime.forecast_accuracy_for(source)
+            accuracy.record_forecasts(forecast_slots)
+            accuracy.score_actual_prices(
+                known_slots, uncertainty_dkk_per_kwh=uncertainty
             )
-            self._forecast_status = assessment.status
-            forecast_slots = list(assessment.slots)
-        self._forecast_slot_count = len(forecast_slots)
-        before = self.runtime.forecast_accuracy.as_dict()
-        if forecast_slots:
-            self.runtime.forecast_accuracy.record_forecasts(forecast_slots)
-            self.runtime.forecast_accuracy.score_actual_prices(
-                known_slots,
-                uncertainty_dkk_per_kwh=self.runtime.settings[
-                    "forecast_uncertainty_dkk_per_kwh"
-                ],
+        self._forecast_evidence_changed = before != {
+            source: accuracy.as_dict()
+            for source, accuracy in self.runtime.forecast_accuracies.items()
+        }
+
+        extensions = {
+            source: extend_known_horizon(
+                known_slots, forecast_slots, uncertainty_dkk_per_kwh=uncertainty
             )
-        self._forecast_evidence_changed = (
-            before != self.runtime.forecast_accuracy.as_dict()
-        )
-        slots = (
-            extend_known_horizon(
-                known_slots,
-                forecast_slots,
-                uncertainty_dkk_per_kwh=self.runtime.settings[
-                    "forecast_uncertainty_dkk_per_kwh"
-                ],
+            for source, forecast_slots in available_forecasts
+        }
+        slots = known_slots
+        self._forecast_planning_source = None
+        self._forecast_used_slot_count = 0
+        if self.runtime.forecast_enabled:
+            for source, _forecast_slots in available_forecasts:
+                extension = extensions[source]
+                used_slots = sum(slot.source == "forecast" for slot in extension)
+                if used_slots:
+                    slots = extension
+                    self._forecast_planning_source = source
+                    self._forecast_used_slot_count = used_slots
+                    source_data[source]["used_slots"] = used_slots
+                    break
+
+        for source, details in source_data.items():
+            if details["status"] != "available":
+                continue
+            extension_slots = sum(
+                slot.source == "forecast" for slot in extensions.get(source, [])
             )
-            if self.runtime.forecast_enabled and forecast_slots
-            else known_slots
-        )
-        self._forecast_used_slot_count = sum(
-            slot.source == "forecast" for slot in slots
-        )
-        if self._forecast_status == "available":
             if not self.runtime.forecast_enabled:
-                self._forecast_status = "disabled"
-            elif not self._forecast_used_slot_count:
-                self._forecast_status = "no_contiguous_extension"
-            else:
-                self._forecast_status = "used"
+                details["status"] = "disabled"
+            elif source == self._forecast_planning_source:
+                details["status"] = "used"
+            elif not extension_slots:
+                details["status"] = "no_contiguous_extension"
+
+        for source, details in source_data.items():
+            accuracy = self.runtime.forecast_accuracy_for(source)
+            details["accuracy"] = {
+                "quality": accuracy.quality,
+                "samples": accuracy.samples,
+                "mae_dkk_per_kwh": accuracy.mean_absolute_error_dkk_per_kwh,
+                "bias_dkk_per_kwh": accuracy.mean_bias_dkk_per_kwh,
+                "within_uncertainty_pct": accuracy.within_uncertainty_pct,
+            }
+        self._forecast_sources = source_data
+        self._forecast_source = self._forecast_planning_source or (
+            sources[0] if sources else None
+        )
+        primary = source_data.get(self._forecast_source or "", {})
+        self._forecast_status = primary.get("status", "not_configured")
+        self._forecast_last_updated = primary.get("last_updated")
+        self._forecast_slot_count = sum(
+            int(details["available_slots"]) for details in source_data.values()
+        )
         result: list[PriceSlot] = []
         for slot in slots:
             if slot.end <= now:
                 continue
             load_w = self.runtime.load_learner.predict_w(
-                slot.start, self._float(CONF_LOAD_POWER, 0) or 0
+                slot.start, self._load_power(0) or 0
             )
             scheduled_wh = self._scheduled_load_wh(slot.start, slot.end)
             result.append(
@@ -472,6 +576,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 20.0,
                 20.0 * equivalent_cycles / self.runtime.settings["cycle_life"],
             )
+        primary_accuracy = (
+            self.runtime.forecast_accuracies.get(self._forecast_source)
+            if self._forecast_source
+            else None
+        )
         return {
             "system_state": state,
             "healthy": not problems and grid_available is True,
@@ -485,7 +594,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "grid_available": grid_available,
             "command_result": command_result,
             "soc": soc,
-            "load_power_w": self._float(CONF_LOAD_POWER),
+            "load_power_w": self._load_power(),
             "grid_import_power_w": self._float(CONF_GRID_IMPORT_POWER),
             "grid_export_power_w": self._float(CONF_GRID_EXPORT_POWER, 0),
             "battery_charge_power_w": self._float(CONF_BATTERY_CHARGE_POWER, 0),
@@ -548,20 +657,28 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "learning_observations": self.runtime.load_learner.observations,
             "price_forecast_enabled": self.runtime.forecast_enabled,
             "price_forecast_source": self._forecast_source,
+            "price_forecast_planning_source": self._forecast_planning_source,
+            "price_forecast_sources": self._forecast_sources,
             "price_forecast_status": self._forecast_status,
             "price_forecast_last_updated": self._forecast_last_updated,
             "price_forecast_available_slots": self._forecast_slot_count,
             "price_forecast_used_slots": self._forecast_used_slot_count,
-            "price_forecast_accuracy": self.runtime.forecast_accuracy.quality,
-            "price_forecast_samples": self.runtime.forecast_accuracy.samples,
+            "price_forecast_accuracy": (
+                primary_accuracy.quality if primary_accuracy else "unknown"
+            ),
+            "price_forecast_samples": (
+                primary_accuracy.samples if primary_accuracy else 0
+            ),
             "price_forecast_mae_dkk_per_kwh": (
-                self.runtime.forecast_accuracy.mean_absolute_error_dkk_per_kwh
+                primary_accuracy.mean_absolute_error_dkk_per_kwh
+                if primary_accuracy
+                else None
             ),
             "price_forecast_bias_dkk_per_kwh": (
-                self.runtime.forecast_accuracy.mean_bias_dkk_per_kwh
+                primary_accuracy.mean_bias_dkk_per_kwh if primary_accuracy else None
             ),
             "price_forecast_within_uncertainty_pct": (
-                self.runtime.forecast_accuracy.within_uncertainty_pct
+                primary_accuracy.within_uncertainty_pct if primary_accuracy else None
             ),
             "capacity_learning_samples": len(
                 self.runtime.battery_learner.capacity_samples_wh
@@ -596,8 +713,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_set_forecast_enabled(self, enabled: bool) -> None:
         """Opt in to planning beyond known prices with the configured forecast."""
-        if enabled and not self.config.get(CONF_PRICE_FORECAST_ENTITY):
-            raise ValueError("Configure an external price forecast entity first")
+        if enabled and not self._forecast_entities():
+            raise ValueError(
+                "Configure at least one external price forecast entity first"
+            )
         self.runtime.forecast_enabled = enabled
         await self.store.save(self.runtime)
         await self.async_request_refresh()

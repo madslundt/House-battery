@@ -20,7 +20,7 @@ has to find a useful charge interval before it stores more energy.
 
 ## External price forecasts
 
-The optional **External price forecast entity** uses precisely the same list
+The optional ordered **External price forecast entities** use precisely the same list
 attribute format as known prices: `prices`, `raw_today`, `raw_tomorrow`,
 `today`, or `tomorrow`, with `start` (or `hour`/`time`) and `price` (or
 `value`). Explicit `end` times are retained. Without an `end`, the interval is
@@ -29,8 +29,10 @@ to one hour. Known prices and forecasts may therefore use different cadences,
 such as hourly known prices and quarter-hour forecasts.
 
 Known prices remain authoritative. When **Use external price forecast** is
-off, forecast data are collected only for accuracy evidence. When it is on,
-the optimizer may use only an uninterrupted sequence of forecast intervals
+off, forecast data are collected only for accuracy evidence. Overlapping
+sources are each scored independently against the actual known price. When it
+is on, the optimizer uses the first configured usable source that provides an
+uninterrupted sequence of forecast intervals
 starting immediately after the last known interval. It never overwrites known
 prices, fills a gap in them, or uses forecasts without a known-price horizon.
 It also rejects an unavailable/unknown entity, malformed row, empty or expired
@@ -50,13 +52,13 @@ round-trip losses, 0.35 DKK/kWh wear cost, and required 0.75 profit do not fit
 inside that conservative spread, the battery remains idle/grid-powered.
 
 **External price forecast accuracy** reports `unknown`, `excellent`, `good`,
-`fair`, or `poor` from the first forecast recorded for each interval once the
-actual known price arrives. Its attributes include sample count, MAE, bias
-(forecast minus actual), and the percentage of samples inside your uncertainty
-buffer. Positive bias means forecasts tend to overstate prices. If the source
-cadences differ, the comparison uses the duration-weighted actual price over
-each forecast interval. Use its evidence even while the forecast switch is
-disabled.
+`fair`, or `poor` for the displayed primary source. Its `price_forecast_sources`
+attribute includes the same sample count, MAE, bias (forecast minus actual),
+and percentage within your uncertainty buffer for every configured source.
+Positive bias means forecasts tend to overstate prices. Each source preserves
+its first forecast seen for an interval, even if sources overlap. If cadences
+differ, the comparison uses the duration-weighted actual price over each
+forecast interval. Use this evidence even while the forecast switch is disabled.
 
 Check the forecast switch's `status` attribute before relying on a late-horizon
 plan. `used` means valid forecast slots extended the known horizon. `stale`,

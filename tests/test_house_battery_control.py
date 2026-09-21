@@ -14,7 +14,7 @@ import voluptuous as vol
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from house_battery.actuator import LocalControlAdapter
-from house_battery.config_flow import _schema
+from house_battery.config_flow import _direct_schema, _schema
 from house_battery.const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
@@ -28,7 +28,8 @@ from house_battery.const import (
     CONF_PRICE_ENTITIES,
     CONF_SOC,
 )
-from house_battery.coordinator import Fbp1200Coordinator
+from house_battery.coordinator import Fbp1200Coordinator, derive_direct_load_power
+from house_battery.local_tcp import FbpLocalSnapshot
 from house_battery.models import Action
 from house_battery.runtime import RuntimeState
 
@@ -142,6 +143,24 @@ def test_options_require_native_soc_controls_before_commissioning() -> None:
     incomplete.pop(CONF_MAX_SOC_CONTROL)
     with pytest.raises(vol.Invalid):
         _schema({}, options=True)(incomplete)
+
+
+def test_direct_load_is_derived_from_grid_and_battery_power() -> None:
+    charging = FbpLocalSnapshot(50, 900, 0, None, None, {})
+    assert derive_direct_load_power(1907, charging) == 1007
+
+    discharging = FbpLocalSnapshot(50, 0, 800, None, None, {})
+    assert derive_direct_load_power(1907, discharging) == 2707
+
+
+def test_direct_setup_requires_only_grid_and_price_sources() -> None:
+    direct_sources = {
+        CONF_GRID_IMPORT_POWER: "sensor.watts_live_effekt",
+        CONF_GRID_AVAILABLE: "binary_sensor.watts_grid_available",
+        CONF_PRICE_ENTITIES: ["sensor.stromligning_current_price_vat"],
+    }
+
+    assert _direct_schema({})(direct_sources) == direct_sources
 
 
 def runtime() -> RuntimeState:

@@ -29,7 +29,22 @@ class RuntimeState:
     last_action_at: str | None = None
     transitions: list[str] = field(default_factory=list)
     forecast_enabled: bool = False
-    forecast_accuracy: ForecastAccuracy = field(default_factory=ForecastAccuracy)
+    forecast_accuracies: dict[str, ForecastAccuracy] = field(default_factory=dict)
+
+    def forecast_accuracy_for(self, source: str) -> ForecastAccuracy:
+        """Return the independent accuracy history for one forecast entity."""
+        return self.forecast_accuracies.setdefault(source, ForecastAccuracy())
+
+    def migrate_legacy_forecast_accuracy(self, source: str) -> None:
+        """Associate pre-multi-source evidence with its configured source."""
+        legacy = self.forecast_accuracies.get("legacy")
+        if legacy is not None and source not in self.forecast_accuracies:
+            self.forecast_accuracies[source] = self.forecast_accuracies.pop("legacy")
+
+    @property
+    def forecast_accuracy(self) -> ForecastAccuracy:
+        """Backward-compatible access to unassigned legacy accuracy evidence."""
+        return self.forecast_accuracy_for("legacy")
 
     def transitions_used(self, now: datetime) -> int:
         """Prune and count the rolling 24-hour transition budget."""
@@ -64,7 +79,10 @@ class RuntimeState:
             "last_action_at": self.last_action_at,
             "transitions": self.transitions[-100:],
             "forecast_enabled": self.forecast_enabled,
-            "forecast_accuracy": self.forecast_accuracy.as_dict(),
+            "forecast_accuracies": {
+                source: accuracy.as_dict()
+                for source, accuracy in self.forecast_accuracies.items()
+            },
         }
 
     def export(self, entry_title: str, status: dict[str, Any]) -> dict[str, Any]:
@@ -82,7 +100,10 @@ class RuntimeState:
             "scheduled_loads": self.scheduled_loads,
             "forecast": {
                 "enabled": self.forecast_enabled,
-                "accuracy": self.forecast_accuracy.as_dict(),
+                "accuracies": {
+                    source: accuracy.as_dict()
+                    for source, accuracy in self.forecast_accuracies.items()
+                },
             },
         }
 
@@ -96,6 +117,13 @@ class RuntimeState:
                 if key in settings
             }
         )
+        accuracies: dict[str, ForecastAccuracy] = {}
+        for source, accuracy in data.get("forecast_accuracies", {}).items():
+            if isinstance(source, str) and isinstance(accuracy, dict):
+                accuracies[source] = ForecastAccuracy.from_dict(accuracy)
+        legacy_accuracy = data.get("forecast_accuracy")
+        if not accuracies and isinstance(legacy_accuracy, dict):
+            accuracies["legacy"] = ForecastAccuracy.from_dict(legacy_accuracy)
         return cls(
             settings=settings,
             load_learner=LoadLearner.from_dict(data.get("load_learner", {})),
@@ -108,9 +136,7 @@ class RuntimeState:
             last_action_at=data.get("last_action_at"),
             transitions=list(data.get("transitions", []))[-100:],
             forecast_enabled=bool(data.get("forecast_enabled", False)),
-            forecast_accuracy=ForecastAccuracy.from_dict(
-                data.get("forecast_accuracy", {})
-            ),
+            forecast_accuracies=accuracies,
         )
 
 

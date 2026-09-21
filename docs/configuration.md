@@ -11,7 +11,7 @@ entities itself. The optimizer project is maintained at
 
 You also need an electricity-price integration that exposes dated **known**
 rows. A current-price-only entity is insufficient because the planner compares
-future intervals. An external forecast entity is optional and never replaces
+future intervals. External forecast entities are optional and never replace
 those known rows.
 
 ## Household and tariff inputs
@@ -22,7 +22,7 @@ those known rows.
 | Grid import power | `sensor` | Numeric watts. Used for accounting/telemetry. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
-| External price forecast entity | optional `sensor` | Same row format; can extend the horizon only after the last known interval. |
+| External price forecast entities | optional ordered `sensor` list | Same row format; each is scored independently; the first usable source that can safely extend the horizon is used for planning. |
 
 Grid export power, PV power, fault state, and online state are optional.
 Battery SOC, charge/discharge power, the **Operating mode** selector, and the
@@ -61,17 +61,19 @@ one hour. This lets hourly, quarter-hourly, and other regular sources keep
 their own duration. The optimizer uses only a contiguous future horizon and
 never invents missing price data.
 
-The optional external forecast uses exactly this format. It is disabled by
-default through **Use external price forecast**. While disabled, the forecast
-is still compared to subsequently known prices for the **External price
-forecast accuracy** entity. When enabled, it can add only a contiguous sequence
-starting at the end of the known horizon; it cannot overwrite a known price or
-fill a gap. It is optional and isolated: an unavailable, malformed, empty,
-expired, or stale forecast is discarded without degrading known-price planning.
+The optional external forecast list uses exactly this format. It is disabled by
+default through **Use external price forecast**. Sources may overlap: each
+source retains its first prediction for an interval and is compared later to
+the same known actual price. When enabled, the first configured usable source
+that provides a contiguous extension is used for planning; forecasts are never
+blended. A forecast can add only a contiguous sequence starting at the end of
+the known horizon; it cannot overwrite a known price or fill a gap. It is
+optional and isolated: an unavailable, malformed, empty, expired, or stale
+forecast is discarded without degrading known-price planning.
 
-The entity must have reported an update within **External price forecast maximum
+Each entity must have reported an update within **External price forecast maximum
 age** (180 minutes by default). Use a value that matches the forecast source's
-normal update cadence. The forecast entity's status exposes `used`, `disabled`,
+normal update cadence. The per-source status exposes `used`, `disabled`,
 `unavailable`, `stale`, `invalid`, `empty`, `expired`, or
 `no_contiguous_extension`; only `used` contributes forecast intervals to a
 plan.

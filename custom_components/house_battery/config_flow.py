@@ -26,6 +26,7 @@ from .const import (
     CONF_ONLINE,
     CONF_OPERATING_MODE,
     CONF_PRICE_ENTITIES,
+    CONF_PRICE_FORECAST_ENTITIES,
     CONF_PRICE_FORECAST_ENTITY,
     CONF_PV_POWER,
     CONF_SOC,
@@ -56,7 +57,18 @@ def _optional(key: str, defaults: dict[str, Any]) -> vol.Optional:
     )
 
 
+def _with_forecast_defaults(defaults: dict[str, Any]) -> dict[str, Any]:
+    """Expose legacy single-source settings in the new multi-source selector."""
+    result = dict(defaults)
+    if CONF_PRICE_FORECAST_ENTITIES not in result:
+        legacy = result.get(CONF_PRICE_FORECAST_ENTITY)
+        if legacy:
+            result[CONF_PRICE_FORECAST_ENTITIES] = [legacy]
+    return result
+
+
 def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
+    defaults = _with_forecast_defaults(defaults)
     fields: dict[Any, Any] = {
         _required(CONF_SOC, defaults): _entity("sensor"),
         _required(CONF_LOAD_POWER, defaults): _entity("sensor"),
@@ -68,7 +80,9 @@ def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
                 domain=["sensor", "binary_sensor"], multiple=True
             )
         ),
-        _optional(CONF_PRICE_FORECAST_ENTITY, defaults): _entity("sensor"),
+        _optional(CONF_PRICE_FORECAST_ENTITIES, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor", multiple=True)
+        ),
         _optional(CONF_GRID_EXPORT_POWER, defaults): _entity("sensor"),
         _required(CONF_BATTERY_CHARGE_POWER, defaults): _entity("sensor"),
         _required(CONF_BATTERY_DISCHARGE_POWER, defaults): _entity("sensor"),
@@ -97,8 +111,8 @@ def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
 
 def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
     """Fields still supplied by Home Assistant, not by the battery TCP API."""
+    defaults = _with_forecast_defaults(defaults)
     fields: dict[Any, Any] = {
-        _required(CONF_LOAD_POWER, defaults): _entity("sensor"),
         _required(CONF_GRID_IMPORT_POWER, defaults): _entity("sensor"),
         _required(CONF_GRID_AVAILABLE, defaults): _entity(["sensor", "binary_sensor"]),
         _required(CONF_PRICE_ENTITIES, defaults): selector.EntitySelector(
@@ -106,11 +120,9 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
                 domain=["sensor", "binary_sensor"], multiple=True
             )
         ),
-        _optional(CONF_PRICE_FORECAST_ENTITY, defaults): _entity("sensor"),
-        _optional(CONF_GRID_EXPORT_POWER, defaults): _entity("sensor"),
-        _optional(CONF_PV_POWER, defaults): _entity("sensor"),
-        _optional(CONF_FAULT, defaults): _entity(["sensor", "binary_sensor"]),
-        _optional(CONF_ONLINE, defaults): _entity(["sensor", "binary_sensor"]),
+        _optional(CONF_PRICE_FORECAST_ENTITIES, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor", multiple=True)
+        ),
     }
     if options:
         fields[

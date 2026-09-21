@@ -58,7 +58,7 @@ cycling is not worth it.
 | **Battery learning** | `learning` until both capacity and efficiency are reliable; attributes show sample counts/readiness. |
 | **Load learning coverage** | Percentage of the 7-day, 15-minute demand profile with enough observations. Higher is better. |
 | **Load forecast mean absolute error** | Typical absolute load-forecast error in W. A persistent high value means inspect the load sensor scope or add scheduled loads. |
-| **External price forecast accuracy** | `unknown`, `excellent`, `good`, `fair`, or `poor` based on forecast-versus-known-price samples. Attributes provide MAE, bias, sample count, buffer coverage, forecast slot coverage, source update time, and validation status. | A positive 0.18 DKK/kWh bias means the forecast is normally 0.18 too high; raise the uncertainty buffer or keep use disabled if that makes marginal cycles unsafe. |
+| **External price forecast accuracy** | `unknown`, `excellent`, `good`, `fair`, or `poor` for the displayed primary source. The `price_forecast_sources` attribute provides independent MAE, bias, sample count, buffer coverage, update time, and validation status for every configured source. | A positive 0.18 DKK/kWh bias means that source is normally 0.18 too high; raise the uncertainty buffer or keep use disabled if that makes marginal cycles unsafe. |
 
 Example: if cycles rise by 12/month while realized monthly savings stay near
 zero, raise **Minimum required profit** from 0.75 to 1.00 DKK/kWh or raise

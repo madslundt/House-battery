@@ -456,6 +456,8 @@ class FbpPriceForecastAccuracySensor(Fbp1200Entity, SensorEntity):
         keys = (
             "price_forecast_enabled",
             "price_forecast_source",
+            "price_forecast_planning_source",
+            "price_forecast_sources",
             "price_forecast_status",
             "price_forecast_last_updated",
             "price_forecast_available_slots",
@@ -466,7 +468,7 @@ class FbpPriceForecastAccuracySensor(Fbp1200Entity, SensorEntity):
             "price_forecast_within_uncertainty_pct",
         )
         return {key: self.coordinator.data.get(key) for key in keys} | {
-            "meaning": "MAE is the average absolute forecast error. Bias is forecast minus actual; positive means over-prediction.",
+            "meaning": "Each configured source is scored independently. MAE is the average absolute forecast error; bias is forecast minus actual, so positive means over-prediction.",
             "uncertainty_setting": "External price forecast uncertainty number",
         }
 

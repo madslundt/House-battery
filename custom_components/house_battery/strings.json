@@ -15,7 +15,7 @@
           "grid_available_entity": "Grid available / on-grid state",
           "operating_mode_entity": "Battery Operating Mode",
           "price_entities": "Known electricity-price entities",
-          "price_forecast_entity": "External price forecast entity (optional)",
+          "price_forecast_entities": "External price forecast entities (optional, ordered)",
           "grid_export_power_entity": "Grid export power (optional)",
           "battery_charge_power_entity": "Battery charge power",
           "battery_discharge_power_entity": "Battery discharge power",
@@ -30,17 +30,12 @@
       },
       "household": {
         "title": "Connect household and tariff data",
-        "description": "Battery telemetry and controls are created directly from the local connection. Select only the independent household and tariff sources.",
+        "description": "Battery telemetry, controls, and estimated load are created directly from the local connection. Select the independent grid and tariff sources.",
         "data": {
-          "load_power_entity": "Connected/house load power",
           "grid_import_power_entity": "Grid import power",
           "grid_available_entity": "Grid available / on-grid state",
           "price_entities": "Known electricity-price entities",
-          "price_forecast_entity": "External price forecast entity (optional)",
-          "grid_export_power_entity": "Grid export power (optional)",
-          "pv_power_entity": "PV power (optional)",
-          "fault_entity": "Battery fault entity (optional)",
-          "online_entity": "Battery online entity (optional)"
+          "price_forecast_entities": "External price forecast entities (optional, ordered)"
         }
       }
     },
@@ -60,7 +55,7 @@
           "grid_available_entity": "Grid available / on-grid state",
           "operating_mode_entity": "Battery Operating Mode",
           "price_entities": "Known electricity-price entities",
-          "price_forecast_entity": "External price forecast entity (optional)",
+          "price_forecast_entities": "External price forecast entities (optional, ordered)",
           "grid_export_power_entity": "Grid export power (optional)",
           "battery_charge_power_entity": "Battery charge power",
           "battery_discharge_power_entity": "Battery discharge power",

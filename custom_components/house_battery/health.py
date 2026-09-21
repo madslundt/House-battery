@@ -47,8 +47,9 @@ def get_health_problems(
     required = _REQUIRED
     if config.get("host"):
         # Battery SOC, charge/discharge power, and operating mode come from
-        # the built-in TCP adapter rather than pre-existing HA entities.
-        required = (CONF_LOAD_POWER, CONF_GRID_IMPORT_POWER, CONF_GRID_AVAILABLE)
+        # the built-in TCP adapter. Its direct telemetry also lets the
+        # coordinator derive load from a grid-import meter.
+        required = (CONF_GRID_IMPORT_POWER, CONF_GRID_AVAILABLE)
     problems = [
         f"{key} unavailable"
         for key in required

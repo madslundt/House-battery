@@ -1,11 +1,19 @@
 """Tests for external-price forecast safety and evidence."""
 
+import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from homeassistant.core import HomeAssistant
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
+from house_battery.const import (
+    CONF_PRICE_ENTITIES,
+    CONF_PRICE_FORECAST_ENTITIES,
+)
+from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.forecast import (
     ForecastAccuracy,
     assess_external_forecast,
@@ -14,11 +22,26 @@ from house_battery.forecast import (
 from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 from house_battery.price import normalize_price_rows
+from house_battery.runtime import RuntimeState
 
 
 def _slot(hour: int, price: float) -> PriceSlot:
     start = datetime(2026, 1, 1, hour, tzinfo=UTC)
     return PriceSlot(start, start + timedelta(hours=1), price)
+
+
+class _Entry:
+    """Small ConfigEntry seam for forecast-coordinator coverage."""
+
+    entry_id = "forecast-test"
+    title = "Forecast test"
+
+    def __init__(self, data: dict[str, object]) -> None:
+        self.data = data
+        self.options: dict[str, object] = {}
+
+    def async_on_unload(self, callback: object) -> None:
+        del callback
 
 
 def test_external_forecast_only_extends_known_horizon_conservatively() -> None:
@@ -113,6 +136,122 @@ def test_forecast_accuracy_compares_hourly_forecast_to_quarterly_actual_prices()
     assert matched == 1
     assert accuracy.samples == 1
     assert accuracy.mean_absolute_error_dkk_per_kwh == 0.0
+
+
+def test_overlapping_forecasts_keep_independent_accuracy_histories() -> None:
+    """The same actual price can score every source that predicted its interval."""
+    runtime = RuntimeState()
+    source_a = runtime.forecast_accuracy_for("sensor.forecast_a")
+    source_b = runtime.forecast_accuracy_for("sensor.forecast_b")
+    source_a.record_forecasts([_slot(1, 1.20)])
+    source_b.record_forecasts([_slot(1, 0.80)])
+
+    actual = [_slot(1, 1.00)]
+    source_a.score_actual_prices(actual, uncertainty_dkk_per_kwh=0.25)
+    source_b.score_actual_prices(actual, uncertainty_dkk_per_kwh=0.25)
+
+    assert source_a.samples == source_b.samples == 1
+    assert source_a.mean_bias_dkk_per_kwh == 0.20
+    assert source_b.mean_bias_dkk_per_kwh == -0.20
+    restored = RuntimeState.from_dict(runtime.as_dict())
+    assert restored.forecast_accuracy_for("sensor.forecast_a").samples == 1
+    assert restored.forecast_accuracy_for("sensor.forecast_b").samples == 1
+
+
+def test_first_configured_forecast_is_used_while_all_overlapping_sources_score() -> (
+    None
+):
+    """Forecast priority affects planning, never the independent evidence."""
+
+    async def scenario() -> None:
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        known_start = now
+        forecast_start = now + timedelta(hours=1)
+        hass = HomeAssistant("/tmp")
+        entry = _Entry(
+            {
+                CONF_PRICE_ENTITIES: ["sensor.known"],
+                CONF_PRICE_FORECAST_ENTITIES: [
+                    "sensor.forecast_a",
+                    "sensor.forecast_b",
+                ],
+            }
+        )
+        coordinator = Fbp1200Coordinator(hass, entry)
+        coordinator.runtime.forecast_enabled = True
+        hass.states.async_set(
+            "sensor.known",
+            "1.0",
+            {
+                "prices": [
+                    {
+                        "start": known_start.isoformat(),
+                        "end": forecast_start.isoformat(),
+                        "price": 1.0,
+                    }
+                ]
+            },
+        )
+        for source, price in (("sensor.forecast_a", 1.20), ("sensor.forecast_b", 0.80)):
+            hass.states.async_set(
+                source,
+                str(price),
+                {
+                    "prices": [
+                        {
+                            "start": forecast_start.isoformat(),
+                            "end": (forecast_start + timedelta(hours=1)).isoformat(),
+                            "price": price,
+                        }
+                    ]
+                },
+            )
+
+        slots = coordinator._price_slots(now)
+
+        assert [slot.price for slot in slots] == [1.0, 1.20]
+        assert coordinator._forecast_planning_source == "sensor.forecast_a"
+        assert coordinator._forecast_sources["sensor.forecast_a"]["status"] == "used"
+        assert (
+            coordinator._forecast_sources["sensor.forecast_b"]["status"] == "available"
+        )
+
+        # When the actual price is published, both previously overlapping
+        # predictions are scored against it, not against one another.
+        hass.states.async_set(
+            "sensor.known",
+            "1.0",
+            {
+                "prices": [
+                    {
+                        "start": known_start.isoformat(),
+                        "end": forecast_start.isoformat(),
+                        "price": 1.0,
+                    },
+                    {
+                        "start": forecast_start.isoformat(),
+                        "end": (forecast_start + timedelta(hours=1)).isoformat(),
+                        "price": 1.0,
+                    },
+                ]
+            },
+        )
+        coordinator._price_slots(now)
+
+        assert (
+            coordinator.runtime.forecast_accuracy_for(
+                "sensor.forecast_a"
+            ).mean_bias_dkk_per_kwh
+            == 0.20
+        )
+        assert (
+            coordinator.runtime.forecast_accuracy_for(
+                "sensor.forecast_b"
+            ).mean_bias_dkk_per_kwh
+            == -0.20
+        )
+
+    asyncio.run(scenario())
 
 
 def test_forecast_uncertainty_rejects_a_marginal_forecast_discharge() -> None:
