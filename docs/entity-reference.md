@@ -37,7 +37,7 @@ provider, and the mode read-back before re-enabling automatic control.
 | **Known price spread** | Highest minus lowest price in the known future horizon. |
 | **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before extra storage is allowed. |
 | **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary extra-storage ceiling. |
-| **Extra storage policy** | `normal` or `active`, with its target, spread, effective margin, and explanation in attributes. |
+| **Extra storage policy** | `normal` or `active`, with its target, spread, effective margin, and explanation in attributes. It becomes active only when the higher target beats a normal-target plan and the added energy can be bought in a short, lowest-priced known-price window. |
 
 Example: with prices of 0.20 and 4.00 DKK/kWh, 85% efficiency, and 0.35
 DKK/kWh degradation cost, effective margin is about 3.41 DKK/kWh. If the
@@ -93,12 +93,13 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **Absolute emergency SOC** | Native lower hardware floor written during automatic commands. | Raise 10→20% if outage reserve is more valuable than arbitrage. |
 | **Arbitrage reserve SOC** | Planner's no-discharge floor. | Raise 20→35% before a storm; the optimizer keeps more backup but has less energy to sell against peak prices. |
 | **Maximum charge SOC** | Normal charge ceiling. | Lower 90→80% to reduce high-SOC dwell time; it may skip otherwise profitable evening coverage. |
-| **Extra-storage charge SOC** | Higher ceiling allowed only on exceptional spreads. | Keep 100% for rare 4 DKK/kWh peaks, or set 90% to disable extra storage without changing normal operation. |
+| **Extra-storage charge SOC** | Higher ceiling reserved for demonstrated savings from a short, unusually cheap known-price window. | Keep 100% for rare peaks, or set 90% to disable extra storage without changing normal operation. |
 | **Maximum charge/discharge power** | Planner and native command power cap. | Lower discharge 800→500 W if the load path or battery behaves better at a lower sustained output. |
 | **Fallback round-trip efficiency** | Used before measured efficiency is ready. | Set 80% rather than 85% to make early plans more conservative. |
 | **Battery degradation cost** | Wear cost charged to each discharged kWh. | Raise 0.35→0.60 DKK/kWh if avoiding wear matters more than short-term savings. |
 | **Minimum required profit** | Extra margin required for discharge. | Raise 0.75→1.25 DKK/kWh to reject marginal cycles. |
 | **Extra-storage price spread** | Raw price difference required before higher SOC is permitted. | Raise 2.00→3.00 DKK/kWh if full charges are too frequent. |
+| **Extra-storage cheap-window maximum duration** | Longest cumulative duration at the lowest known charging price that may qualify for extra storage. Forecast prices never qualify. | Keep 30 min for rare dips; lower 30→15 min to reserve extra SOC for only the briefest opportunities. |
 | **Mode switching penalty** | Cost assigned to every mode change. | Raise 0.05→0.20 DKK to reduce chattering around similar prices. |
 | **Minimum mode duration** | How long a chosen mode stays locked. | Raise 30→60 min if the local controller needs more settling time. |
 | **Maximum daily mode transitions** | Daily switching budget. | Lower 4→2 for a quieter, more conservative system. |

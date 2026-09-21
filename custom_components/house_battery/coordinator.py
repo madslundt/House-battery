@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -60,6 +61,106 @@ from .runtime import RuntimeState, RuntimeStore
 
 _LOGGER = logging.getLogger(__name__)
 _BAD_STATES = {"unknown", "unavailable", "none", ""}
+_PRICE_TOLERANCE_DKK_PER_KWH = 1e-9
+_COST_TOLERANCE_DKK = 1e-9
+
+
+def _matching_price_slot(
+    planned_start: datetime, planned_end: datetime, slots: list[PriceSlot]
+) -> PriceSlot | None:
+    """Find the source interval backing a planned (possibly partial) slot."""
+    return next(
+        (
+            slot
+            for slot in slots
+            if slot.start <= planned_start and planned_end <= slot.end
+        ),
+        None,
+    )
+
+
+def _strict_extra_storage_rejection(
+    *,
+    normal_plan: Plan,
+    extra_plan: Plan,
+    slots: list[PriceSlot],
+    now: datetime,
+    normal_target_soc: float,
+    cheap_window_minutes: float,
+) -> str | None:
+    """Return why an extra-SOC plan is not a rare, valuable opportunity.
+
+    The policy-level price-spread test merely makes an extra target eligible.
+    This final gate compares executable plans and fails closed unless the extra
+    energy is bought at the cheapest *known* price in a short opportunity.
+    Forecast intervals cannot establish that opportunity.
+    """
+    if (
+        extra_plan.expected_cost_dkk
+        >= normal_plan.expected_cost_dkk - _COST_TOLERANCE_DKK
+    ):
+        return "Normal target retained; extra plan has no incremental expected-cost saving"
+
+    extra_charge_slots: list[PriceSlot] = []
+    for planned in extra_plan.slots:
+        if planned.battery_charge_wh <= 0:
+            continue
+        # A charge that only reaches the normal target is not evidence for the
+        # discretionary storage band.  SOC deltas are the executed energy
+        # result after the planner's quantisation and losses.
+        stored_above_normal_soc = max(
+            0.0, planned.soc_end - max(planned.soc_start, normal_target_soc)
+        )
+        if stored_above_normal_soc <= _PRICE_TOLERANCE_DKK_PER_KWH:
+            continue
+        source_slot = _matching_price_slot(planned.start, planned.end, slots)
+        if source_slot is None or source_slot.source != "known":
+            return (
+                "Normal target retained; extra charge is not in a known-price "
+                "interval"
+            )
+        extra_charge_slots.append(source_slot)
+
+    if not extra_charge_slots:
+        return (
+            "Normal target retained; extra plan does not charge above the normal target"
+        )
+
+    known_slots = [
+        slot for slot in slots if slot.source == "known" and slot.end > now
+    ]
+    if not known_slots:
+        return "Normal target retained; no known-price opportunity is available"
+    cheapest_known_charge_price = min(
+        slot.charge_price_dkk_per_kwh for slot in known_slots
+    )
+    for slot in extra_charge_slots:
+        if (
+            slot.charge_price_dkk_per_kwh
+            > cheapest_known_charge_price + _PRICE_TOLERANCE_DKK_PER_KWH
+        ):
+            return (
+                "Normal target retained; extra charge is not at the cheapest "
+                "known charge price"
+            )
+
+    # The full remaining duration of equally cheap *known* intervals is the
+    # opportunity window.  If it is longer than the configured window, there
+    # is no need to buy discretionary energy now: an equally cheap opportunity
+    # remains available for too long.  Forecast slots are deliberately absent.
+    opportunity_minutes = sum(
+        max(0.0, (slot.end - max(slot.start, now)).total_seconds() / 60)
+        for slot in known_slots
+        if abs(slot.charge_price_dkk_per_kwh - cheapest_known_charge_price)
+        <= _PRICE_TOLERANCE_DKK_PER_KWH
+    )
+    if opportunity_minutes > cheap_window_minutes + _PRICE_TOLERANCE_DKK_PER_KWH:
+        return (
+            "Normal target retained; cheapest known-price opportunity lasts "
+            f"{opportunity_minutes:g} minutes, above the "
+            f"{cheap_window_minutes:g}-minute extra-storage limit"
+        )
+    return None
 
 
 def derive_direct_load_power(
@@ -481,8 +582,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             command_result = await self._force_safe_if_needed(now)
         elif soc is not None:
             try:
-                effective_settings, storage_policy = apply_storage_policy(
-                    self._settings(),
+                normal_settings = self._settings()
+                candidate_settings, storage_policy = apply_storage_policy(
+                    normal_settings,
                     slots,
                     extra_storage_spread_dkk_per_kwh=self.runtime.settings[
                         "extra_storage_spread_dkk_per_kwh"
@@ -491,15 +593,51 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "opportunistic_target_soc"
                     ],
                 )
-                self.plan = optimize(
+                normal_plan = optimize(
                     slots,
                     now=now,
                     soc=soc,
-                    settings=effective_settings,
+                    settings=normal_settings,
                     current_action=action if action is not Action.SAFE else Action.GRID,
                     mode_lock_remaining_minutes=self.runtime.mode_lock_remaining(now),
                     transitions_used=self.runtime.transitions_used(now),
                 )
+                effective_settings = normal_settings
+                self.plan = normal_plan
+                if storage_policy.active:
+                    extra_plan = optimize(
+                        slots,
+                        now=now,
+                        soc=soc,
+                        settings=candidate_settings,
+                        current_action=(
+                            action if action is not Action.SAFE else Action.GRID
+                        ),
+                        mode_lock_remaining_minutes=self.runtime.mode_lock_remaining(
+                            now
+                        ),
+                        transitions_used=self.runtime.transitions_used(now),
+                    )
+                    rejection = _strict_extra_storage_rejection(
+                        normal_plan=normal_plan,
+                        extra_plan=extra_plan,
+                        slots=slots,
+                        now=now,
+                        normal_target_soc=normal_settings.target_soc,
+                        cheap_window_minutes=self.runtime.settings[
+                            "extra_storage_cheap_window_minutes"
+                        ],
+                    )
+                    if rejection is None:
+                        effective_settings = candidate_settings
+                        self.plan = extra_plan
+                    else:
+                        storage_policy = replace(
+                            storage_policy,
+                            target_soc=normal_settings.target_soc,
+                            active=False,
+                            reason=rejection,
+                        )
             except ValueError as exc:
                 self.plan = None
                 problems.append(str(exc))
@@ -630,6 +768,19 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "effective_margin_dkk_per_kwh": storage_policy.effective_margin_dkk_per_kwh
             if storage_policy
             else None,
+            "extra_storage_known_slot_count": storage_policy.known_slot_count
+            if storage_policy
+            else None,
+            "extra_storage_charge_price_dkk_per_kwh": (
+                storage_policy.conservative_charge_price_dkk_per_kwh
+                if storage_policy
+                else None
+            ),
+            "extra_storage_discharge_price_dkk_per_kwh": (
+                storage_policy.conservative_discharge_price_dkk_per_kwh
+                if storage_policy
+                else None
+            ),
             "extra_storage_active": storage_policy.active if storage_policy else False,
             "extra_storage_reason": storage_policy.reason if storage_policy else None,
             "plan_created_at": self.plan.created_at.isoformat() if self.plan else None,

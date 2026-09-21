@@ -40,6 +40,7 @@ set the number entities as follows before commissioning:
 | Battery degradation cost | `0.35 DKK/kWh` |
 | Minimum required profit | `0.75 DKK/kWh` |
 | Extra-storage price spread | `2.00 DKK/kWh` |
+| Extra-storage cheap-window maximum duration | `30 min` |
 | Minimum mode duration | `30 min` |
 | Maximum daily mode transitions | `4` |
 

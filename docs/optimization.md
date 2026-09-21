@@ -14,9 +14,14 @@ little more expensive. The normal economic floor is **Arbitrage reserve SOC**;
 **Absolute emergency SOC** is the lower native limit preserved for an outage.
 
 Extra storage is permitted only when the full known price spread clears the
-configured **Extra-storage price spread** *and* the effective margin after
-losses and degradation clears **Minimum required profit**. The planner still
-has to find a useful charge interval before it stores more energy.
+configured **Extra-storage price spread**, the effective margin after losses
+and degradation clears **Minimum required profit**, and the higher target
+beats the normal-target plan on expected cost. The energy added above the
+normal target must be bought during the lowest known-price window, and that
+window's cumulative duration must not exceed **Extra-storage cheap-window
+maximum duration** (30 minutes by default). Forecast intervals never qualify
+for extra storage. The planner still has to find a useful charge interval
+before it stores more energy.
 
 ## External price forecasts
 

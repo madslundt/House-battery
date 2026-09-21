@@ -411,6 +411,9 @@ class FbpStoragePolicySensor(Fbp1200Entity, SensorEntity):
             "effective_target_soc",
             "price_spread_dkk_per_kwh",
             "effective_margin_dkk_per_kwh",
+            "extra_storage_known_slot_count",
+            "extra_storage_charge_price_dkk_per_kwh",
+            "extra_storage_discharge_price_dkk_per_kwh",
             "extra_storage_reason",
         )
         return {key: self.coordinator.data.get(key) for key in keys}
