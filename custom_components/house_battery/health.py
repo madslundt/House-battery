@@ -58,7 +58,14 @@ def get_health_problems(
     grid = state(CONF_GRID_AVAILABLE)
     if parse_grid_available(grid.state if grid else None) is None:
         problems.append("grid availability is unknown")
-    for key in _PHYSICAL:
+    # A direct-local entry continuously receives the grid-import measurement,
+    # but grid availability is often a binary template that only reports when
+    # the physical grid changes. Requiring repeated `on` reports incorrectly
+    # disables an otherwise healthy direct battery after five minutes.
+    freshness_keys = (
+        (CONF_GRID_IMPORT_POWER,) if config.get("host") else _PHYSICAL
+    )
+    for key in freshness_keys:
         if (entity_id := config.get(key)) and (value := hass.states.get(entity_id)):
             reported = getattr(value, "last_reported", None) or value.last_updated
             if now - reported.astimezone(UTC) > TELEMETRY_STALE_AFTER:
