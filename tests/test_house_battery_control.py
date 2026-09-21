@@ -145,7 +145,7 @@ def test_options_require_native_soc_controls_before_commissioning() -> None:
         _schema({}, options=True)(incomplete)
 
 
-def test_direct_load_requires_explicit_local_source_confirmation() -> None:
+def test_direct_load_uses_only_complete_off_grid_total() -> None:
     async def scenario() -> None:
         from homeassistant.core import HomeAssistant
 
@@ -157,17 +157,12 @@ def test_direct_load_requires_explicit_local_source_confirmation() -> None:
             0,
             800,
             1907,
-            {"SSumInfoList": [{"TotalSmartLoadElectricalPower": 106}]},
+            {
+                "SSumInfoList": [{"TotalSmartLoadElectricalPower": 106}],
+                "Storage_list": [{"OffGridLoadPower": 106}],
+            },
         )
 
-        assert coordinator._load_power() is None
-        assert "not selected" in (coordinator._direct_load_problem() or "")
-
-        coordinator.entry.options = {
-            "direct_load_source": "smart_load",
-            "direct_load_confirmed": True,
-            "direct_load_confirmed_source": "smart_load",
-        }
         assert coordinator._load_power() == 106
         assert coordinator._direct_load_problem() is None
 
@@ -480,7 +475,7 @@ def test_direct_restart_preserves_control_until_fresh_telemetry_validates_it() -
     asyncio.run(scenario())
 
 
-def test_direct_load_history_is_reset_when_the_confirmed_source_changes() -> None:
+def test_direct_load_history_is_reset_when_migrating_legacy_source() -> None:
     async def scenario() -> None:
         from homeassistant.core import HomeAssistant
 
@@ -490,9 +485,6 @@ def test_direct_load_history_is_reset_when_the_confirmed_source_changes() -> Non
             Entry(
                 {
                     "host": "192.168.30.90",
-                    "direct_load_source": "off_grid_total",
-                    "direct_load_confirmed": True,
-                    "direct_load_confirmed_source": "off_grid_total",
                 }
             ),
         )

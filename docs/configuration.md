@@ -18,7 +18,7 @@ those known rows.
 
 | Config-flow field | Expected entity | Notes |
 | --- | --- | --- |
-| Battery-served local load source | Options selection | Direct-local entries expose smart-load, backup-load, and complete per-storage total diagnostics. Select one only after verifying its scope, then explicitly confirm it. Until then, learning, planning, and automatic control stay fail-closed. |
+| Battery-served local load | Local telemetry | Direct-local entries automatically use the complete per-storage off-grid total. Smart-load and backup-load readings remain diagnostics. An incomplete stack total fails closed. |
 | Grid import power | `sensor` | Numeric watts. Used for accounting/telemetry. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |

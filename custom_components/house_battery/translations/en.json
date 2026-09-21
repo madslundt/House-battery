@@ -62,8 +62,6 @@
           "discharge_power_control_entity": "Discharge power control (optional)",
           "minimum_soc_control_entity": "Discharge limit control (required for automatic control)",
           "maximum_soc_control_entity": "Charge limit control (required for automatic control)",
-          "direct_load_source": "Battery-served local load source",
-          "direct_load_confirmed": "I verified this local source measures only load the battery can serve",
           "commissioned": "I verified local control, read-back, limits, wiring, and legal export settings"
         }
       }

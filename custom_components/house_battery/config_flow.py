@@ -15,9 +15,6 @@ from .const import (
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
-    CONF_DIRECT_LOAD_CONFIRMED,
-    CONF_DIRECT_LOAD_CONFIRMED_SOURCE,
-    CONF_DIRECT_LOAD_SOURCE,
     CONF_DISCHARGE_POWER_CONTROL,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
@@ -32,7 +29,6 @@ from .const import (
     CONF_PRICE_FORECAST_ENTITY,
     CONF_SOC,
     DEFAULT_PORT,
-    DIRECT_LOAD_SOURCES,
     DOMAIN,
     NAME,
 )
@@ -127,23 +123,6 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
     if options:
         fields[
             vol.Required(
-                CONF_DIRECT_LOAD_SOURCE,
-                default=defaults.get(CONF_DIRECT_LOAD_SOURCE, ""),
-            )
-        ] = selector.SelectSelector(
-            selector.SelectSelectorConfig(
-                options=list(DIRECT_LOAD_SOURCES),
-                mode=selector.SelectSelectorMode.DROPDOWN,
-            )
-        )
-        fields[
-            vol.Required(
-                CONF_DIRECT_LOAD_CONFIRMED,
-                default=defaults.get(CONF_DIRECT_LOAD_CONFIRMED, False),
-            )
-        ] = bool
-        fields[
-            vol.Required(
                 CONF_COMMISSIONED, default=defaults.get(CONF_COMMISSIONED, False)
             )
         ] = bool
@@ -234,18 +213,6 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         defaults = {**self._entry.data, **self._entry.options}
         if user_input is not None:
-            if self._entry.data.get(CONF_HOST):
-                previous_source = defaults.get(CONF_DIRECT_LOAD_SOURCE)
-                source = user_input.get(CONF_DIRECT_LOAD_SOURCE)
-                if source != previous_source:
-                    # A checkbox approval applies to the source it was shown
-                    # with; changing scope always needs a fresh confirmation.
-                    user_input[CONF_DIRECT_LOAD_CONFIRMED] = False
-                    user_input[CONF_DIRECT_LOAD_CONFIRMED_SOURCE] = None
-                elif user_input.get(CONF_DIRECT_LOAD_CONFIRMED):
-                    user_input[CONF_DIRECT_LOAD_CONFIRMED_SOURCE] = source
-                else:
-                    user_input[CONF_DIRECT_LOAD_CONFIRMED_SOURCE] = None
             return self.async_create_entry(title="", data=user_input)
         if self._entry.data.get(CONF_HOST):
             return self.async_show_form(

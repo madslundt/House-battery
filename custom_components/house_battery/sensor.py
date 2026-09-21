@@ -538,12 +538,8 @@ class FbpLocalLoadDiagnosticsSensor(Fbp1200Entity, SensorEntity):
         return {
             **(self.coordinator.data.get("local_load_diagnostics") or {}),
             "selection_status": (
-                "Selected source is used only after it is explicitly confirmed; "
-                "otherwise learning, planning, and automatic control fail closed."
-            ),
-            "selected_source": self.coordinator.config.get("direct_load_source"),
-            "selection_confirmed": bool(
-                self.coordinator.config.get("direct_load_confirmed", False)
+                "Uses the complete per-storage off-grid total as the battery-served "
+                "load; incomplete local frames fail closed."
             ),
             "field_meanings": {
                 "meter_total_active_power_w": "Whole-site meter total; never a battery-load candidate.",

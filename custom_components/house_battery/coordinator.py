@@ -19,9 +19,6 @@ from .const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
-    CONF_DIRECT_LOAD_CONFIRMED,
-    CONF_DIRECT_LOAD_CONFIRMED_SOURCE,
-    CONF_DIRECT_LOAD_SOURCE,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
     CONF_LOAD_POWER,
@@ -32,7 +29,7 @@ from .const import (
     CONF_SOC,
     DECISION_HISTORY_LIMIT,
     DEFAULT_PORT,
-    DIRECT_LOAD_SOURCES,
+    DIRECT_LOAD_FIELD,
     DOMAIN,
     MODE_BATTERY,
     MODE_CHARGE,
@@ -243,13 +240,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         )
         if self.is_direct_local:
-            source = self.config.get(CONF_DIRECT_LOAD_SOURCE)
-            confirmed = self.config.get(CONF_DIRECT_LOAD_CONFIRMED_SOURCE)
-            learner_source = (
-                f"direct:{source}"
-                if source and source == confirmed and self.config.get(CONF_DIRECT_LOAD_CONFIRMED)
-                else "direct:unconfirmed"
-            )
+            learner_source = "direct:off_grid_total"
             if self.runtime.load_learner_source != learner_source:
                 self.runtime.load_learner = LoadLearner()
                 self.runtime.load_learner.configure_time_zone(
@@ -299,32 +290,21 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if configured is not None and not self.is_direct_local:
             return configured
         if self.is_direct_local and self._local_snapshot is not None:
-            source = self.config.get(CONF_DIRECT_LOAD_SOURCE)
-            field = DIRECT_LOAD_SOURCES.get(source)
             diagnostics = self._local_snapshot.load_diagnostics
-            if self.config.get(CONF_DIRECT_LOAD_CONFIRMED) and field:
-                value = diagnostics.get(field)
-                if isinstance(value, (int, float)):
-                    return float(value)
+            value = diagnostics.get(DIRECT_LOAD_FIELD)
+            if isinstance(value, (int, float)):
+                return float(value)
         return default
 
     def _direct_load_problem(self) -> str | None:
         """Explain why direct-local load data is not safe for the model yet."""
         if not self.is_direct_local:
             return None
-        source = self.config.get(CONF_DIRECT_LOAD_SOURCE)
-        field = DIRECT_LOAD_SOURCES.get(source)
-        if (
-            not field
-            or not self.config.get(CONF_DIRECT_LOAD_CONFIRMED)
-            or self.config.get(CONF_DIRECT_LOAD_CONFIRMED_SOURCE) != source
-        ):
-            return "battery-served load source is not selected and confirmed"
         if self._local_snapshot is None:
-            return "battery-served load source cannot be read without local telemetry"
-        value = self._local_snapshot.load_diagnostics.get(field)
+            return "battery-served off-grid load cannot be read without local telemetry"
+        value = self._local_snapshot.load_diagnostics.get(DIRECT_LOAD_FIELD)
         if not isinstance(value, (int, float)):
-            return f"confirmed battery-served load source {source} is unavailable"
+            return "complete battery-served off-grid load is unavailable"
         return None
 
     def _direct_soc_control_problems_from_snapshot(self) -> list[str]:
@@ -936,8 +916,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if enabled and self.is_direct_local:
             if problem := self._direct_load_problem():
                 raise ValueError(
-                    "Automatic control requires a confirmed battery-served local "
-                    f"load source: {problem}"
+                    "Automatic control requires complete battery-served off-grid "
+                    f"load: {problem}"
                 )
             self.runtime.collapse_rapid_transition_burst(
                 datetime.now(UTC),

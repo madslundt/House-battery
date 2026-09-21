@@ -49,7 +49,7 @@ integration is needed.
 
 | Binding | What it must mean |
 | --- | --- |
-| Battery-served local load source | For direct-local entries, select one local diagnostic source in Options only after verifying that it covers the load the battery can genuinely serve. |
+| Battery-served local load | Direct-local entries automatically use the complete per-storage off-grid total. Other local readings are diagnostic only. |
 | Grid import power | Imported power, in W. |
 | Grid available / on-grid state | Physical/device-reported supply availability, not grid use. |
 | Known electricity-price entities | Actual published intervals in a supported list attribute. |
