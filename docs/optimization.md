@@ -9,6 +9,14 @@ charge/discharge power, round-trip losses, minimum mode duration, maximum
 daily transitions, switching cost, degradation cost, and the minimum required
 profit.
 
+The transition budget and mode-duration lock prevent routine chattering. They
+do not keep Self-Gen active when doing so would discharge stored energy below
+the economic floor: that protective exit to Grid takes precedence and is
+recorded as the physical mode change it is. During automatic operation, the
+integration applies the arbitrage reserve as the inverter's native minimum SOC
+before changing modes, so a failed mode command cannot expose stored reserve.
+The lower absolute emergency SOC is used only for the safe/outage mode.
+
 It therefore does not cycle the battery merely because the next interval is a
 little more expensive. The normal economic floor is **Arbitrage reserve SOC**;
 **Absolute emergency SOC** is the lower native limit preserved for an outage.

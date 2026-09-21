@@ -313,9 +313,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         maximum = _control_number(self._local_controls, "3024")
         if minimum is None or maximum is None or not 0 <= minimum <= maximum <= 100:
             return ["native SOC controls report invalid or unavailable bounds"]
-        requested_min = self.runtime.settings["absolute_min_soc"]
+        requested_absolute_min = self.runtime.settings["absolute_min_soc"]
+        requested_reserve = self.runtime.settings["reserve_soc"]
         requested_max = self.runtime.settings["opportunistic_target_soc"]
-        if not 0 <= requested_min <= requested_max <= 100:
+        if not 0 <= requested_absolute_min <= requested_reserve <= requested_max <= 100:
             return ["configured SOC limits are invalid"]
         return []
 
@@ -955,6 +956,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.hass,
                 self.config,
                 absolute_min_soc=self.runtime.settings["absolute_min_soc"],
+                reserve_soc=self.runtime.settings["reserve_soc"],
                 maximum_soc=self.runtime.settings["opportunistic_target_soc"],
             )
         try:
@@ -966,9 +968,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return ["native SOC controls are unavailable over local TCP"]
         if minimum is None or maximum is None or not 0 <= minimum <= maximum <= 100:
             return ["native SOC controls report invalid bounds"]
-        requested_min = self.runtime.settings["absolute_min_soc"]
+        requested_absolute_min = self.runtime.settings["absolute_min_soc"]
+        requested_reserve = self.runtime.settings["reserve_soc"]
         requested_max = self.runtime.settings["opportunistic_target_soc"]
-        if not 0 <= requested_min <= requested_max <= 100:
+        if not 0 <= requested_absolute_min <= requested_reserve <= requested_max <= 100:
             return ["configured SOC limits are invalid"]
         self._local_controls = controls
         return []

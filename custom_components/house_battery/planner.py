@@ -66,21 +66,21 @@ def _terminal_price(slots: list[PriceSlot]) -> float:
 def _allowed_actions(
     state: _State, settings: PlannerSettings, *, force_grid_exit: bool = False
 ) -> tuple[Action, ...]:
-    """Return executable actions, letting the price floor override a battery lock.
+    """Return executable actions, letting physical discharge protection override locks.
 
     A direct battery's self-consumption mode can physically discharge whenever
-    it remains selected. A synthetic zero-energy ``battery`` plan therefore
-    cannot protect the stored energy above reserve; the local mode must change
-    to Idle/grid when the economic discharge floor is no longer met.
+    it remains selected above the native reserve.  The local mode must change
+    to Idle/grid when the economic discharge floor is no longer met, even when
+    that necessary protective exit exceeds the normal anti-chatter budget.
     """
     if force_grid_exit:
         return (Action.GRID,)
     if state.locked_minutes > 0:
         return (state.action,)
     if state.transitions >= settings.maximum_transitions:
-        # A daily transition budget is a hard operational limit.  The current
-        # action may need to continue without energy movement at the SOC
-        # reserve/target, but it must not cause a further mode change.
+        # This is a normal operational limit.  A required Grid exit from an
+        # uneconomic battery mode is handled above so the inverter cannot keep
+        # drawing stored energy just because the budget was exhausted.
         return (state.action,)
     return (Action.GRID, Action.BATTERY, Action.CHARGE)
 

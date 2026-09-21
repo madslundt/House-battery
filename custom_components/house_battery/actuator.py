@@ -40,12 +40,13 @@ def soc_control_problems(
     config: dict[str, Any],
     *,
     absolute_min_soc: float | None = None,
+    reserve_soc: float | None = None,
     maximum_soc: float | None = None,
 ) -> list[str]:
     """Return blockers for the native SOC controls required for automation."""
     problems: list[str] = []
-    requested_values = (absolute_min_soc, maximum_soc)
-    for key, label, requested in zip(
+    requested_values = ((absolute_min_soc, reserve_soc), (maximum_soc,))
+    for key, label, requests in zip(
         _SOC_CONTROL_KEYS,
         ("minimum", "maximum"),
         requested_values,
@@ -70,11 +71,13 @@ def soc_control_problems(
             minimum > maximum or not minimum <= value <= maximum
         ):
             problems.append(f"{label} SOC control reports invalid native bounds")
-        elif requested is not None and not minimum <= requested <= maximum:
-            problems.append(
-                f"{label} SOC control cannot accept configured {requested:g}% "
-                f"within native bounds [{minimum:g}, {maximum:g}]"
-            )
+        else:
+            for requested in requests:
+                if requested is not None and not minimum <= requested <= maximum:
+                    problems.append(
+                        f"{label} SOC control cannot accept configured {requested:g}% "
+                        f"within native bounds [{minimum:g}, {maximum:g}]"
+                    )
     return problems
 
 
@@ -107,7 +110,7 @@ class LocalControlAdapter:
         runtime = self._runtime()
         limits_warning: str | None = None
         try:
-            minimum = round(runtime.settings["absolute_min_soc"])
+            minimum = round(self._minimum_soc_for(action))
             maximum = round(
                 target_soc if target_soc is not None else runtime.settings["target_soc"]
             )
@@ -196,7 +199,20 @@ class LocalControlAdapter:
                 f"SOC limit read-back did not confirm {entity_id}={value:g}"
             )
 
-    async def _apply_limits(self, target_soc: float | None) -> None:
+    def _minimum_soc_for(self, action: Action) -> float:
+        """Return the native lower SOC bound required by an operating action.
+
+        The optimizer models ``reserve_soc`` as unavailable for arbitrage.  A
+        Self-Gen command must therefore raise the inverter's native minimum to
+        that reserve; otherwise a plan which is energy-neutral at reserve can
+        still physically drain down to the emergency minimum.
+        """
+        runtime = self._runtime()
+        if action is Action.SAFE:
+            return runtime.settings["absolute_min_soc"]
+        return runtime.settings["reserve_soc"]
+
+    async def _apply_limits(self, action: Action, target_soc: float | None) -> None:
         runtime = self._runtime()
         await self._set_number(
             CONF_CHARGE_POWER_CONTROL, runtime.settings["charge_power_w"]
@@ -205,7 +221,7 @@ class LocalControlAdapter:
             CONF_DISCHARGE_POWER_CONTROL, runtime.settings["discharge_power_w"]
         )
         await self._set_number(
-            CONF_MIN_SOC_CONTROL, runtime.settings["absolute_min_soc"], required=True
+            CONF_MIN_SOC_CONTROL, self._minimum_soc_for(action), required=True
         )
         await self._set_number(
             CONF_MAX_SOC_CONTROL,
@@ -225,7 +241,7 @@ class LocalControlAdapter:
         runtime = self._runtime()
         limits_warning: str | None = None
         try:
-            await self._apply_limits(target_soc)
+            await self._apply_limits(action, target_soc)
         except Exception as exc:  # The safety command must remain available.
             if action is not Action.SAFE:
                 _LOGGER.exception("Battery SOC limit command failed")

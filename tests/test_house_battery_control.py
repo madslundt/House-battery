@@ -284,8 +284,84 @@ def test_direct_tcp_command_uses_allowlisted_client_and_updates_commanded_mode()
 
     assert success
     assert "SOC limits read back" in result
-    assert direct.calls == [("limits", 10, 90), ("mode", "Charge", 1200, 10, 90)]
+    assert direct.calls == [("limits", 20, 90), ("mode", "Charge", 1200, 20, 90)]
     assert modes == ["Charge"]
+
+
+def test_battery_command_raises_the_native_minimum_to_the_arbitrage_reserve() -> None:
+    """An energy-neutral planner reserve must be physically enforceable."""
+
+    class DirectClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def async_set_limits(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("limits", minimum, maximum))
+
+        async def async_set_self_consumption(self) -> None:
+            self.calls.append(("self_consumption",))
+
+    state = runtime()
+    state.settings["reserve_soc"] = 20
+    direct = DirectClient()
+
+    async def save() -> None:
+        return None
+
+    control = LocalControlAdapter(
+        FakeHass(FakeStates({}), FakeServices(FakeStates({}))),
+        config,
+        lambda: state,
+        save,
+        lambda: direct,
+    )
+
+    success, _result = asyncio.run(
+        control.async_command(Action.BATTERY, datetime.now(UTC), target_soc=90)
+    )
+
+    assert success
+    assert direct.calls == [("limits", 20, 90), ("self_consumption",)]
+
+
+def test_failed_grid_exit_keeps_the_native_reserve_protected() -> None:
+    """A failed Idle command must not expose a prior Self-Gen reserve."""
+
+    class DirectClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def async_set_limits(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("limits", minimum, maximum))
+
+        async def async_set_mode(
+            self, mode: str, power: int, *, min_soc: int, max_soc: int
+        ) -> None:
+            self.calls.append(("mode", mode, power, min_soc, max_soc))
+            raise RuntimeError("Idle rejected")
+
+    state = runtime()
+    direct = DirectClient()
+
+    async def save() -> None:
+        return None
+
+    control = LocalControlAdapter(
+        FakeHass(FakeStates({}), FakeServices(FakeStates({}))),
+        config,
+        lambda: state,
+        save,
+        lambda: direct,
+    )
+
+    success, result = asyncio.run(
+        control.async_command(Action.GRID, datetime.now(UTC), target_soc=90)
+    )
+
+    assert not success
+    assert "local TCP command failed" in result
+    assert direct.calls == [("limits", 20, 90), ("mode", "Idle", 0, 20, 90)]
+    assert not state.execution_enabled
 
 
 def test_repeated_direct_command_does_not_consume_transition_budget() -> None:
@@ -326,7 +402,7 @@ def test_repeated_direct_command_does_not_consume_transition_budget() -> None:
 
 def test_command_disables_control_when_operating_mode_readback_is_stale() -> None:
     control, state, services, hass = adapter(apply_updates=False)
-    hass.states.get("number.fbp_min_soc").state = "10"
+    hass.states.get("number.fbp_min_soc").state = "20"
 
     success, result = asyncio.run(
         control.async_command(Action.CHARGE, datetime.now(UTC), target_soc=90)
@@ -386,6 +462,42 @@ def test_enabling_control_requires_native_bounds_for_all_configured_soc_targets(
         hass.states.async_set("number.fbp_max_soc", "80", {"min": 0, "max": 80})
 
         with pytest.raises(ValueError, match="cannot accept configured"):
+            await coordinator.async_set_execution_enabled(True)
+
+        assert not coordinator.runtime.execution_enabled
+
+    asyncio.run(scenario())
+
+
+def test_enabling_control_requires_native_bounds_for_the_arbitrage_reserve() -> None:
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        coordinator = Fbp1200Coordinator(hass, Entry(config()))
+        coordinator.async_request_refresh = _no_refresh
+        hass.states.async_set("number.fbp_min_soc", "10", {"min": 0, "max": 15})
+        hass.states.async_set("number.fbp_max_soc", "90", {"min": 0, "max": 100})
+
+        with pytest.raises(ValueError, match="cannot accept configured 20%"):
+            await coordinator.async_set_execution_enabled(True)
+
+        assert not coordinator.runtime.execution_enabled
+
+    asyncio.run(scenario())
+
+
+def test_enabling_control_requires_native_bounds_for_the_emergency_minimum() -> None:
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        coordinator = Fbp1200Coordinator(hass, Entry(config()))
+        coordinator.async_request_refresh = _no_refresh
+        hass.states.async_set("number.fbp_min_soc", "20", {"min": 15, "max": 100})
+        hass.states.async_set("number.fbp_max_soc", "90", {"min": 0, "max": 100})
+
+        with pytest.raises(ValueError, match="cannot accept configured 10%"):
             await coordinator.async_set_execution_enabled(True)
 
         assert not coordinator.runtime.execution_enabled
