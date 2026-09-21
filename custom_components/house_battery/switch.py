@@ -7,7 +7,6 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_PRICE_FORECAST_ENTITY
 from .coordinator import Fbp1200Coordinator
 from .entity import Fbp1200Entity
 
@@ -64,7 +63,7 @@ class FbpExternalForecastSwitch(Fbp1200Entity, SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return bool(self.coordinator.config.get(CONF_PRICE_FORECAST_ENTITY))
+        return bool(self.coordinator._forecast_entities())
 
     @property
     def is_on(self) -> bool:

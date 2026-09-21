@@ -34,6 +34,10 @@ SETTING_NAMES = {
         "Extra-storage price spread",
         "mdi:chart-timeline-variant-shimmer",
     ),
+    "extra_storage_cheap_window_minutes": (
+        "Extra-storage cheap-window maximum duration",
+        "mdi:timer-sand",
+    ),
     "switching_penalty_dkk": ("Mode switching penalty", "mdi:swap-horizontal-bold"),
     "minimum_mode_minutes": ("Minimum mode duration", "mdi:timer-lock"),
     "maximum_transitions_per_day": ("Maximum daily mode transitions", "mdi:counter"),
@@ -131,11 +135,13 @@ class FbpNativeSocNumber(Fbp1200Entity, NumberEntity):
 
     @property
     def native_value(self) -> float | None:
-        return self.coordinator.data.get(f"native_{self.key}_soc")
+        data_key = "native_min_soc" if self.key == "minimum" else "native_max_soc"
+        return self.coordinator.data.get(data_key)
 
     @property
     def available(self) -> bool:
-        return self.coordinator.data.get(f"native_{self.key}_soc") is not None
+        data_key = "native_min_soc" if self.key == "minimum" else "native_max_soc"
+        return self.coordinator.data.get(data_key) is not None
 
     async def async_set_native_value(self, value: float) -> None:
         await self.coordinator.async_set_native_soc_limit(self.key, value)
