@@ -321,10 +321,12 @@ def _plan_blocks(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
             blocks[-1]["expected_savings_dkk"] += (
                 slot["baseline_cost_dkk"] - slot["interval_cost_dkk"]
             )
+            blocks[-1]["expected_cost_dkk"] += slot["interval_cost_dkk"]
             blocks[-1]["energy_kwh"] += (
                 slot["battery_charge_wh"] + slot["battery_discharge_wh"]
             ) / 1000
             blocks[-1]["expected_load_kwh"] += slot["expected_load_wh"] / 1000
+            blocks[-1]["expected_grid_import_kwh"] += slot["grid_import_wh"] / 1000
             blocks[-1]["soc_end"] = slot["soc_end"]
         else:
             blocks.append(
@@ -334,11 +336,13 @@ def _plan_blocks(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
                     "action": slot["action"],
                     "expected_savings_dkk": slot["baseline_cost_dkk"]
                     - slot["interval_cost_dkk"],
+                    "expected_cost_dkk": slot["interval_cost_dkk"],
                     "energy_kwh": (
                         slot["battery_charge_wh"] + slot["battery_discharge_wh"]
                     )
                     / 1000,
                     "expected_load_kwh": slot["expected_load_wh"] / 1000,
+                    "expected_grid_import_kwh": slot["grid_import_wh"] / 1000,
                     "soc_start": slot["soc_start"],
                     "soc_end": slot["soc_end"],
                     "reason": slot["reason"],
@@ -347,8 +351,10 @@ def _plan_blocks(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
     for block in blocks:
         for key in (
             "expected_savings_dkk",
+            "expected_cost_dkk",
             "energy_kwh",
             "expected_load_kwh",
+            "expected_grid_import_kwh",
             "soc_start",
             "soc_end",
         ):
