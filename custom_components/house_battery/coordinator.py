@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -32,6 +33,8 @@ from .const import (
     DEFAULT_PORT,
     DIRECT_LOAD_FIELD,
     DOMAIN,
+    FORECAST_MAX_AGE,
+    LOCAL_TCP_RECOVERY_GRACE,
     MODE_BATTERY,
     MODE_CHARGE,
     MODE_GRID,
@@ -199,6 +202,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._local_snapshot: FbpLocalSnapshot | None = None
         self._local_controls: dict[str, str] = {}
         self._local_telemetry_validator = FbpTelemetryValidator()
+        self._local_tcp_unavailable_since: datetime | None = None
         self._commanded_local_mode = MODE_SAFE
         self._observed_local_mode: str | None = None
         self._startup_control_gate_reason: str | None = None
@@ -385,9 +389,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     extract_rows(dict(forecast_state.attributes)),
                     now=now,
                     reported_at=reported_at,
-                    maximum_age=timedelta(
-                        minutes=self.runtime.settings["forecast_max_age_minutes"]
-                    ),
+                    maximum_age=FORECAST_MAX_AGE,
                 )
                 details["status"] = assessment.status
                 forecast_slots = list(assessment.slots)
@@ -565,6 +567,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         now = datetime.now(UTC)
         local_problem: str | None = None
+        local_tcp_recovery_remaining: timedelta | None = None
         if self.local_client is not None:
             try:
                 snapshot = await self.local_client.async_snapshot()
@@ -577,18 +580,32 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._observed_local_mode = operating_mode_from_controls(
                     self._local_controls
                 )
+                self._local_tcp_unavailable_since = None
             except LocalProtocolError as exc:
                 self._local_snapshot = None
                 self._local_controls = {}
                 self._observed_local_mode = None
                 local_problem = f"battery local TCP unavailable: {exc}"
+                if self._local_tcp_unavailable_since is None:
+                    self._local_tcp_unavailable_since = now
+                elapsed = now - self._local_tcp_unavailable_since
+                if elapsed < LOCAL_TCP_RECOVERY_GRACE:
+                    local_tcp_recovery_remaining = LOCAL_TCP_RECOVERY_GRACE - elapsed
         problems = get_health_problems(self.hass, self.config, now)
-        if local_problem:
+        local_tcp_recovering = local_tcp_recovery_remaining is not None
+        if local_problem and not local_tcp_recovering:
             problems.append(local_problem)
-        if direct_load_problem := self._direct_load_problem():
+        if (
+            (direct_load_problem := self._direct_load_problem())
+            and not local_tcp_recovering
+        ):
             problems.append(direct_load_problem)
         direct_control_problems: list[str] = []
-        if self.runtime.execution_enabled and self.is_direct_local:
+        if (
+            self.runtime.execution_enabled
+            and self.is_direct_local
+            and not local_tcp_recovering
+        ):
             direct_control_problems = self._direct_soc_control_problems_from_snapshot()
             problems.extend(direct_control_problems)
         soc = self._float(CONF_SOC)
@@ -606,6 +623,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         storage_policy: StoragePolicy | None = None
         startup_waiting = (
             self._startup_control_gate_reason is not None
+            and not local_tcp_recovering
             and direct_load_problem is None
             and (bool(problems) or grid_available is not True)
         )
@@ -622,6 +640,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             state = "OUTAGE"
             reason = "Grid is unavailable; optimizer is preserving the absolute emergency SOC"
             command_result = await self._force_safe_if_needed(now)
+        elif local_tcp_recovering:
+            self.plan = None
+            state = "RECOVERING"
+            remaining_seconds = math.ceil(local_tcp_recovery_remaining.total_seconds())
+            reason = (
+                "Battery local TCP is temporarily unavailable; automatic writes are "
+                f"paused for up to {LOCAL_TCP_RECOVERY_GRACE.seconds // 60} minutes "
+                f"({remaining_seconds} seconds remaining): {local_problem}"
+            )
+            command_result = "automatic writes paused during local TCP recovery grace period"
         elif problems:
             state = "DEGRADED"
             reason = "; ".join(problems)
@@ -773,9 +801,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._forecast_source
             else None
         )
+        reported_health_problems = list(problems)
+        if local_tcp_recovering and local_problem:
+            reported_health_problems.append(
+                "Local TCP recovery in progress: " + local_problem
+            )
         return {
             "system_state": state,
-            "healthy": not problems and grid_available is True,
+            "healthy": (
+                not problems and not local_tcp_recovering and grid_available is True
+            ),
             "reason": reason,
             "current_action": self.plan.current_action.value
             if self.plan and self.plan.slots
@@ -792,6 +827,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_charge_power_w": self._float(CONF_BATTERY_CHARGE_POWER, 0),
             "battery_discharge_power_w": self._float(CONF_BATTERY_DISCHARGE_POWER, 0),
             "local_connected": self._local_snapshot is not None,
+            "local_tcp_recovery_started_at": (
+                self._local_tcp_unavailable_since.isoformat()
+                if local_tcp_recovering and self._local_tcp_unavailable_since
+                else None
+            ),
+            "local_tcp_recovery_remaining_seconds": (
+                math.ceil(local_tcp_recovery_remaining.total_seconds())
+                if local_tcp_recovery_remaining
+                else 0
+            ),
             "local_load_diagnostics": (
                 self._local_snapshot.load_diagnostics
                 if self._local_snapshot is not None
@@ -898,7 +943,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "efficiency_learning_ready": self.runtime.battery_learner.efficiency_ready,
             "scheduled_load_count": len(self.runtime.scheduled_loads),
             "recent_decisions": self.runtime.decisions[-20:],
-            "health_problems": problems,
+            "health_problems": reported_health_problems,
             "last_refresh": now.isoformat(),
         }
 

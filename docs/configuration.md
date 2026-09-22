@@ -151,6 +151,7 @@ verified at the physical device.
 | `BOOTSTRAP` | Awaiting usable telemetry/price horizon. | No economic command. |
 | `SHADOW` | Plan is valid but commissioning or automatic control is off. | Plan only; no writes. |
 | `ACTIVE` | Commissioned and automatic control is on. | Writes local limits/mode with read-back. |
+| `RECOVERING` | The direct local TCP connection has been unavailable for less than two minutes. | Pauses all automatic writes and retains the automatic-control switch. A fresh, valid local frame resumes `ACTIVE`; two minutes of loss becomes `DEGRADED`. |
 | `DEGRADED` | A required input is stale, invalid, faulted, offline, or prices cannot yield a plan. | Requests safe mode and latches automatic control off. |
 | `OUTAGE` | Physical grid signal is unavailable. | Clears plan, requests safe mode and latches automatic control off. |
 

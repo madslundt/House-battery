@@ -7,7 +7,7 @@ entity picker; names below are the stable, user-facing names.
 
 | Entity | What it means | How to use it |
 | --- | --- | --- |
-| **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. Read its `reason` attribute first when it is not active. |
+| **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `RECOVERING`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. `RECOVERING` is a two-minute, write-paused grace period for a lost direct local TCP connection; read its `reason` attribute when it is not active. |
 | **Current decision** | The action the current plan wants now: `charge`, `grid`, `battery`, or `safe`. | Compare it with **Battery activity** to distinguish a planned mode from measured physical movement. |
 | **Battery activity** | Actual battery movement from local charge/discharge telemetry. | `charging`, `discharging`, or `idle`; configured operating mode remains an attribute because it does not prove physical energy movement. |
 | **Operating mode** | Direct local TCP selector for `Charge`, `Idle`, and the vendor-labelled `Self-Gen/Zero Export`. | This is a commanded state; vendor-app changes are not guaranteed to appear here. |
@@ -105,7 +105,6 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **Maximum daily mode transitions** | Daily switching budget. | Lower 4→2 for a quieter, more conservative system. |
 | **Cycle-life reference** | Fallback degradation model denominator. | Set it to the manufacturer-supported cycle rating; it does not change physical battery behavior. |
 | **External price forecast uncertainty** | Conservative error allowance for external price forecasts. | Set 0.25 DKK/kWh if the forecast's MAE is about 0.20; forecast charging is evaluated 0.25 higher and discharge 0.25 lower. |
-| **External price forecast maximum age** | How recent the configured forecast entity must be before it is usable. | Keep 180 minutes for a source that refreshes hourly; reduce it to 60 for a fast-changing intraday feed, or raise it only if the provider is reliably slower. |
 
 Change one number at a time. Observe at least several similar tariff days, then
 compare **realized savings**, **equivalent cycles**, forecast error, and the

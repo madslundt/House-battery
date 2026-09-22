@@ -29,7 +29,7 @@ from house_battery.const import (
     CONF_SOC,
 )
 from house_battery.coordinator import Fbp1200Coordinator
-from house_battery.local_tcp import FbpLocalSnapshot
+from house_battery.local_tcp import FbpLocalSnapshot, LocalProtocolError
 from house_battery.models import Action
 from house_battery.runtime import RuntimeState
 
@@ -583,6 +583,65 @@ def test_direct_restart_preserves_control_until_fresh_telemetry_validates_it() -
         assert coordinator.runtime.execution_enabled
         assert store.saved  # Learner provenance is migrated before validation.
         assert coordinator._startup_control_gate_reason is not None
+
+    asyncio.run(scenario())
+
+
+def test_transient_local_tcp_loss_pauses_writes_before_latching_control_off() -> None:
+    """A short local-network loss must not require manual re-authorisation."""
+
+    class UnavailableDirectClient:
+        async def async_snapshot(self) -> FbpLocalSnapshot:
+            raise LocalProtocolError("connection refused")
+
+        async def async_read_controls(self) -> dict[str, str]:
+            raise AssertionError("controls must not be read after a failed snapshot")
+
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        data = {
+            "host": "192.168.30.90",
+            "commissioned": True,
+            CONF_GRID_IMPORT_POWER: "sensor.grid_import",
+            CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
+        }
+        coordinator = Fbp1200Coordinator(hass, Entry(data))
+        coordinator.store = StaticStore(coordinator.runtime)
+        coordinator.local_client = UnavailableDirectClient()
+        coordinator.runtime.execution_enabled = True
+        hass.states.async_set("sensor.grid_import", "500")
+        hass.states.async_set("binary_sensor.grid_available", "on")
+        safe_calls: list[datetime] = []
+
+        async def force_safe(now: datetime) -> str:
+            safe_calls.append(now)
+            coordinator.runtime.execution_enabled = False
+            return "safe command requested"
+
+        coordinator._force_safe_if_needed = force_safe
+        coordinator._local_tcp_unavailable_since = datetime.now(UTC) - timedelta(
+            seconds=30
+        )
+
+        recovering = await coordinator._async_update_data()
+
+        assert recovering["system_state"] == "RECOVERING"
+        assert not recovering["healthy"]
+        assert recovering["execution_enabled"]
+        assert recovering["local_tcp_recovery_remaining_seconds"] > 0
+        assert not safe_calls
+        assert "Local TCP recovery in progress" in recovering["health_problems"][0]
+
+        coordinator._local_tcp_unavailable_since = datetime.now(UTC) - timedelta(
+            minutes=2
+        )
+        degraded = await coordinator._async_update_data()
+
+        assert degraded["system_state"] == "DEGRADED"
+        assert not degraded["execution_enabled"]
+        assert len(safe_calls) == 1
 
     asyncio.run(scenario())
 

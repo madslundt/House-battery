@@ -64,7 +64,6 @@ DEFAULT_SETTINGS: dict[str, float] = {
     "maximum_transitions_per_day": 4.0,
     "cycle_life": 6000.0,
     "forecast_uncertainty_dkk_per_kwh": 0.25,
-    "forecast_max_age_minutes": 180.0,
 }
 
 SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
@@ -85,9 +84,16 @@ SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
     "maximum_transitions_per_day": (1.0, 12.0, 1.0, None),
     "cycle_life": (500.0, 15000.0, 100.0, "cycles"),
     "forecast_uncertainty_dkk_per_kwh": (0.0, 10.0, 0.01, "DKK/kWh"),
-    "forecast_max_age_minutes": (5.0, 1440.0, 5.0, "min"),
 }
 
 TELEMETRY_STALE_AFTER = timedelta(minutes=5)
+# Forecasts remain optional and must be fresh; this conservative, fixed policy
+# avoids exposing a tuning knob that can accidentally accept obsolete prices.
+FORECAST_MAX_AGE = timedelta(minutes=180)
+# A PS240/FBP1200 may briefly disappear while it renews its local network
+# session.  During this bounded window the coordinator stops writes but keeps
+# the user's automatic-control authorization intact.  Invalid telemetry and
+# every non-local-TCP health failure still fail safe immediately.
+LOCAL_TCP_RECOVERY_GRACE = timedelta(minutes=2)
 DECISION_HISTORY_LIMIT = 500
 LEDGER_HISTORY_LIMIT = 96 * 62

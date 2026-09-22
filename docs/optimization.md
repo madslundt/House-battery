@@ -49,8 +49,8 @@ uninterrupted sequence of forecast intervals
 starting immediately after the last known interval. It never overwrites known
 prices, fills a gap in them, or uses forecasts without a known-price horizon.
 It also rejects an unavailable/unknown entity, malformed row, empty or expired
-horizon, and data older than **External price forecast maximum age**. These are
-forecast-only conditions: valid known-price planning remains in service.
+horizon, and data older than three hours. These are forecast-only conditions:
+valid known-price planning remains in service.
 
 Set **External price forecast uncertainty** to the likely absolute forecast
 error in DKK/kWh. In a forecast interval, the optimizer evaluates charging at

@@ -46,10 +46,6 @@ SETTING_NAMES = {
         "External price forecast uncertainty",
         "mdi:chart-bell-curve-cumulative",
     ),
-    "forecast_max_age_minutes": (
-        "External price forecast maximum age",
-        "mdi:clock-alert-outline",
-    ),
 }
 
 
