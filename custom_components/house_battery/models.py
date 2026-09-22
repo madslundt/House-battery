@@ -92,6 +92,10 @@ class PlannedSlot:
     interval_cost_dkk: float
     baseline_cost_dkk: float
     reason: str
+    # Keep the price provenance with the decision.  This lets long-term
+    # evidence distinguish a known tariff from an uncertainty-buffered forecast.
+    price_source: str = "known"
+    price_uncertainty_dkk_per_kwh: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)

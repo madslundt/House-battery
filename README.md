@@ -37,6 +37,8 @@ external optimizer.
   and safety rule.
 - [Optimizer and forecast guide](docs/optimization.md) — planning economics,
   external price forecasts, uncertainty, accuracy scoring, ROI, and tuning.
+- [LLM evaluation guide](docs/llm-evaluation.md) — export the right evidence,
+  query long-term history safely, and review plan quality with an LLM.
 - [Entity, control, and action reference](docs/entity-reference.md) — plain
   language descriptions and realistic examples for every entity.
 - [Examples](docs/examples.md) — dashboards, templates, scheduled loads,

@@ -395,6 +395,8 @@ def optimize(
                 interval_cost_dkk=cost,
                 baseline_cost_dkk=baseline,
                 reason=reason,
+                price_source=slot.source,
+                price_uncertainty_dkk_per_kwh=slot.uncertainty_dkk_per_kwh,
             )
         )
         previous_energy = next_energy

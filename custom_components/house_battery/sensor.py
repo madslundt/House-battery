@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -289,6 +290,9 @@ async def async_setup_entry(
             FbpActionSensor(coordinator),
             FbpModeSensor(coordinator),
             FbpPlanSensor(coordinator),
+            FbpCurrentPlanSlotSensor(coordinator),
+            FbpPlanExecutionSensor(coordinator),
+            FbpPlannedLoadPowerSensor(coordinator),
             FbpStoragePolicySensor(coordinator),
             FbpBatteryLearningSensor(coordinator),
             FbpPriceForecastAccuracySensor(coordinator),
@@ -320,6 +324,7 @@ def _plan_blocks(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
             blocks[-1]["energy_kwh"] += (
                 slot["battery_charge_wh"] + slot["battery_discharge_wh"]
             ) / 1000
+            blocks[-1]["expected_load_kwh"] += slot["expected_load_wh"] / 1000
             blocks[-1]["soc_end"] = slot["soc_end"]
         else:
             blocks.append(
@@ -333,13 +338,20 @@ def _plan_blocks(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
                         slot["battery_charge_wh"] + slot["battery_discharge_wh"]
                     )
                     / 1000,
+                    "expected_load_kwh": slot["expected_load_wh"] / 1000,
                     "soc_start": slot["soc_start"],
                     "soc_end": slot["soc_end"],
                     "reason": slot["reason"],
                 }
             )
     for block in blocks:
-        for key in ("expected_savings_dkk", "energy_kwh", "soc_start", "soc_end"):
+        for key in (
+            "expected_savings_dkk",
+            "energy_kwh",
+            "expected_load_kwh",
+            "soc_start",
+            "soc_end",
+        ):
             block[key] = round(block[key], 3)
     return blocks
 
@@ -452,6 +464,167 @@ class FbpPlanSensor(Fbp1200Entity, SensorEntity):
             "terminal_price_dkk_per_kwh": self.coordinator.data.get(
                 "terminal_price_dkk_per_kwh"
             ),
+        }
+
+
+def _current_plan_slot(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the executable current slot, if the planner has one."""
+    plan = data.get("plan")
+    if not isinstance(plan, dict):
+        return None
+    slots = plan.get("slots")
+    if not isinstance(slots, list) or not slots:
+        return None
+    slot = slots[0]
+    return slot if isinstance(slot, dict) else None
+
+
+class FbpCurrentPlanSlotSensor(Fbp1200Entity, SensorEntity):
+    """Expose a compact, recorder-friendly copy of the active planned slot."""
+
+    _attr_name = "Current plan slot"
+    _attr_icon = "mdi:timeline-clock"
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "current_plan_slot")
+
+    @property
+    def native_value(self) -> str | None:
+        slot = _current_plan_slot(self.coordinator.data)
+        return slot.get("start") if slot else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        slot = _current_plan_slot(self.coordinator.data)
+        if not slot:
+            return {"status": "no_executable_plan"}
+        hours = max(
+            0.0,
+            (
+                datetime.fromisoformat(slot["end"])
+                - datetime.fromisoformat(slot["start"])
+            ).total_seconds()
+            / 3600,
+        )
+        expected_load_wh = float(slot.get("expected_load_wh") or 0)
+        return {
+            "status": "planned",
+            "end": slot.get("end"),
+            "action": slot.get("action"),
+            "price_dkk_per_kwh": slot.get("price"),
+            "price_source": slot.get("price_source", "known"),
+            "price_uncertainty_dkk_per_kwh": slot.get(
+                "price_uncertainty_dkk_per_kwh", 0
+            ),
+            "expected_load_kwh": round(expected_load_wh / 1000, 4),
+            "expected_average_load_w": round(expected_load_wh / hours, 1)
+            if hours
+            else None,
+            "planned_grid_import_kwh": round(
+                float(slot.get("grid_import_wh") or 0) / 1000, 4
+            ),
+            "planned_battery_charge_kwh": round(
+                float(slot.get("battery_charge_wh") or 0) / 1000, 4
+            ),
+            "planned_battery_discharge_kwh": round(
+                float(slot.get("battery_discharge_wh") or 0) / 1000, 4
+            ),
+            "soc_start": slot.get("soc_start"),
+            "soc_end": slot.get("soc_end"),
+            "expected_cost_dkk": slot.get("interval_cost_dkk"),
+            "baseline_cost_dkk": slot.get("baseline_cost_dkk"),
+            "reason": slot.get("reason"),
+        }
+
+
+class FbpPlannedLoadPowerSensor(Fbp1200Entity, SensorEntity):
+    """Expose the active-slot load forecast as a time-series friendly value."""
+
+    _attr_name = "Planned load power"
+    _attr_icon = "mdi:home-clock-outline"
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "planned_load_power")
+
+    @property
+    def native_value(self) -> float | None:
+        slot = _current_plan_slot(self.coordinator.data)
+        if not slot:
+            return None
+        try:
+            hours = (
+                datetime.fromisoformat(slot["end"])
+                - datetime.fromisoformat(slot["start"])
+            ).total_seconds() / 3600
+            return round(float(slot["expected_load_wh"]) / hours)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        slot = _current_plan_slot(self.coordinator.data)
+        return {
+            "slot_start": slot.get("start") if slot else None,
+            "slot_end": slot.get("end") if slot else None,
+            "includes_scheduled_loads": True,
+            "note": "Average connected-load forecast for the active plan slot.",
+        }
+
+
+class FbpPlanExecutionSensor(Fbp1200Entity, SensorEntity):
+    """Compare expected physical battery movement with live telemetry."""
+
+    _attr_name = "Plan execution"
+    _attr_icon = "mdi:clipboard-check-outline"
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "plan_execution")
+
+    @property
+    def native_value(self) -> str:
+        slot = _current_plan_slot(self.coordinator.data)
+        if not slot:
+            return "not_assessable"
+        charge_wh = float(slot.get("battery_charge_wh") or 0)
+        discharge_wh = float(slot.get("battery_discharge_wh") or 0)
+        expected = (
+            "charging"
+            if charge_wh > 0
+            else "discharging" if discharge_wh > 0 else "idle"
+        )
+        actual = _battery_activity(self.coordinator.data)
+        if expected == actual:
+            return "matching"
+        if expected == "idle":
+            return "unexpected_battery_activity"
+        return "battery_not_moving_as_planned"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        slot = _current_plan_slot(self.coordinator.data)
+        if not slot:
+            return {"status": "no_executable_plan"}
+        charge_wh = float(slot.get("battery_charge_wh") or 0)
+        discharge_wh = float(slot.get("battery_discharge_wh") or 0)
+        expected = (
+            "charging"
+            if charge_wh > 0
+            else "discharging" if discharge_wh > 0 else "idle"
+        )
+        return {
+            "expected_battery_activity": expected,
+            "actual_battery_activity": _battery_activity(self.coordinator.data),
+            "planned_action": slot.get("action"),
+            "planned_battery_charge_kwh": round(charge_wh / 1000, 4),
+            "planned_battery_discharge_kwh": round(discharge_wh / 1000, 4),
+            "actual_charge_power_w": self.coordinator.data.get("battery_charge_power_w"),
+            "actual_discharge_power_w": self.coordinator.data.get(
+                "battery_discharge_power_w"
+            ),
+            "command_result": self.coordinator.data.get("command_result"),
+            "note": "A live mismatch is a diagnostic signal, not proof of a failed plan; assess it over the complete slot.",
         }
 
 

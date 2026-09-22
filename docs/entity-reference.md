@@ -72,6 +72,9 @@ SOC calibration; do not assume a warranty issue from this estimate alone.
 | --- | --- |
 | **Operation plan** | `blocks` attribute: contiguous start/end times, action, expected savings, energy, SOC start/end, and reason. Also exposes baseline cost, expected cost, terminal price, and horizon length. |
 | **Decision history** | Recent state/reason changes with timestamp, SOC, price, action, and command result. Use it to explain why the plan changed. |
+| **Current plan slot** | The active executable price interval, with its planned load, grid import, charge/discharge energy, SOC path, price provenance, conservative forecast buffer, costs, and reason. | Record this entity's attributes for a compact historical record of the inputs and output of each decision. |
+| **Planned load power** | Average connected-load forecast for the active plan slot, including scheduled loads. | Compare it with **Connected load power** over matching intervals to find systematic forecast bias. |
+| **Plan execution** | A live comparison between planned battery movement and measured charge/discharge power. | `matching` is encouraging; investigate a repeated non-matching state over a completed price slot. A momentary mismatch is not proof of a failed command. |
 
 Example: a plan block of `charge`, 01:00–03:00, SOC 25→90, followed by
 `battery`, 17:00–20:00, is evidence that House Battery found a complete,

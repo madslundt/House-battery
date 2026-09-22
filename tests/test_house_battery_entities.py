@@ -11,7 +11,13 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 from house_battery.const import CONF_PRICE_FORECAST_ENTITIES, PLATFORMS
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.number import FbpNativeSocNumber
-from house_battery.sensor import FbpLocalLoadDiagnosticsSensor, FbpModeSensor
+from house_battery.sensor import (
+    FbpCurrentPlanSlotSensor,
+    FbpLocalLoadDiagnosticsSensor,
+    FbpModeSensor,
+    FbpPlanExecutionSensor,
+    FbpPlannedLoadPowerSensor,
+)
 from house_battery.switch import FbpExternalForecastSwitch
 
 
@@ -96,6 +102,72 @@ def test_battery_activity_uses_physical_power_not_configured_mode() -> None:
     )
 
     assert FbpModeSensor.native_value.fget(sensor) == "idle"
+
+
+def test_current_plan_slot_exposes_auditable_planner_inputs() -> None:
+    data = {
+        "plan": {
+            "slots": [
+                {
+                    "start": "2026-09-22T10:00:00+00:00",
+                    "end": "2026-09-22T10:15:00+00:00",
+                    "action": "charge",
+                    "price": 0.25,
+                    "price_source": "forecast",
+                    "price_uncertainty_dkk_per_kwh": 0.1,
+                    "expected_load_wh": 125,
+                    "grid_import_wh": 425,
+                    "battery_charge_wh": 300,
+                    "battery_discharge_wh": 0,
+                    "soc_start": 20,
+                    "soc_end": 35,
+                    "interval_cost_dkk": 0.10625,
+                    "baseline_cost_dkk": 0.03125,
+                    "reason": "Charge during a cheap interval",
+                }
+            ]
+        },
+        "battery_charge_power_w": 900,
+        "battery_discharge_power_w": 0,
+        "command_result": "mode set",
+    }
+    coordinator = SimpleNamespace(data=data)
+    slot_sensor = SimpleNamespace(coordinator=coordinator)
+    execution_sensor = SimpleNamespace(coordinator=coordinator)
+    load_sensor = SimpleNamespace(coordinator=coordinator)
+
+    assert (
+        FbpCurrentPlanSlotSensor.native_value.fget(slot_sensor)
+        == "2026-09-22T10:00:00+00:00"
+    )
+    attributes = FbpCurrentPlanSlotSensor.extra_state_attributes.fget(slot_sensor)
+    assert attributes["price_source"] == "forecast"
+    assert attributes["expected_average_load_w"] == 500
+    assert attributes["planned_battery_charge_kwh"] == 0.3
+    assert FbpPlannedLoadPowerSensor.native_value.fget(load_sensor) == 500
+    assert FbpPlanExecutionSensor.native_value.fget(execution_sensor) == "matching"
+
+
+def test_plan_execution_reports_an_unexpected_physical_movement() -> None:
+    coordinator = SimpleNamespace(
+        data={
+            "plan": {
+                "slots": [
+                    {
+                        "start": "2026-09-22T10:00:00+00:00",
+                        "end": "2026-09-22T10:15:00+00:00",
+                        "battery_charge_wh": 0,
+                        "battery_discharge_wh": 0,
+                    }
+                ]
+            },
+            "battery_charge_power_w": 0,
+            "battery_discharge_power_w": 200,
+        }
+    )
+    sensor = SimpleNamespace(coordinator=coordinator)
+
+    assert FbpPlanExecutionSensor.native_value.fget(sensor) == "unexpected_battery_activity"
 
 
 def test_operating_mode_is_not_a_user_writable_entity() -> None:
