@@ -46,6 +46,12 @@ def _row(row: Any) -> tuple[datetime, datetime | None, float] | None:
         return None
     if start is None:
         return None
+    # Handle midnight rollover: intervals like 23:45→00:00 have end < start
+    # because the end is on the next calendar day.  Add one day when the raw
+    # end precedes the start, which is the standard way price feeds express
+    # overnight intervals (e.g. 23:45-00:00).
+    if end is not None and end <= start:
+        end = end + timedelta(days=1)
     if (end is not None and end <= start) or price < -20 or price > 100:
         return None
     return start, end, price

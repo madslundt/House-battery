@@ -133,3 +133,30 @@ class Plan:
             "reason": self.reason,
             "slots": [slot.as_dict() for slot in self.slots],
         }
+
+    def today_dict(self, now: datetime) -> dict[str, Any]:
+        """Return plan dict filtered to today's remaining slots (from *now*).
+
+        This gives a clean daily overview without past slots or tomorrow's
+        forecast bleeding into the user's view.
+        """
+        day_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        today_slots = tuple(
+            slot for slot in self.slots if slot.start <= day_end
+        )
+        if not today_slots:
+            return self.as_dict()
+        expected_cost = sum(s.interval_cost_dkk for s in today_slots)
+        baseline_cost = sum(s.baseline_cost_dkk for s in today_slots)
+        savings = baseline_cost - expected_cost
+        throughput = sum(s.battery_charge_wh + s.battery_discharge_wh for s in today_slots) / 1000
+        return {
+            "created_at": self.created_at.isoformat(),
+            "expected_cost_dkk": round(expected_cost, 4),
+            "baseline_cost_dkk": round(baseline_cost, 4),
+            "expected_savings_dkk": round(savings, 4),
+            "battery_throughput_kwh": round(throughput, 4),
+            "terminal_price_dkk_per_kwh": round(self.terminal_price_dkk_per_kwh, 4),
+            "reason": self.reason,
+            "slots": [slot.as_dict() for slot in today_slots],
+        }

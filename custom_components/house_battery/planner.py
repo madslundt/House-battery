@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import ceil, sqrt
-from statistics import median
+
 
 from .models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 
@@ -59,8 +59,20 @@ def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
 
 
 def _terminal_price(slots: list[PriceSlot]) -> float:
-    tail = slots[-min(len(slots), 48) :]
-    return median(slot.discharge_price_dkk_per_kwh for slot in tail)
+    """Value of stored energy at the end of the planning horizon.
+
+    Uses the average of the *median* and *75th percentile* of ALL slot prices.
+    The old approach used the last 48 slots (12 h) and took p95 + max / 2,
+    which over-valued the terminal state when the tail happens to contain
+    evening peaks (e.g. 2.97 DKK).  A moderate median-based estimate avoids
+    encouraging premature discharge while still crediting stored energy.
+    """
+    prices = sorted(slot.discharge_price_dkk_per_kwh for slot in slots)
+    n = len(prices)
+    p50 = prices[n // 2]
+    p75_idx = min(int(n * 0.75), n - 1)
+    p75 = prices[p75_idx]
+    return (p50 + p75) / 2
 
 
 def _allowed_actions(
@@ -137,12 +149,32 @@ def _slot_transition(
                 "changes are constrained"
             )
         else:
+            # Never charge on a forecast price that is above the discharge
+            # floor.  Forecasts are uncertain hints — charging on a forecast
+            # that turns out wrong (price is higher than expected) wastes
+            # round-trip efficiency.  Only charge on forecasts when the
+            # conservative charge price is clearly below the floor.
+            is_forecast = slot.source == "forecast"
+            if is_forecast and slot.charge_price_dkk_per_kwh >= discharge_price_floor:
+                return None
             charged_wh = input_wh * charge_efficiency
             grid_wh += input_wh
-            reason = "Known low price justifies charging after losses, wear and profit threshold"
+            if is_forecast:
+                reason = "Forecast dip below discharge floor justifies charging after losses"
+            else:
+                reason = "Known low price justifies charging after losses, wear and profit threshold"
     elif action is Action.BATTERY:
+        # For forecast slots, raise the floor further: the forecast must be
+        # clearly above the discharge floor to justify burning stored energy.
+        # We require price >= floor + uncertainty so that a forecast error
+        # (actual price lower than forecast) does not turn a profitable
+        # discharge into a loss.
+        if slot.source == "forecast":
+            effective_floor = discharge_price_floor + slot.uncertainty_dkk_per_kwh
+        else:
+            effective_floor = discharge_price_floor
         below_price_floor = (
-            slot.discharge_price_dkk_per_kwh + 1e-9 < discharge_price_floor
+            slot.discharge_price_dkk_per_kwh + 1e-9 < effective_floor
         )
         if below_price_floor and energy_wh > minimum_step * settings.energy_step_wh:
             return None
@@ -260,9 +292,22 @@ def optimize(
         )
     initial = _State(initial_step, current_action, initial_lock, 0)
     layers: list[dict[_State, _Node]] = [{initial: _Node(0.0, 0.0, None, None)}]
-    cheapest_price = min(slot.charge_price_dkk_per_kwh for slot in valid)
+    # Use the cheapest *available* charge price in the known-price window as
+    # the floor basis.  A fixed 72-hour look-ahead window keeps the floor
+    # stable across replans and prevents the floor from being driven by the
+    # current slot (which shifts with every update).  Using a distant cheap
+    # price (>72 h) is avoided because it misprices today's decision.
+    horizon_start = valid[0].start
+    known_charge_candidates = [
+        s for s in valid
+        if s.source == "known"
+        and (s.start - horizon_start).total_seconds() <= 72 * 3600
+    ]
+    if not known_charge_candidates:
+        known_charge_candidates = valid[:1]  # fallback
+    cheapest_charge_price = min(s.charge_price_dkk_per_kwh for s in known_charge_candidates)
     discharge_price_floor = (
-        cheapest_price / settings.round_trip_efficiency
+        cheapest_charge_price / settings.round_trip_efficiency
         + settings.degradation_cost_dkk_per_kwh
         + settings.minimum_profit_dkk_per_kwh
     )
@@ -403,7 +448,13 @@ def optimize(
 
     expected_cost = sum(item.interval_cost_dkk for item in planned)
     baseline_cost = sum(item.baseline_cost_dkk for item in planned)
-    savings = baseline_cost - expected_cost
+    # Include the terminal value in reported savings so that the plan's
+    # economic benefit is not understated (the optimizer already credits
+    # the terminal value internally when selecting the final state).
+    terminal_value = (
+        (final_state.energy_step - minimum_step) * step_wh * discharge_efficiency / 1000 * terminal_net_price
+    )
+    savings = baseline_cost - expected_cost + terminal_value
     throughput = (
         sum(item.battery_charge_wh + item.battery_discharge_wh for item in planned)
         / 1000
