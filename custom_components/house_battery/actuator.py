@@ -125,8 +125,21 @@ class LocalControlAdapter:
             _LOGGER.warning("%s; continuing with requested safe mode", limits_warning)
         mode = _ACTION_TO_MODE[action]
         try:
-            if action is Action.BATTERY or action is Action.SAFE:
-                await client.async_set_self_consumption()
+            if action is Action.BATTERY:
+                power_w = round(runtime.settings["discharge_power_w"])
+                await client.async_set_mode(
+                    "Discharge",
+                    min(power_w, 1200),
+                    min_soc=minimum,
+                    max_soc=maximum,
+                )
+            elif action is Action.SAFE:
+                await client.async_set_mode(
+                    "Idle",
+                    0,
+                    min_soc=minimum,
+                    max_soc=maximum,
+                )
             elif action is Action.CHARGE:
                 await client.async_set_mode(
                     "Charge",

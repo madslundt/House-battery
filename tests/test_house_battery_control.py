@@ -298,8 +298,10 @@ def test_battery_command_raises_the_native_minimum_to_the_arbitrage_reserve() ->
         async def async_set_limits(self, minimum: int, maximum: int) -> None:
             self.calls.append(("limits", minimum, maximum))
 
-        async def async_set_self_consumption(self) -> None:
-            self.calls.append(("self_consumption",))
+        async def async_set_mode(
+            self, mode: str, power: int, *, min_soc: int, max_soc: int
+        ) -> None:
+            self.calls.append(("mode", mode, power, min_soc, max_soc))
 
     state = runtime()
     state.settings["reserve_soc"] = 20
@@ -321,7 +323,7 @@ def test_battery_command_raises_the_native_minimum_to_the_arbitrage_reserve() ->
     )
 
     assert success
-    assert direct.calls == [("limits", 20, 90), ("self_consumption",)]
+    assert direct.calls == [("limits", 20, 90), ("mode", "Discharge", 800, 20, 90)]
 
 
 def test_failed_grid_exit_keeps_the_native_reserve_protected() -> None:
