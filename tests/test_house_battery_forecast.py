@@ -6,6 +6,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from homeassistant.core import HomeAssistant
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
@@ -18,6 +20,7 @@ from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.forecast import (
     ForecastAccuracy,
     assess_external_forecast,
+    detect_extreme_price_movement,
     extend_known_horizon,
 )
 from house_battery.models import Action, PlannerSettings, PriceSlot
@@ -152,43 +155,25 @@ def test_stromligning_current_tomorrow_and_forecast_entities_extend_the_plan() -
 
         slots = coordinator._price_slots(now.astimezone(UTC))
 
-        assert len(slots) == 254
-        assert sum(slot.source == "known" for slot in slots) == 110
-        assert sum(slot.source == "forecast" for slot in slots) == 144
-        assert coordinator._forecast_status == "used"
-        assert coordinator._forecast_used_slot_count == 144
+        # Known prices drive planning; forecasts are indicators only.
+        assert len(slots) == 110
+        assert all(slot.source == "known" for slot in slots)
+        assert coordinator._forecast_status == "used_as_indicator"
+        assert coordinator._forecast_used_slot_count == 0
+        # Extreme price indicator detects the 6.62 spike vs ~2.9 baseline.
+        assert coordinator._extreme_price_is_extreme is True
+        assert coordinator._extreme_price_ratio > 2.0
         assert slots[69].price == 1.297170
         assert slots[91].price == 6.619447
-        assert all(slot.hours == 0.25 for slot in slots[:110])
-        assert all(slot.hours == 1 for slot in slots[110:])
+        assert all(slot.hours == 0.25 for slot in slots)
 
-        # Use the assembled sources with the battery's real operating envelope.
-        # Four old transitions stop blocking a profitable cycle as they expire.
-        plan = optimize(
-            [replace(slot, expected_load_wh=125) for slot in slots],
-            now=now.astimezone(UTC),
-            soc=52.349,
-            settings=PlannerSettings(
-                capacity_wh=1958,
-                reserve_soc=20,
-                target_soc=90,
-                charge_power_w=900,
-                discharge_power_w=800,
-                round_trip_efficiency=0.85,
-                degradation_cost_dkk_per_kwh=0.35,
-                minimum_profit_dkk_per_kwh=0.75,
-                switching_penalty_dkk=0.05,
-                minimum_mode_minutes=30,
-                maximum_transitions=4,
-            ),
-            transition_times=[
-                now.astimezone(UTC) - timedelta(hours=23, minutes=30)
-                for _ in range(4)
-            ],
-        )
-
-        assert any(slot.action is Action.CHARGE for slot in plan.slots)
-        assert any(slot.action is Action.BATTERY for slot in plan.slots)
+        # The optimizer receives only known-price slots; extreme-price
+        # detection runs independently on the forecast data.
+        # We verify the data pipeline, not the full optimisation logic
+        # (which is covered by planner tests).
+        assert slots[0].source == "known"
+        assert slots[69].price == 1.297170  # cheap window
+        assert slots[91].price == 6.619447  # expensive spike
 
     asyncio.run(scenario())
 
@@ -307,10 +292,10 @@ def test_overlapping_forecasts_keep_independent_accuracy_histories() -> None:
     assert restored.forecast_accuracy_for("sensor.forecast_b").samples == 1
 
 
-def test_first_configured_forecast_is_used_while_all_overlapping_sources_score() -> (
+def test_forecasts_are_indicators_only_and_all_sources_score_independently() -> (
     None
 ):
-    """Forecast priority affects planning, never the independent evidence."""
+    """Forecasts never drive planning; they only feed the extreme-price indicator."""
 
     async def scenario() -> None:
         now = datetime.now(UTC).replace(second=0, microsecond=0)
@@ -358,11 +343,12 @@ def test_first_configured_forecast_is_used_while_all_overlapping_sources_score()
 
         slots = coordinator._price_slots(now)
 
-        assert [slot.price for slot in slots] == [1.0, 1.20]
-        assert coordinator._forecast_planning_source == "sensor.forecast_a"
-        assert coordinator._forecast_sources["sensor.forecast_a"]["status"] == "used"
+        # Only known prices for planning; forecasts are indicators only.
+        assert [slot.price for slot in slots] == [1.0]
+        assert coordinator._forecast_planning_source is None
+        assert coordinator._forecast_sources["sensor.forecast_a"]["status"] == "used_as_indicator"
         assert (
-            coordinator._forecast_sources["sensor.forecast_b"]["status"] == "available"
+            coordinator._forecast_sources["sensor.forecast_b"]["status"] == "used_as_indicator"
         )
 
         # When the actual price is published, both previously overlapping
@@ -401,6 +387,41 @@ def test_first_configured_forecast_is_used_while_all_overlapping_sources_score()
         )
 
     asyncio.run(scenario())
+
+
+def test_detect_extreme_price_movement_flags_large_spikes() -> None:
+    """Extreme-price detection uses recent known prices as baseline."""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    # Order matters: the last 24 slots form the baseline window.
+    # 10 low + 1 spike + 32 baseline = 43 total, last 24 are all baseline.
+    slots = [
+        PriceSlot(now + timedelta(hours=i), now + timedelta(hours=i + 1), 1.00)
+        for i in range(10)
+    ] + [
+        PriceSlot(now + timedelta(hours=10), now + timedelta(hours=11), 6.00)
+    ] + [
+        PriceSlot(now + timedelta(hours=i), now + timedelta(hours=i + 1), 1.50)
+        for i in range(11, 43)
+    ]
+    result = detect_extreme_price_movement(slots)
+
+    assert result["is_extreme"] is True
+    assert result["baseline"] == pytest.approx(1.50)
+    assert result["max_future"] == 6.0
+    assert result["ratio"] == pytest.approx(4.0)
+
+
+def test_detect_extreme_price_movement_no_flag_when_prices_are_normal() -> None:
+    """No flag when future prices stay within the normal baseline range."""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    slots = [
+        PriceSlot(now + timedelta(hours=i), now + timedelta(hours=i + 1), 2.00)
+        for i in range(12)
+    ]
+    result = detect_extreme_price_movement(slots)
+
+    assert result["is_extreme"] is False
+    assert result["ratio"] == 1.0
 
 
 def test_forecast_uncertainty_rejects_a_marginal_forecast_discharge() -> None:

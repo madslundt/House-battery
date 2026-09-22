@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import replace
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -42,7 +42,11 @@ from .const import (
     UPDATE_INTERVAL,
 )
 from .evidence import EvidenceCollector
-from .forecast import assess_external_forecast, extend_known_horizon
+from .forecast import (
+    assess_external_forecast,
+    detect_extreme_price_movement,
+    extend_known_horizon,
+)
 from .health import get_health_problems
 from .learning import LoadLearner
 from .local_tcp import (
@@ -55,7 +59,6 @@ from .local_tcp import (
 from .models import Action, Plan, PlannerSettings, PriceSlot
 from .planner import optimize
 from .policy import (
-    StoragePolicy,
     action_from_operating_mode,
     apply_storage_policy,
     parse_grid_available,
@@ -65,106 +68,6 @@ from .runtime import RuntimeState, RuntimeStore
 
 _LOGGER = logging.getLogger(__name__)
 _BAD_STATES = {"unknown", "unavailable", "none", ""}
-_PRICE_TOLERANCE_DKK_PER_KWH = 1e-9
-_COST_TOLERANCE_DKK = 1e-9
-
-
-def _matching_price_slot(
-    planned_start: datetime, planned_end: datetime, slots: list[PriceSlot]
-) -> PriceSlot | None:
-    """Find the source interval backing a planned (possibly partial) slot."""
-    return next(
-        (
-            slot
-            for slot in slots
-            if slot.start <= planned_start and planned_end <= slot.end
-        ),
-        None,
-    )
-
-
-def _strict_extra_storage_rejection(
-    *,
-    normal_plan: Plan,
-    extra_plan: Plan,
-    slots: list[PriceSlot],
-    now: datetime,
-    normal_target_soc: float,
-    cheap_window_minutes: float,
-) -> str | None:
-    """Return why an extra-SOC plan is not a rare, valuable opportunity.
-
-    The policy-level price-spread test merely makes an extra target eligible.
-    This final gate compares executable plans and fails closed unless the extra
-    energy is bought at the cheapest *known* price in a short opportunity.
-    Forecast intervals cannot establish that opportunity.
-    """
-    if (
-        extra_plan.expected_cost_dkk
-        >= normal_plan.expected_cost_dkk - _COST_TOLERANCE_DKK
-    ):
-        return "Normal target retained; extra plan has no incremental expected-cost saving"
-
-    extra_charge_slots: list[PriceSlot] = []
-    for planned in extra_plan.slots:
-        if planned.battery_charge_wh <= 0:
-            continue
-        # A charge that only reaches the normal target is not evidence for the
-        # discretionary storage band.  SOC deltas are the executed energy
-        # result after the planner's quantisation and losses.
-        stored_above_normal_soc = max(
-            0.0, planned.soc_end - max(planned.soc_start, normal_target_soc)
-        )
-        if stored_above_normal_soc <= _PRICE_TOLERANCE_DKK_PER_KWH:
-            continue
-        source_slot = _matching_price_slot(planned.start, planned.end, slots)
-        if source_slot is None or source_slot.source != "known":
-            return (
-                "Normal target retained; extra charge is not in a known-price "
-                "interval"
-            )
-        extra_charge_slots.append(source_slot)
-
-    if not extra_charge_slots:
-        return (
-            "Normal target retained; extra plan does not charge above the normal target"
-        )
-
-    known_slots = [
-        slot for slot in slots if slot.source == "known" and slot.end > now
-    ]
-    if not known_slots:
-        return "Normal target retained; no known-price opportunity is available"
-    cheapest_known_charge_price = min(
-        slot.charge_price_dkk_per_kwh for slot in known_slots
-    )
-    for slot in extra_charge_slots:
-        if (
-            slot.charge_price_dkk_per_kwh
-            > cheapest_known_charge_price + _PRICE_TOLERANCE_DKK_PER_KWH
-        ):
-            return (
-                "Normal target retained; extra charge is not at the cheapest "
-                "known charge price"
-            )
-
-    # The full remaining duration of equally cheap *known* intervals is the
-    # opportunity window.  If it is longer than the configured window, there
-    # is no need to buy discretionary energy now: an equally cheap opportunity
-    # remains available for too long.  Forecast slots are deliberately absent.
-    opportunity_minutes = sum(
-        max(0.0, (slot.end - max(slot.start, now)).total_seconds() / 60)
-        for slot in known_slots
-        if abs(slot.charge_price_dkk_per_kwh - cheapest_known_charge_price)
-        <= _PRICE_TOLERANCE_DKK_PER_KWH
-    )
-    if opportunity_minutes > cheap_window_minutes + _PRICE_TOLERANCE_DKK_PER_KWH:
-        return (
-            "Normal target retained; cheapest known-price opportunity lasts "
-            f"{opportunity_minutes:g} minutes, above the "
-            f"{cheap_window_minutes:g}-minute extra-storage limit"
-        )
-    return None
 
 
 class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -192,6 +95,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_last_updated: str | None = None
         self._forecast_sources: dict[str, dict[str, Any]] = {}
         self._forecast_planning_source: str | None = None
+        self._extreme_price_indicator: dict[str, float | bool] = {
+            "is_extreme": False,
+            "baseline": 0.0,
+            "max_future": 0.0,
+            "ratio": 0.0,
+        }
         self.local_client = (
             FbpLocalTcpClient(
                 entry.data[CONF_HOST], int(entry.data.get("port", DEFAULT_PORT))
@@ -425,19 +334,28 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             for source, forecast_slots in available_forecasts
         }
+        # Use known prices only for planning — forecasts are indicators only.
+        # The price feed provides confirmed data up to ~36 hours ahead;
+        # forecast slots carry uncertainty buffers that make the optimizer
+        # unnecessarily conservative for the very spikes we want to react to.
         slots = known_slots
         self._forecast_planning_source = None
         self._forecast_used_slot_count = 0
         if self.runtime.forecast_enabled:
-            for source, _forecast_slots in available_forecasts:
-                extension = extensions[source]
-                used_slots = sum(slot.source == "forecast" for slot in extension)
-                if used_slots:
-                    slots = extension
-                    self._forecast_planning_source = source
-                    self._forecast_used_slot_count = used_slots
-                    source_data[source]["used_slots"] = used_slots
-                    break
+            # Detect extreme price movements using available forecasts.
+            # Only flag when future prices deviate sharply from the recent
+            # known-price baseline (default 2× the average).
+            all_planning_slots = sorted(
+                known_slots,
+                key=lambda item: item.start,
+            )
+            # Add forecast slots to the detection set (they're just for
+            # indicators, not for the optimizer itself).
+            for source, forecast_slots in available_forecasts:
+                all_planning_slots.extend(forecast_slots)
+            self._extreme_price_indicator = detect_extreme_price_movement(
+                all_planning_slots
+            )
 
         for source, details in source_data.items():
             if details["status"] != "available":
@@ -447,9 +365,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if not self.runtime.forecast_enabled:
                 details["status"] = "disabled"
-            elif source == self._forecast_planning_source:
-                details["status"] = "used"
-            elif not extension_slots:
+            elif extension_slots:
+                details["status"] = "used_as_indicator"
+            else:
                 details["status"] = "no_contiguous_extension"
 
         for source, details in source_data.items():
@@ -462,7 +380,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "within_uncertainty_pct": accuracy.within_uncertainty_pct,
             }
         self._forecast_sources = source_data
-        self._forecast_source = self._forecast_planning_source or (
+        self._forecast_source = (
             sources[0] if sources else None
         )
         primary = source_data.get(self._forecast_source or "", {})
@@ -470,6 +388,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_last_updated = primary.get("last_updated")
         self._forecast_slot_count = sum(
             int(details["available_slots"]) for details in source_data.values()
+        )
+        self._extreme_price_ratio = self._extreme_price_indicator.get("ratio", 0.0)
+        self._extreme_price_is_extreme = self._extreme_price_indicator.get(
+            "is_extreme", False
         )
         result: list[PriceSlot] = []
         for slot in slots:
@@ -479,6 +401,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 slot.start, self._load_power(0) or 0
             )
             scheduled_wh = self._scheduled_load_wh(slot.start, slot.end)
+            # Known prices go to the optimizer with their full value.
+            # Forecast slots are excluded from the planning horizon
+            # because they carry uncertainty buffers that suppress
+            # otherwise profitable arbitrage on extreme price spikes.
             result.append(
                 PriceSlot(
                     slot.start,
@@ -620,7 +546,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         reason = "Waiting for valid local telemetry and price intervals"
         command_result = "no command"
         effective_settings: PlannerSettings | None = None
-        storage_policy: StoragePolicy | None = None
         startup_waiting = (
             self._startup_control_gate_reason is not None
             and not local_tcp_recovering
@@ -656,62 +581,18 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             command_result = await self._force_safe_if_needed(now)
         elif soc is not None:
             try:
-                normal_settings = self._settings()
-                candidate_settings, storage_policy = apply_storage_policy(
-                    normal_settings,
-                    slots,
-                    extra_storage_spread_dkk_per_kwh=self.runtime.settings[
-                        "extra_storage_spread_dkk_per_kwh"
-                    ],
-                    opportunistic_target_soc=self.runtime.settings[
-                        "opportunistic_target_soc"
-                    ],
-                )
-                normal_plan = optimize(
+                settings = self._settings()
+                settings = apply_storage_policy(settings)
+                self.plan = optimize(
                     slots,
                     now=now,
                     soc=soc,
-                    settings=normal_settings,
+                    settings=settings,
                     current_action=action if action is not Action.SAFE else Action.GRID,
                     mode_lock_remaining_minutes=self.runtime.mode_lock_remaining(now),
                     transition_times=self.runtime.active_transition_times(now),
                 )
-                effective_settings = normal_settings
-                self.plan = normal_plan
-                if storage_policy.active:
-                    extra_plan = optimize(
-                        slots,
-                        now=now,
-                        soc=soc,
-                        settings=candidate_settings,
-                        current_action=(
-                            action if action is not Action.SAFE else Action.GRID
-                        ),
-                        mode_lock_remaining_minutes=self.runtime.mode_lock_remaining(
-                            now
-                        ),
-                        transition_times=self.runtime.active_transition_times(now),
-                    )
-                    rejection = _strict_extra_storage_rejection(
-                        normal_plan=normal_plan,
-                        extra_plan=extra_plan,
-                        slots=slots,
-                        now=now,
-                        normal_target_soc=normal_settings.target_soc,
-                        cheap_window_minutes=self.runtime.settings[
-                            "extra_storage_cheap_window_minutes"
-                        ],
-                    )
-                    if rejection is None:
-                        effective_settings = candidate_settings
-                        self.plan = extra_plan
-                    else:
-                        storage_policy = replace(
-                            storage_policy,
-                            target_soc=normal_settings.target_soc,
-                            active=False,
-                            reason=rejection,
-                        )
+                effective_settings = settings
             except ValueError as exc:
                 self.plan = None
                 problems.append(str(exc))
@@ -865,29 +746,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "effective_target_soc": effective_settings.target_soc
             if effective_settings
             else None,
-            "price_spread_dkk_per_kwh": storage_policy.price_spread_dkk_per_kwh
-            if storage_policy
-            else None,
-            "effective_margin_dkk_per_kwh": storage_policy.effective_margin_dkk_per_kwh
-            if storage_policy
-            else None,
-            "extra_storage_known_slot_count": storage_policy.known_slot_count
-            if storage_policy
-            else None,
-            "extra_storage_charge_price_dkk_per_kwh": (
-                storage_policy.conservative_charge_price_dkk_per_kwh
-                if storage_policy
-                else None
+            "plan_created_at": (
+                self.plan.created_at.isoformat() if self.plan else None
             ),
-            "extra_storage_discharge_price_dkk_per_kwh": (
-                storage_policy.conservative_discharge_price_dkk_per_kwh
-                if storage_policy
-                else None
+            "plan": (
+                self.plan.today_dict(now) if self.plan else None
             ),
-            "extra_storage_active": storage_policy.active if storage_policy else False,
-            "extra_storage_reason": storage_policy.reason if storage_policy else None,
-            "plan_created_at": self.plan.created_at.isoformat() if self.plan else None,
-            "plan": self.plan.as_dict() if self.plan else None,
             **periods,
             "lifetime_charge_kwh": self.runtime.ledger.total_charge_kwh,
             "lifetime_discharge_kwh": self.runtime.ledger.total_discharge_kwh,
@@ -916,6 +780,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "price_forecast_last_updated": self._forecast_last_updated,
             "price_forecast_available_slots": self._forecast_slot_count,
             "price_forecast_used_slots": self._forecast_used_slot_count,
+            # Extreme price indicator — forecasts are used only to detect
+            # when prices deviate sharply from the recent baseline.
+            "price_forecast_extreme_ratio": self._extreme_price_ratio,
+            "price_forecast_is_extreme": self._extreme_price_is_extreme,
             "price_forecast_accuracy": (
                 primary_accuracy.quality if primary_accuracy else "unknown"
             ),

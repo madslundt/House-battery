@@ -1,4 +1,9 @@
-"""Coordinator gate tests for discretionary extra battery storage."""
+"""Tests for the simplified coordinator (extra-storage removed).
+
+Extra-storage target and spread knobs were removed (2025-09) because they
+created wasteful discharge→recharge cycles.  The coordinator now uses a
+single plan with target_soc as the hard charge ceiling.
+"""
 
 from __future__ import annotations
 
@@ -8,110 +13,83 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.coordinator import _strict_extra_storage_rejection
-from house_battery.models import Action, Plan, PlannedSlot, PriceSlot
+from house_battery.models import Action, Plan, PlannedSlot
+
 
 NOW = datetime(2026, 9, 21, 10, tzinfo=UTC)
 
 
-def price_slot(
-    index: int, price: float, *, source: str = "known"
-) -> PriceSlot:
-    start = NOW + timedelta(minutes=15 * index)
-    return PriceSlot(start, start + timedelta(minutes=15), price, source=source)
+def _make_plan(slots) -> Plan:
+    return Plan(
+        created_at=NOW,
+        slots=slots,
+        expected_cost_dkk=sum(s.interval_cost_dkk for s in slots),
+        baseline_cost_dkk=sum(s.baseline_cost_dkk for s in slots),
+        expected_savings_dkk=0,
+        battery_throughput_kwh=0,
+        terminal_price_dkk_per_kwh=1.0,
+        reason="test",
+    )
 
 
-def plan(*, cost: float, charge_slot: PriceSlot | None = None) -> Plan:
-    slots: tuple[PlannedSlot, ...] = ()
-    if charge_slot:
-        slots = (
-            PlannedSlot(
-                start=charge_slot.start,
-                end=charge_slot.end,
-                action=Action.CHARGE,
-                price=charge_slot.price,
-                expected_load_wh=0,
-                grid_import_wh=250,
-                battery_charge_wh=230,
-                battery_discharge_wh=0,
-                soc_start=89,
-                soc_end=100,
-                interval_cost_dkk=cost,
-                baseline_cost_dkk=0,
-                reason="test",
-            ),
+def test_plan_today_dict_filters_out_tomorrow() -> None:
+    """today_dict should only include slots for today, not tomorrow."""
+    today_slot = PlannedSlot(
+        start=NOW,
+        end=NOW + timedelta(hours=1),
+        action=Action.GRID,
+        price=1.0,
+        expected_load_wh=100,
+        grid_import_wh=100,
+        battery_charge_wh=0,
+        battery_discharge_wh=0,
+        soc_start=50,
+        soc_end=50,
+        interval_cost_dkk=0.1,
+        baseline_cost_dkk=0.1,
+        reason="today",
+    )
+    tomorrow_slot = PlannedSlot(
+        start=NOW + timedelta(days=1),
+        end=NOW + timedelta(days=1, hours=1),
+        action=Action.GRID,
+        price=1.0,
+        expected_load_wh=100,
+        grid_import_wh=100,
+        battery_charge_wh=0,
+        battery_discharge_wh=0,
+        soc_start=50,
+        soc_end=50,
+        interval_cost_dkk=0.1,
+        baseline_cost_dkk=0.1,
+        reason="tomorrow",
+    )
+    full_plan = _make_plan((today_slot, tomorrow_slot))
+    today_data = full_plan.today_dict(NOW)
+    assert len(today_data["slots"]) == 1
+    assert today_data["slots"][0]["reason"] == "today"
+
+
+def test_plan_today_dict_returns_all_when_all_today() -> None:
+    """When all slots are for today, today_dict returns all of them."""
+    slots = tuple(
+        PlannedSlot(
+            start=NOW + timedelta(hours=i),
+            end=NOW + timedelta(hours=i + 1),
+            action=Action.GRID,
+            price=1.0,
+            expected_load_wh=100,
+            grid_import_wh=100,
+            battery_charge_wh=0,
+            battery_discharge_wh=0,
+            soc_start=50,
+            soc_end=50,
+            interval_cost_dkk=0.1,
+            baseline_cost_dkk=0.1,
+            reason=f"hour_{i}",
         )
-    return Plan(NOW, slots, cost, 0, -cost, 0, 0, "test")
-
-
-def test_extra_plan_is_accepted_only_for_a_shortest_known_price_opportunity() -> None:
-    cheapest = price_slot(0, 0.1)
-    slots = [cheapest, price_slot(1, 2.0)]
-
-    assert (
-        _strict_extra_storage_rejection(
-            normal_plan=plan(cost=2.0),
-            extra_plan=plan(cost=1.0, charge_slot=cheapest),
-            slots=slots,
-            now=NOW,
-            normal_target_soc=90,
-            cheap_window_minutes=30,
-        )
-        is None
+        for i in range(10)
     )
-
-
-def test_extra_plan_requires_a_real_incremental_cost_saving() -> None:
-    cheapest = price_slot(0, 0.1)
-
-    assert "no incremental expected-cost saving" in _strict_extra_storage_rejection(
-        normal_plan=plan(cost=1.0),
-        extra_plan=plan(cost=1.0, charge_slot=cheapest),
-        slots=[cheapest],
-        now=NOW,
-        normal_target_soc=90,
-        cheap_window_minutes=30,
-    )
-
-
-def test_extra_plan_rejects_a_forecast_price_even_when_it_is_cheapest() -> None:
-    forecast = price_slot(0, 0.01, source="forecast")
-    known = price_slot(1, 0.1)
-
-    assert "not in a known-price interval" in _strict_extra_storage_rejection(
-        normal_plan=plan(cost=2.0),
-        extra_plan=plan(cost=1.0, charge_slot=forecast),
-        slots=[forecast, known],
-        now=NOW,
-        normal_target_soc=90,
-        cheap_window_minutes=30,
-    )
-
-
-def test_extra_plan_requires_the_cheapest_conservative_known_price() -> None:
-    cheap = price_slot(0, 0.1)
-    merely_low = price_slot(1, 0.2)
-
-    assert "not at the cheapest known charge price" in _strict_extra_storage_rejection(
-        normal_plan=plan(cost=2.0),
-        extra_plan=plan(cost=1.0, charge_slot=merely_low),
-        slots=[cheap, merely_low],
-        now=NOW,
-        normal_target_soc=90,
-        cheap_window_minutes=30,
-    )
-
-
-def test_extra_plan_rejects_a_known_price_that_stays_cheapest_too_long() -> None:
-    cheapest = price_slot(0, 0.1)
-    equally_cheap = price_slot(1, 0.1)
-    still_equally_cheap = price_slot(2, 0.1)
-
-    assert "above the 30-minute extra-storage limit" in _strict_extra_storage_rejection(
-        normal_plan=plan(cost=2.0),
-        extra_plan=plan(cost=1.0, charge_slot=cheapest),
-        slots=[cheapest, equally_cheap, still_equally_cheap],
-        now=NOW,
-        normal_target_soc=90,
-        cheap_window_minutes=30,
-    )
+    full_plan = _make_plan(slots)
+    today_data = full_plan.today_dict(NOW)
+    assert len(today_data["slots"]) == 10

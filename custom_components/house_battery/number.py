@@ -18,10 +18,6 @@ SETTING_NAMES = {
     "absolute_min_soc": ("Absolute emergency SOC", "mdi:battery-alert"),
     "reserve_soc": ("Arbitrage reserve SOC", "mdi:battery-lock"),
     "target_soc": ("Maximum charge SOC", "mdi:battery-charging-90"),
-    "opportunistic_target_soc": (
-        "Extra-storage charge SOC",
-        "mdi:battery-charging-100",
-    ),
     "charge_power_w": ("Maximum charge power", "mdi:battery-charging"),
     "discharge_power_w": ("Maximum discharge power", "mdi:battery-arrow-down"),
     "round_trip_efficiency": ("Fallback round-trip efficiency", "mdi:percent-circle"),
@@ -30,17 +26,6 @@ SETTING_NAMES = {
         "mdi:battery-heart-variant",
     ),
     "minimum_profit_dkk_per_kwh": ("Minimum required profit", "mdi:cash-lock"),
-    "extra_storage_spread_dkk_per_kwh": (
-        "Extra-storage price spread",
-        "mdi:chart-timeline-variant-shimmer",
-    ),
-    "extra_storage_cheap_window_minutes": (
-        "Extra-storage cheap-window maximum duration",
-        "mdi:timer-sand",
-    ),
-    "switching_penalty_dkk": ("Mode switching penalty", "mdi:swap-horizontal-bold"),
-    "minimum_mode_minutes": ("Minimum mode duration", "mdi:timer-lock"),
-    "maximum_transitions_per_day": ("Maximum daily mode transitions", "mdi:counter"),
     "cycle_life": ("Cycle-life reference", "mdi:sync"),
     "forecast_uncertainty_dkk_per_kwh": (
         "External price forecast uncertainty",
@@ -99,11 +84,10 @@ class FbpSettingNumber(Fbp1200Entity, NumberEntity):
             <= candidate["absolute_min_soc"]
             <= candidate["reserve_soc"]
             < candidate["target_soc"]
-            <= candidate["opportunistic_target_soc"]
             <= 100
         ):
             raise ValueError(
-                "Absolute emergency SOC ≤ arbitrage reserve < normal target ≤ extra-storage target is required"
+                "Absolute emergency SOC ≤ arbitrage reserve < maximum charge SOC is required"
             )
         await self.coordinator.async_set_setting(self.key, value)
 

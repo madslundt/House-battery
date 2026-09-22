@@ -227,3 +227,38 @@ def test_planner_is_reproducible() -> None:
     first = optimize(slots([0.2] * 8 + [4.0] * 8), **arguments)
     second = optimize(slots([0.2] * 8 + [4.0] * 8), **arguments)
     assert first == second
+
+
+def test_no_wasteful_discharge_at_target_soc() -> None:
+    """When at target SOC the battery must not discharge just to recharge later.
+
+    This prevents the wasteful discharge→recharge cycle that burns round-trip
+    efficiency with no net benefit.  The battery should hold and let the grid
+    supply the load instead.
+    """
+    plan = optimize(
+        slots([5.0] * 8, load_w=200),
+        now=BASE - timedelta(seconds=1),
+        soc=90,
+        settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
+    )
+    # Battery must not discharge when already at target SOC
+    assert all(
+        slot.battery_discharge_wh == 0 for slot in plan.slots
+    ), "Should not discharge at target SOC"
+
+
+def test_battery_at_target_holds_and_uses_grid() -> None:
+    """When at 90% target the battery holds charge and uses grid for load."""
+
+    plan = optimize(
+        slots([5.0] * 4, load_w=200),
+        now=BASE - timedelta(seconds=1),
+        soc=90,
+        settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
+    )
+    # Grid should supply the load (battery doesn't discharge)
+    assert all(
+        slot.grid_import_wh >= slot.expected_load_wh
+        for slot in plan.slots
+    ), "Grid should supply at least the load"

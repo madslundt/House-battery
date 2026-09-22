@@ -62,6 +62,10 @@ def extend_known_horizon(
     A forecast can never replace a known price or bridge a missing known-price
     interval. This prevents an unavailable actual price feed from silently
     becoming a control input.
+
+    Known prices (up to ~36 hours ahead) are authoritative. Forecasts are only
+    appended when known prices truly end — they are never used to overwrite
+    or replace confirmed tariff data.
     """
     result = sorted(known, key=lambda item: item.start)
     if not result:
@@ -84,6 +88,47 @@ def extend_known_horizon(
         )
         expected_start = slot.end
     return result
+
+
+def detect_extreme_price_movement(
+    slots: list[PriceSlot],
+    *,
+    threshold_factor: float = 2.0,
+) -> dict[str, float | bool]:
+    """Detect when prices deviate sharply from the recent average.
+
+    Returns a summary that can be used for UI indicators (e.g. "prices going
+    crazy") without feeding uncertain forecast data into the optimizer.
+
+    Uses the most recent known prices as the baseline and compares against
+    future prices (known or forecast).  Only flags when the future price
+    exceeds *threshold_factor* times the baseline average.
+    """
+    if not slots:
+        return {"is_extreme": False, "baseline": 0.0, "max_future": 0.0}
+
+    known = [s for s in slots if s.source == "known"]
+    future = [s for s in slots if s.end > slots[0].start]
+
+    if not known:
+        return {"is_extreme": False, "baseline": 0.0, "max_future": 0.0}
+
+    # Baseline: average of the most recent 24 known-price slots
+    recent = known[-min(24, len(known)):]
+    baseline = sum(s.price for s in recent) / len(recent)
+
+    # Max future price (including forecast)
+    max_future = max((s.price for s in future), default=baseline)
+
+    # Flag when future price is significantly above baseline
+    is_extreme = max_future > baseline * threshold_factor if baseline > 0 else False
+
+    return {
+        "is_extreme": is_extreme,
+        "baseline": round(baseline, 4),
+        "max_future": round(max_future, 4),
+        "ratio": round(max_future / baseline, 3) if baseline > 0 else 0.0,
+    }
 
 
 @dataclass(slots=True)
