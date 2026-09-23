@@ -7,17 +7,24 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from .const import LEDGER_HISTORY_LIMIT
-from .models import Action
+from .models import Action, normalize_grid_flow
 
 
 @dataclass(slots=True)
 class IntervalAccumulator:
-    """Weighted telemetry accumulated within one UTC quarter-hour."""
+    """Weighted telemetry accumulated within one UTC quarter-hour.
+
+    Grid power is accepted as a *signed* value (positive = import, negative =
+    export) and decomposed into import and export energy here, at this single
+    normalisation point. Export is accumulated in its own field and is never
+    clamped away, so any meaningful export stays visible in the ledger.
+    """
 
     start: datetime
     seconds: float = 0.0
     load_wh: float = 0.0
     grid_import_wh: float = 0.0
+    grid_export_wh: float = 0.0
     charge_wh: float = 0.0
     discharge_wh: float = 0.0
     price_seconds: float = 0.0
@@ -26,23 +33,27 @@ class IntervalAccumulator:
     soc_last: float | None = None
     samples: int = 0
     action: str = Action.SAFE.value
+    grid_sign: float = 1.0
 
     def add(
         self,
         *,
         seconds: float,
         load_w: float,
-        grid_import_w: float,
+        grid_power_w: float,
         charge_w: float,
         discharge_w: float,
         price: float | None,
         soc: float,
         action: Action,
+        grid_sign: float = 1.0,
     ) -> None:
         hours = max(0.0, seconds) / 3600
         self.seconds += seconds
         self.load_wh += max(0.0, load_w) * hours
-        self.grid_import_wh += max(0.0, grid_import_w) * hours
+        import_w, export_w = normalize_grid_flow(grid_power_w, grid_sign)
+        self.grid_import_wh += max(0.0, import_w) * hours
+        self.grid_export_wh += max(0.0, export_w) * hours
         self.charge_wh += max(0.0, charge_w) * hours
         self.discharge_wh += max(0.0, discharge_w) * hours
         if price is not None:
@@ -65,6 +76,7 @@ class LedgerInterval:
     price_dkk_per_kwh: float | None
     load_kwh: float
     grid_import_kwh: float
+    grid_export_kwh: float
     battery_charge_kwh: float
     battery_discharge_kwh: float
     soc_start: float | None
@@ -83,6 +95,7 @@ class EnergyLedger:
     intervals: list[LedgerInterval] = field(default_factory=list)
     total_charge_kwh: float = 0.0
     total_discharge_kwh: float = 0.0
+    total_export_kwh: float = 0.0
     total_net_savings_dkk: float = 0.0
 
     def close(
@@ -101,10 +114,14 @@ class EnergyLedger:
         )
         load_kwh = accumulator.load_wh / 1000
         import_kwh = accumulator.grid_import_wh / 1000
+        export_kwh = accumulator.grid_export_wh / 1000
         charge_kwh = accumulator.charge_wh / 1000
         discharge_kwh = accumulator.discharge_wh / 1000
         degradation = discharge_kwh * degradation_cost
         baseline = load_kwh * price if price is not None and quality == "good" else None
+        # Export is reported, never credited: we do not value exported energy as
+        # avoided import (there is no export contract to settle against), so it
+        # must not reduce the measured import cost.
         actual = (
             import_kwh * price
             if price is not None and quality == "good"
@@ -122,6 +139,7 @@ class EnergyLedger:
             price_dkk_per_kwh=price,
             load_kwh=load_kwh,
             grid_import_kwh=import_kwh,
+            grid_export_kwh=export_kwh,
             battery_charge_kwh=charge_kwh,
             battery_discharge_kwh=discharge_kwh,
             soc_start=accumulator.soc_first,
@@ -135,6 +153,7 @@ class EnergyLedger:
         self.intervals = (self.intervals + [interval])[-LEDGER_HISTORY_LIMIT:]
         self.total_charge_kwh += charge_kwh
         self.total_discharge_kwh += discharge_kwh
+        self.total_export_kwh += export_kwh
         if savings is not None:
             self.total_net_savings_dkk += savings
         return interval
@@ -156,6 +175,7 @@ class EnergyLedger:
         return {
             "charge_kwh": sum(item.battery_charge_kwh for item in selected),
             "discharge_kwh": sum(item.battery_discharge_kwh for item in selected),
+            "grid_export_kwh": sum(item.grid_export_kwh for item in selected),
             "net_savings_dkk": sum(item.net_savings_dkk or 0 for item in selected),
             "baseline_cost_dkk": sum(item.baseline_cost_dkk or 0 for item in selected),
             "actual_cost_dkk": sum(item.actual_cost_dkk or 0 for item in selected),
@@ -170,6 +190,7 @@ class EnergyLedger:
             "intervals": [asdict(item) for item in self.intervals],
             "total_charge_kwh": self.total_charge_kwh,
             "total_discharge_kwh": self.total_discharge_kwh,
+            "total_export_kwh": self.total_export_kwh,
             "total_net_savings_dkk": self.total_net_savings_dkk,
         }
 
@@ -177,15 +198,13 @@ class EnergyLedger:
     def from_dict(cls, data: dict[str, Any]) -> EnergyLedger:
         intervals = []
         for value in data.get("intervals", []):
-            try:
-                value = {key: item for key, item in value.items() if key != "grid_export_kwh"}
-                intervals.append(LedgerInterval(**value))
-            except (TypeError, ValueError):
-                continue
+            # Keep grid_export_kwh: it is now a first-class ledger field.
+            intervals.append(LedgerInterval(**value))
         return cls(
             intervals=intervals[-LEDGER_HISTORY_LIMIT:],
             total_charge_kwh=float(data.get("total_charge_kwh", 0)),
             total_discharge_kwh=float(data.get("total_discharge_kwh", 0)),
+            total_export_kwh=float(data.get("total_export_kwh", 0)),
             total_net_savings_dkk=float(data.get("total_net_savings_dkk", 0)),
         )
 

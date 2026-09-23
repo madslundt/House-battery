@@ -59,7 +59,13 @@ from .local_tcp import (
     LocalProtocolError,
     operating_mode_from_controls,
 )
-from .models import Action, Plan, PlannerSettings, PriceSlot
+from .models import (
+    Action,
+    Plan,
+    PlannerSettings,
+    PriceSlot,
+    normalize_grid_flow,
+)
 from .planner import optimize
 from .policy import (
     action_from_operating_mode,
@@ -631,13 +637,21 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # optimizer already starts its future SOC from the observed SOC
                 # (see ``optimize``), so no predicted SOC is treated as authority.
                 local_now = dt_util.as_local(now)
-                day_start, day_end = local_day_bounds(local_now)
+                day_start, _day_end = local_day_bounds(local_now)
+                # Extend the persisted timeline through the whole known-price
+                # horizon (today plus any following days whose prices are already
+                # available) rather than only the current calendar day.  The
+                # optimizer only ever plans the future, so the reconciler keeps
+                # the immutable past and recomputes only what lies past ``now``.
+                horizon_end = (
+                    self.plan.slots[-1].end if self.plan.slots else day_start
+                )
                 self.runtime.daily_plan = reconcile_daily_plan(
                     self.runtime.daily_plan,
                     self.plan.slots,
                     cutoff=now,
                     day_start=day_start,
-                    day_end=day_end,
+                    horizon_end=horizon_end,
                 )
                 self._daily_plan_dirty = True
                 commissioned = bool(self.config.get(CONF_COMMISSIONED, False))
@@ -752,7 +766,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "command_result": command_result,
             "soc": soc,
             "load_power_w": self._load_power(),
-            "grid_import_power_w": self._float(CONF_GRID_IMPORT_POWER),
+            # Decompose the signed grid meter into import/export here so export
+            # is visible as a first-class quantity rather than clamped to zero.
+            "grid_flow_power_w": self._float(CONF_GRID_IMPORT_POWER),
+            "grid_import_power_w": normalize_grid_flow(
+                self._float(CONF_GRID_IMPORT_POWER) or 0.0
+            )[0],
+            "grid_export_power_w": normalize_grid_flow(
+                self._float(CONF_GRID_IMPORT_POWER) or 0.0
+            )[1],
             "battery_charge_power_w": self._float(CONF_BATTERY_CHARGE_POWER, 0),
             "battery_discharge_power_w": self._float(CONF_BATTERY_DISCHARGE_POWER, 0),
             "local_connected": self._local_snapshot is not None,

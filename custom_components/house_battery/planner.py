@@ -165,27 +165,23 @@ def _slot_transition(
             else:
                 reason = "Known low price justifies charging after losses, wear and profit threshold"
     elif action is Action.BATTERY:
-        # For forecast slots, raise the floor further: the forecast must be
-        # clearly above the discharge floor to justify burning stored energy.
-        # We require price >= floor + uncertainty so that a forecast error
-        # (actual price lower than forecast) does not turn a profitable
-        # discharge into a loss.
-        if slot.source == "forecast":
-            effective_floor = discharge_price_floor + slot.uncertainty_dkk_per_kwh
-        else:
-            effective_floor = discharge_price_floor
-        below_price_floor = slot.discharge_price_dkk_per_kwh + 1e-9 < effective_floor
-        if below_price_floor and energy_wh > minimum_step * settings.energy_step_wh:
-            return None
+        # Zero-export/physical correctness are enforced by the execution layer,
+        # not by the planner. Here the planner only *values* stored energy; it
+        # does not forbid it. We deliberately no longer treat the cheapest future
+        # charge price as the universal acquisition cost of energy already inside
+        # the battery: that hard gate made stored energy unusable whenever no
+        # cheap recharge lingered in the horizon and duplicated the objective.
+        # Degradation cost, the required profit margin, the future replacement
+        # opportunity (terminal price) and the reserve floor all live in the
+        # objective and bounds, so the dynamic program discharges only when doing
+        # so is genuinely better than holding the energy for a later interval or
+        # for its terminal value. Discharge is still capped by the load, which is
+        # what keeps the physical model consistent with zero export.
         available_wh = max(0.0, energy_wh - minimum_step * settings.energy_step_wh)
-        deliverable_wh = (
-            0.0
-            if below_price_floor
-            else min(
-                load_wh,
-                settings.discharge_power_w * slot.hours,
-                available_wh * discharge_efficiency,
-            )
+        deliverable_wh = min(
+            load_wh,
+            settings.discharge_power_w * slot.hours,
+            available_wh * discharge_efficiency,
         )
         if deliverable_wh <= settings.energy_step_wh / 4:
             if not permits_energy_neutral_continuation:
@@ -401,11 +397,19 @@ def optimize(
 
     terminal_price = _terminal_price(valid)
     discharge_efficiency = sqrt(settings.round_trip_efficiency)
+    # Value leftover energy at its best future discharge opportunity: the
+    # replacement price less the real degradation wear. The required profit
+    # margin is a *hurdle* for the present discharge decision (it lives in the
+    # discharge optimization cost above); it must not also discount the stored
+    # energy the program is deciding whether to keep. Double-counting the margin
+    # there made holding vs discharging a mathematical wash, which the
+    # throughput tiebreak then turned into wasteful discharge at target SOC.
+    # Keeping the margin only in the discharge cost makes "hold at target"
+    # strictly preferred whenever there is no clear price advantage.
     terminal_net_price = max(
         0.0,
         terminal_price
-        - settings.degradation_cost_dkk_per_kwh
-        - settings.minimum_profit_dkk_per_kwh,
+        - settings.degradation_cost_dkk_per_kwh,
     )
 
     def final_key(item: tuple[_State, _Node]) -> tuple[float, int, float, str]:
@@ -414,8 +418,17 @@ def optimize(
         terminal_value = (
             stored_above_reserve_wh * discharge_efficiency / 1000 * terminal_net_price
         )
+        # Absorb floating-point noise from the two accumulation paths (grid-only
+        # vs. battery movement) so that a genuine economic *wash* ties on the
+        # cost term. The existing tiebreak is "fewer transitions, then less
+        # battery throughput", which deliberately prefers HOLDING when moving the
+        # battery buys nothing. Without this rounding the wash decided itself on a
+        # ~1e-8 difference, letting the greedy per-layer optimiser slip a
+        # wasteful discharge (e.g. at target SOC with flat prices) through the
+        # back door after the hard discharge floor was removed.
+        cost_term = round(node.cost - terminal_value, 6)
         return (
-            node.cost - terminal_value,
+            cost_term,
             state.planned_transitions,
             node.throughput_wh,
             state.action.value,

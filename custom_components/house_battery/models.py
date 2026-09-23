@@ -105,6 +105,35 @@ class PlannedSlot:
         return data
 
 
+# Grid-meter sign convention. The configured ``grid_import_power_entity`` is
+# treated as positive when power flows *into* the house from the grid and
+# negative when the house flows *out* to the grid. A single normalisation point
+# (``normalize_grid_flow``) is the only place this assumption is applied, so a
+# meter with the opposite convention needs exactly one documented override.
+GRID_POWER_IMPORT_POSITIVE = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class BatteryTelemetry:
+    """Normalised, export-aware physical snapshot consumed by every layer.
+
+    The grid quantity is stored both raw (``grid_power_w``, signed) and
+    decomposed (``grid_import_w`` / ``grid_export_w``, both non-negative) so no
+    consumer ever has to guess the sign again. Export is a first-class
+    quantity here: it is never silently clamped to zero, which is precisely the
+    behaviour that hid export in the accounting layer before.
+    """
+
+    soc: float
+    load_w: float
+    grid_power_w: float
+    grid_import_w: float
+    grid_export_w: float
+    charge_w: float
+    discharge_w: float
+    timestamp: datetime
+
+
 @dataclass(frozen=True, slots=True)
 class Plan:
     """Complete plan and economics for the available price horizon."""
@@ -166,3 +195,18 @@ class Plan:
             "reason": self.reason,
             "slots": [slot.as_dict() for slot in today_slots],
         }
+
+
+def normalize_grid_flow(
+    signed_power_w: float, sign: float = GRID_POWER_IMPORT_POSITIVE
+) -> tuple[float, float]:
+    """Decompose a signed grid power value into (import_w, export_w).
+
+    Sign convention: with the default ``sign`` of +1, a positive value is grid
+    import and a negative value is grid export. Invert ``sign`` for a meter that
+    reports the opposite. Both returned quantities are non-negative; the caller
+    decides what a meaningful (vs. sensor-noise) export is.
+    """
+    imported = signed_power_w * sign
+    exported = -imported
+    return max(0.0, imported), max(0.0, exported)

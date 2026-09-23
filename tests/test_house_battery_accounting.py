@@ -24,7 +24,8 @@ def test_complete_battery_interval_books_net_savings_after_wear() -> None:
         accumulator.add(
             seconds=60,
             load_w=500,
-            grid_import_w=0,
+            grid_power_w=0,
+            grid_sign=1.0,
             charge_w=0,
             discharge_w=500,
             price=2.0,
@@ -44,7 +45,8 @@ def test_incomplete_interval_never_claims_savings() -> None:
     accumulator.add(
         seconds=60,
         load_w=500,
-        grid_import_w=0,
+        grid_power_w=0,
+        grid_sign=1.0,
         charge_w=0,
         discharge_w=500,
         price=2.0,
@@ -54,6 +56,71 @@ def test_incomplete_interval_never_claims_savings() -> None:
     result = EnergyLedger().close(accumulator, degradation_cost=0.35)
     assert result.quality == "incomplete"
     assert result.net_savings_dkk is None
+
+
+def test_grid_export_is_recorded_distinctly_and_not_clamped_away() -> None:
+    # Negative grid power is export. The old behaviour clamped it to zero and
+    # hid it; export must now be captured as its own quantity in a *good*
+    # interval, and must never be credited as avoided import cost.
+    accumulator = IntervalAccumulator(datetime(2026, 9, 20, 10, 0, tzinfo=UTC))
+    for _ in range(12):
+        accumulator.add(
+            seconds=60,
+            load_w=100,
+            grid_power_w=-250,
+            grid_sign=1.0,
+            charge_w=0,
+            discharge_w=0,
+            price=2.0,
+            soc=60,
+            action=Action.GRID,
+        )
+    result = EnergyLedger().close(accumulator, degradation_cost=0.35)
+    assert result.quality == "good"
+    assert result.grid_import_kwh == pytest.approx(0.0)
+    expected_export = 250 * 12 * 60 / 3600 / 1000
+    assert result.grid_export_kwh == pytest.approx(expected_export)
+    # Export is reported but not subtracted from the import cost.
+    assert result.actual_cost_dkk == pytest.approx(0.0)
+
+
+def test_opposite_grid_meter_sign_is_normalised_once() -> None:
+    # A meter that reports export as positive only needs one sign flip.
+    accumulator = IntervalAccumulator(datetime(2026, 9, 20, 10, 0, tzinfo=UTC))
+    accumulator.add(
+        seconds=60,
+        load_w=100,
+        grid_power_w=300,
+        grid_sign=-1.0,
+        charge_w=0,
+        discharge_w=0,
+        price=2.0,
+        soc=60,
+        action=Action.GRID,
+    )
+    result = EnergyLedger().close(accumulator, degradation_cost=0.35)
+    assert result.grid_import_kwh == pytest.approx(0.0)
+    assert result.grid_export_kwh == pytest.approx(300 / 1000 / 60)
+
+
+def test_export_totals_round_trip_through_storage() -> None:
+    accumulator = IntervalAccumulator(datetime(2026, 9, 20, 10, 0, tzinfo=UTC))
+    accumulator.add(
+        seconds=60,
+        load_w=100,
+        grid_power_w=-120,
+        grid_sign=1.0,
+        charge_w=0,
+        discharge_w=0,
+        price=2.0,
+        soc=60,
+        action=Action.GRID,
+    )
+    ledger = EnergyLedger()
+    ledger.close(accumulator, degradation_cost=0.0)
+    restored = EnergyLedger.from_dict(ledger.as_dict())
+    assert restored.total_export_kwh == pytest.approx(ledger.total_export_kwh)
+    assert restored.total_export_kwh > 0.0
 
 
 def test_calendar_period_totals_survive_restart_and_retain_previous_periods() -> None:
@@ -68,6 +135,7 @@ def test_calendar_period_totals_survive_restart_and_retain_previous_periods() ->
             price_dkk_per_kwh=1,
             load_kwh=0,
             grid_import_kwh=0,
+            grid_export_kwh=0,
             battery_charge_kwh=charge,
             battery_discharge_kwh=0,
             soc_start=None,

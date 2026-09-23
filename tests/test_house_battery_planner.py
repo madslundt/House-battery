@@ -162,6 +162,38 @@ def test_locked_battery_exits_to_grid_below_the_economic_price_floor() -> None:
     assert "Grid supplies" in plan.slots[0].reason
 
 
+def test_existing_stored_energy_discharges_on_opportunity_not_cheapest_floor() -> None:
+    """Stored energy is valued by future opportunity cost, not the cheapest
+    future *charge* price.
+
+    Prices are 1.4 now and 1.0 thereafter. The cheapest-future-charge floor is
+    1.0 / efficiency + degradation + margin = 1.53 (margin=0), so the old
+    universal discharge gate rejected burning energy at 1.4. But the true
+    opportunity cost of energy already inside the battery is ~1.0 (the future
+    price net of wear), so discharging now at 1.4 clears it and is genuinely
+    profitable. With the hard floor removed the dynamic program discharges;
+    with a real required margin the discharge bar rises above 1.4 and the
+    battery holds, proving the decision now follows the objective, not a global
+    prohibition keyed on the cheapest future charging slot.
+    """
+    plan = optimize(
+        slots([1.4, 1.0, 1.0, 1.0]),
+        now=BASE - timedelta(seconds=1),
+        soc=60,
+        settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
+    )
+    assert plan.slots[0].action is Action.BATTERY
+    assert plan.slots[0].battery_discharge_wh > 0
+
+    plan_margin = optimize(
+        slots([1.4, 1.0, 1.0, 1.0]),
+        now=BASE - timedelta(seconds=1),
+        soc=60,
+        settings=settings(minimum_profit_dkk_per_kwh=0.75, switching_penalty_dkk=0),
+    )
+    assert plan_margin.slots[0].action is Action.GRID
+
+
 def test_transition_budget_keeps_current_mode() -> None:
     plan = optimize(
         slots([0.1] * 8 + [5.0] * 8),
