@@ -676,11 +676,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if override_action is not None
                         else self.plan.current_action
                     )
+                    # Enforce zero export at the command boundary: pass the
+                    # measured battery-served load so the execution layer clamps
+                    # the discharge setpoint below the load and a fixed-power
+                    # slot can never export when the house load dips below it.
                     command_result = (
                         await self.actuator.async_command(
                             requested_action,
                             now,
                             target_soc=effective_settings.target_soc,
+                            load_w=self._load_power(0) or 0,
                         )
                     )[1]
 

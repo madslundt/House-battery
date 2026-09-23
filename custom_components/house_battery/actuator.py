@@ -31,8 +31,54 @@ _ACTION_TO_MODE = {
     Action.BATTERY: MODE_BATTERY,
     Action.SAFE: MODE_SAFE,
 }
+# The reference inverter exposes three *native* Operating Mode options on its
+# select entity (Charge / Idle / Self-Gen/Zero Export) but the local adapter
+# drives its own three custom fixed-power slots (Charge / Idle / Discharge).
+# The two are different physical modes that only partially overlap, so the
+# reported commanded mode must reflect which one is actually written: the
+# native label on the HA select path, the custom slot label on the direct TCP
+# path.  Reporting the native "Self-Gen/Zero Export" label while the device is
+# really in a fixed-power "Discharge" slot would misstate the physical mode.
 _SOC_CONTROL_KEYS = (CONF_MIN_SOC_CONTROL, CONF_MAX_SOC_CONTROL)
 _UNAVAILABLE_STATES = {"unknown", "unavailable", "none", ""}
+
+# The local adapter commands a *fixed-power* discharge custom slot
+# ("1,00:00,23:59,{power},..."), which pushes energy out of the battery for the
+# whole day regardless of what the house is actually drawing.  A zero export is
+# only guaranteed when the commanded discharge never exceeds the measured load,
+# so the execution layer caps the discharge setpoint below the current load
+# before it is handed to the inverter.  The planner already caps discharge at
+# the *forecast* load; this enforces the same invariant against the *actual*
+# load on every command, so a load dip below the setpoint cannot export.  The
+# small absolute margin absorbs meter/reporting noise; loads below it simply do
+# not discharge rather than risk any export.
+DISCHARGE_EXPORT_SAFETY_MARGIN_W = 50.0
+
+# The fixed-power custom slot is accepted by the inverter up to 1200 W; higher
+# requested discharge power is therefore clamped to that ceiling at the command
+# boundary.
+_DIRECT_SETPOINT_CEILING_W = 1200
+
+
+def discharge_setpoint_below_load(
+    requested_w: float, load_w: float | None
+) -> float:
+    """Cap a commanded discharge so it can never exceed the actual load.
+
+    ``load_w`` is the measured battery-served load.  When it is ``None`` the
+    caller did not have a load reading, so the requested discharge is returned
+    unchanged and the caller is responsible for the resulting risk; when it is
+    a number the discharge is clamped to ``load - margin`` so a fixed-power
+    slot cannot export to the grid if the house load falls below the setpoint.
+    """
+    if load_w is None:
+        return requested_w
+    return max(load_w - DISCHARGE_EXPORT_SAFETY_MARGIN_W, 0.0)
+
+
+def clamp_setpoint_to_device(power_w: float) -> float:
+    """Clamp a commanded discharge setpoint to the inverter's accepted range."""
+    return min(max(0.0, power_w), _DIRECT_SETPOINT_CEILING_W)
 
 
 def soc_control_problems(
@@ -101,7 +147,11 @@ class LocalControlAdapter:
         self._direct_mode_changed = direct_mode_changed
 
     async def _async_direct_command(
-        self, action: Action, now: datetime, target_soc: float | None
+        self,
+        action: Action,
+        now: datetime,
+        target_soc: float | None,
+        load_w: float | None = None,
     ) -> tuple[bool, str] | None:
         """Use the built-in TCP adapter when this is a direct-local entry."""
         client = self._direct_client() if self._direct_client else None
@@ -123,17 +173,32 @@ class LocalControlAdapter:
                 return False, f"local TCP command failed: {exc}"
             limits_warning = f"SOC limits not confirmed: {exc}"
             _LOGGER.warning("%s; continuing with requested safe mode", limits_warning)
-        mode = _ACTION_TO_MODE[action]
+        # The custom local slot label actually written to the inverter; report
+        # this (not the native Operating Mode label) so the reported commanded
+        # mode matches the physical mode the device is really in.
+        direct_command_mode: str | None = None
         try:
             if action is Action.BATTERY:
-                power_w = round(runtime.settings["discharge_power_w"])
+                # Enforce zero export physically: never command a discharge that
+                # exceeds the measured load, so the fixed-power slot cannot push
+                # energy back to the grid if the house load dips below the
+                # setpoint.
+                power_w = round(
+                    clamp_setpoint_to_device(
+                        discharge_setpoint_below_load(
+                            runtime.settings["discharge_power_w"], load_w
+                        )
+                    )
+                )
+                direct_command_mode = "Discharge"
                 await client.async_set_mode(
                     "Discharge",
-                    min(power_w, 1200),
+                    power_w,
                     min_soc=minimum,
                     max_soc=maximum,
                 )
             elif action is Action.SAFE:
+                direct_command_mode = "Idle"
                 await client.async_set_mode(
                     "Idle",
                     0,
@@ -141,6 +206,7 @@ class LocalControlAdapter:
                     max_soc=maximum,
                 )
             elif action is Action.CHARGE:
+                direct_command_mode = "Charge"
                 await client.async_set_mode(
                     "Charge",
                     round(runtime.settings["charge_power_w"]),
@@ -148,6 +214,7 @@ class LocalControlAdapter:
                     max_soc=maximum,
                 )
             else:
+                direct_command_mode = "Idle"
                 await client.async_set_mode("Idle", 0, min_soc=minimum, max_soc=maximum)
         except Exception as exc:
             _LOGGER.exception("Local TCP mode command failed")
@@ -155,7 +222,7 @@ class LocalControlAdapter:
             await self._save()
             return False, f"local TCP command failed: {exc}"
         if self._direct_mode_changed:
-            self._direct_mode_changed(mode)
+            self._direct_mode_changed(direct_command_mode or _ACTION_TO_MODE[action])
         if runtime.last_action != action.value:
             runtime.last_action = action.value
             runtime.last_action_at = now.isoformat()
@@ -243,10 +310,24 @@ class LocalControlAdapter:
         )
 
     async def async_command(
-        self, action: Action, now: datetime, *, target_soc: float | None = None
+        self,
+        action: Action,
+        now: datetime,
+        *,
+        target_soc: float | None = None,
+        load_w: float | None = None,
     ) -> tuple[bool, str]:
-        """Apply limits, issue one mode change, and require immediate read-back."""
-        direct_result = await self._async_direct_command(action, now, target_soc)
+        """Apply limits, issue one mode change, and require immediate read-back.
+
+        ``load_w`` is the measured battery-served load.  It is passed to the
+        execution layer so the discharge setpoint can be clamped below the load
+        (see :func:`discharge_setpoint_below_load`), enforcing zero export
+        physically at the command boundary rather than trusting the planner's
+        forecast load.
+        """
+        direct_result = await self._async_direct_command(
+            action, now, target_soc, load_w
+        )
         if direct_result is not None:
             return direct_result
         mode = _ACTION_TO_MODE[action]
