@@ -126,17 +126,55 @@ def _price_slots(prices: list[float]) -> list[PriceSlot]:
 def test_actual_soc_wins_over_predicted_soc() -> None:
     """A battery physically at 100% must plan from ~100%, not the 90% target."""
     now = datetime(2026, 9, 20, 13, 5, tzinfo=UTC)
+    soc = 100  # actual observed SOC
     plan = optimize(
         _price_slots([0.2] * 8 + [4.0] * 8),
         now=now,
-        soc=100,  # actual observed SOC
+        soc=soc,
         settings=_planner_settings(),
     )
     # The predicted/target-based start (~89%) is rejected; the future SOC curve
     # begins at the observed 100%.
     assert plan.slots[0].soc_start >= 99.0
-    # And the battery is never allowed to charge above the configured target.
-    assert all(slot_.soc_end <= 90.5 for slot_ in plan.slots)
+    # The cheap early window is a grid HOLD at the observed SOC, not a phantom
+    # discharge down to the target ceiling (a battery at 100% stays at 100% while
+    # the grid supplies the load).
+    assert plan.slots[0].action is Action.GRID
+    assert plan.slots[0].battery_discharge_wh == 0
+    assert abs(plan.slots[0].soc_end - plan.slots[0].soc_start) < 1e-6
+    # The SOC can sit above the target (the battery physically holds 100%), but
+    # can never be charged above the higher of target and observed SOC, and never
+    # drains below reserve.
+    ceiling = max(_planner_settings().target_soc, soc)
+    assert all(slot_.soc_end <= ceiling + 1e-6 for slot_ in plan.slots)
+    assert all(slot_.soc_start >= _planner_settings().reserve_soc - 1e-6 for slot_ in plan.slots)
+
+
+def test_grid_hold_never_phantom_discharges_above_target() -> None:
+    """Regression: a battery above target must not 'drop' to target with no throughput.
+
+    If the planning SOC ceiling stays pinned to ``target_soc`` while the initial
+    energy is anchored at the higher observed SOC, the DP clamp drags the first
+    ``grid`` block down to target reporting zero battery throughput. The inverter
+    sees no such discharge, so the plan must hold at the observed SOC.
+    """
+    now = datetime(2026, 9, 20, 13, 5, tzinfo=UTC)
+    plan = optimize(
+        _price_slots([0.2] * 8 + [4.0] * 8),
+        now=now,
+        soc=100,
+        settings=_planner_settings(),
+    )
+    cheap_window = plan.slots[:4]
+    for slot_ in cheap_window:
+        assert slot_.action is Action.GRID
+        assert slot_.battery_discharge_wh == 0
+        assert slot_.battery_charge_wh == 0
+        assert abs(slot_.soc_end - slot_.soc_start) < 1e-6, (
+            "grid block drops SOC with zero throughput"
+        )
+    assert cheap_window[0].soc_start >= 99.0
+    assert cheap_window[0].soc_end >= 99.0
 
 
 def test_predicted_soc_is_not_treated_as_authoritative() -> None:

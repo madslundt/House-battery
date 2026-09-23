@@ -9,8 +9,8 @@ from typing import Any
 from homeassistant.helpers.storage import Store
 
 from .accounting import EnergyLedger
-from .dailyplan import DailyPlan
 from .const import DEFAULT_SETTINGS, DOMAIN, STORAGE_KEY, STORAGE_VERSION
+from .dailyplan import DailyPlan
 from .forecast import ForecastAccuracy
 from .learning import BatteryLearner, LoadLearner
 
@@ -31,6 +31,10 @@ class RuntimeState:
     last_action_at: str | None = None
     transitions: list[str] = field(default_factory=list)
     forecast_enabled: bool = False
+    # Manual operating override. `auto` follows the optimizer plan; a forced
+    # mode (charge/battery/grid) commands that action every refresh so the
+    # physical functions can be verified independently of the price plan.
+    override_action: str = "auto"
     forecast_accuracies: dict[str, ForecastAccuracy] = field(default_factory=dict)
     # Persisted, reconciled timeline for the current local calendar day.  The
     # optimizer only plans the future; this is what the dashboard shows as the
@@ -76,10 +80,7 @@ class RuntimeState:
     ) -> bool:
         """Recover transition counters inflated by pre-idempotency direct writes."""
         self.transitions_used(now)
-        parsed = [
-            (value, _parse_timestamp(value))
-            for value in self.transitions
-        ]
+        parsed = [(value, _parse_timestamp(value)) for value in self.transitions]
         parsed = [(value, timestamp) for value, timestamp in parsed if timestamp]
         if len(parsed) < maximum_transitions:
             return False
@@ -130,6 +131,7 @@ class RuntimeState:
                 for source, accuracy in self.forecast_accuracies.items()
             },
             "daily_plan": self.daily_plan.as_dict(),
+            "override_action": self.override_action,
         }
 
     def export(self, entry_title: str, status: dict[str, Any]) -> dict[str, Any]:
@@ -188,6 +190,7 @@ class RuntimeState:
             last_action_at=data.get("last_action_at"),
             transitions=list(data.get("transitions", []))[-100:],
             forecast_enabled=bool(data.get("forecast_enabled", False)),
+            override_action=str(data.get("override_action", "auto") or "auto"),
             forecast_accuracies=accuracies,
             daily_plan=DailyPlan.from_dict(data.get("daily_plan", {})),
         )

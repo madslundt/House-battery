@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,7 +16,6 @@ from homeassistant.util import dt as dt_util
 
 from .accounting import calendar_period_bounds
 from .actuator import LocalControlAdapter, soc_control_problems
-from .dailyplan import local_day_bounds, reconcile_daily_plan
 from .const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
@@ -40,8 +38,12 @@ from .const import (
     MODE_CHARGE,
     MODE_GRID,
     MODE_SAFE,
+    OVERRIDE_AUTO,
+    OVERRIDE_OPTIONS,
+    OVERRIDE_TO_ACTION,
     UPDATE_INTERVAL,
 )
+from .dailyplan import local_day_bounds, reconcile_daily_plan
 from .evidence import EvidenceCollector
 from .forecast import (
     assess_external_forecast,
@@ -168,9 +170,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Do not revoke persisted consent merely because the battery has
             # not finished accepting its local TCP session during HA startup.
             # The first fresh refresh validates controls and sends no command.
-            self._startup_control_gate_reason = (
-                "Awaiting fresh local telemetry and SOC-control validation after restart"
-            )
+            self._startup_control_gate_reason = "Awaiting fresh local telemetry and SOC-control validation after restart"
         elif self.runtime.execution_enabled:
             problems = await self.async_soc_control_problems()
             if not self.config.get(CONF_COMMISSIONED, False) or problems:
@@ -382,9 +382,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "within_uncertainty_pct": accuracy.within_uncertainty_pct,
             }
         self._forecast_sources = source_data
-        self._forecast_source = (
-            sources[0] if sources else None
-        )
+        self._forecast_source = sources[0] if sources else None
         primary = source_data.get(self._forecast_source or "", {})
         self._forecast_status = primary.get("status", "not_configured")
         self._forecast_last_updated = primary.get("last_updated")
@@ -470,6 +468,19 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         state = self._state(CONF_OPERATING_MODE)
         return action_from_operating_mode(state.state if state else None)
 
+    def _override_action(self) -> Action | None:
+        """Return the planner action forced by a manual override, if any.
+
+        ``auto`` (the default) returns ``None`` so the optimizer plan decides.
+        A forced mode returns the corresponding action so the coordinator
+        commands it every refresh, independent of price and the plan. The
+        SOC ceiling/floor applied by the actuator still bound the action:
+        ``charge`` never raises above ``target_soc`` and ``battery`` never
+        drops below ``reserve_soc``.
+        """
+        action_value = OVERRIDE_TO_ACTION.get(self.runtime.override_action)
+        return Action(action_value) if action_value else None
+
     def _current_price(self, slots: list[PriceSlot], now: datetime) -> float | None:
         for slot in slots:
             if slot.start <= now < slot.end:
@@ -524,9 +535,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if local_problem and not local_tcp_recovering:
             problems.append(local_problem)
         if (
-            (direct_load_problem := self._direct_load_problem())
-            and not local_tcp_recovering
-        ):
+            direct_load_problem := self._direct_load_problem()
+        ) and not local_tcp_recovering:
             problems.append(direct_load_problem)
         direct_control_problems: list[str] = []
         if (
@@ -576,7 +586,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"paused for up to {LOCAL_TCP_RECOVERY_GRACE.seconds // 60} minutes "
                 f"({remaining_seconds} seconds remaining): {local_problem}"
             )
-            command_result = "automatic writes paused during local TCP recovery grace period"
+            command_result = (
+                "automatic writes paused during local TCP recovery grace period"
+            )
         elif problems:
             state = "DEGRADED"
             reason = "; ".join(problems)
@@ -641,9 +653,18 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "startup freshness gate passed; no write on first refresh"
                     )
                 elif state == "ACTIVE":
+                    # A manual override forces the commanded battery action
+                    # regardless of the optimizer plan, so each physical function
+                    # can be verified in isolation. `auto` follows the plan.
+                    override_action = self._override_action()
+                    requested_action = (
+                        override_action
+                        if override_action is not None
+                        else self.plan.current_action
+                    )
                     command_result = (
                         await self.actuator.async_command(
-                            self.plan.current_action,
+                            requested_action,
                             now,
                             target_soc=effective_settings.target_soc,
                         )
@@ -724,6 +745,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             else Action.SAFE.value,
             "observed_action": action.value,
             "execution_enabled": self.runtime.execution_enabled,
+            "mode_override": self.runtime.override_action,
             "automatic_control_startup_gate": self._startup_control_gate_reason,
             "commissioned": bool(self.config.get(CONF_COMMISSIONED, False)),
             "grid_available": grid_available,
@@ -775,9 +797,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "plan_created_at": (
                 self.plan.created_at.isoformat() if self.plan else None
             ),
-            "plan": (
-                self.plan.today_dict(local_now) if self.plan else None
-            ),
+            "plan": (self.plan.today_dict(local_now) if self.plan else None),
             # Persisted 00:00 -> 24:00 daily timeline (immutable past + fresh
             # future).  Shown even during bootstrap/degraded/restart so the
             # dashboard never loses the current day's plan.
@@ -961,6 +981,26 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ValueError(f"Unsupported local operating mode: {mode}")
         self._local_controls = controls
         self._set_commanded_local_mode(mode)
+        await self.async_request_refresh()
+
+    async def async_set_override_action(self, mode: str) -> None:
+        """Set the manual operating override for the storage controller.
+
+        ``auto`` (default) lets the optimizer plan decide the commanded action.
+        A forced mode commands that action every refresh so the physical charge,
+        discharge and grid functions can be tested independently of price. The
+        override only affects writes; it never bypasses the SOC ceiling/floor:
+        ``charge`` still stops at ``target_soc`` and ``battery`` still stops at
+        ``reserve_soc``.
+        """
+        if mode not in OVERRIDE_OPTIONS:
+            raise ValueError(f"Unsupported operating override: {mode}")
+        if mode != OVERRIDE_AUTO and not self.config.get(CONF_COMMISSIONED, False):
+            raise ValueError(
+                "Commission the integration in Options before overriding control"
+            )
+        self.runtime.override_action = mode
+        await self.store.save(self.runtime)
         await self.async_request_refresh()
 
     async def async_force_safe(self) -> None:

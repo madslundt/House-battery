@@ -8,7 +8,12 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.const import CONF_PRICE_FORECAST_ENTITIES, PLATFORMS
+from house_battery.const import (
+    CONF_PRICE_FORECAST_ENTITIES,
+    OVERRIDE_AUTO,
+    OVERRIDE_OPTIONS,
+    PLATFORMS,
+)
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.number import FbpNativeSocNumber
 from house_battery.sensor import (
@@ -205,4 +210,8 @@ def test_plan_execution_reports_an_unexpected_physical_movement() -> None:
 
 def test_operating_mode_is_not_a_user_writable_entity() -> None:
     """Only the optimizer may command the direct battery operating mode."""
-    assert "select" not in PLATFORMS
+    # A select platform exists, but only for the storage override (auto / charge /
+    # battery / grid). It never exposes the inverter's native operating mode, which
+    # the optimizer alone may command.
+    assert "select" in PLATFORMS
+    assert set(OVERRIDE_OPTIONS) == {OVERRIDE_AUTO, "charge", "battery", "grid"}

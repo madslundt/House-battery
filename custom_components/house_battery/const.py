@@ -4,7 +4,7 @@ from datetime import timedelta
 
 DOMAIN = "house_battery"
 NAME = "House Battery"
-PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button"]
+PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button", "select"]
 UPDATE_INTERVAL = timedelta(minutes=1)
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.state"
@@ -41,10 +41,36 @@ ACTION_GRID = "grid"
 ACTION_BATTERY = "battery"
 ACTION_SAFE = "safe"
 
+# Manual operating override for the storage controller. `auto` follows the
+# optimizer plan; the other options force the commanded battery action
+# regardless of price so the physical functions can be tested in isolation.
+# `charge` raises the native ceiling to target_soc (never above it) and
+# `battery` lowers the native floor to reserve_soc (never below it), so an
+# override can never breach the configured SOC limits.
+OVERRIDE_AUTO = "auto"
+OVERRIDE_CHARGE = "charge"
+OVERRIDE_BATTERY = "battery"
+OVERRIDE_GRID = "grid"
+OVERRIDE_OPTIONS = (
+    OVERRIDE_AUTO,
+    OVERRIDE_CHARGE,
+    OVERRIDE_BATTERY,
+    OVERRIDE_GRID,
+)
+# Runtime storage key for the persistent override selection.
+CONF_MODE_OVERRIDE = "mode_override"
+
 MODE_CHARGE = "Charge"
 MODE_GRID = "Idle"
 MODE_BATTERY = "Self-Gen/Zero Export"
 MODE_SAFE = "Self-Gen/Zero Export"
+
+# Map a manual override selection onto the planner action it forces.
+OVERRIDE_TO_ACTION = {
+    OVERRIDE_CHARGE: ACTION_CHARGE,
+    OVERRIDE_BATTERY: ACTION_BATTERY,
+    OVERRIDE_GRID: ACTION_GRID,
+}
 
 DEFAULT_SETTINGS: dict[str, float] = {
     "capacity_kwh": 1.958,

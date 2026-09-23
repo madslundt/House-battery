@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import ceil, sqrt
 
-
 from .models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 
 
@@ -160,7 +159,9 @@ def _slot_transition(
             charged_wh = input_wh * charge_efficiency
             grid_wh += input_wh
             if is_forecast:
-                reason = "Forecast dip below discharge floor justifies charging after losses"
+                reason = (
+                    "Forecast dip below discharge floor justifies charging after losses"
+                )
             else:
                 reason = "Known low price justifies charging after losses, wear and profit threshold"
     elif action is Action.BATTERY:
@@ -173,9 +174,7 @@ def _slot_transition(
             effective_floor = discharge_price_floor + slot.uncertainty_dkk_per_kwh
         else:
             effective_floor = discharge_price_floor
-        below_price_floor = (
-            slot.discharge_price_dkk_per_kwh + 1e-9 < effective_floor
-        )
+        below_price_floor = slot.discharge_price_dkk_per_kwh + 1e-9 < effective_floor
         if below_price_floor and energy_wh > minimum_step * settings.energy_step_wh:
             return None
         available_wh = max(0.0, energy_wh - minimum_step * settings.energy_step_wh)
@@ -270,17 +269,24 @@ def optimize(
 
     step_wh = settings.energy_step_wh
     minimum_step = ceil(settings.capacity_wh * settings.reserve_soc / 100 / step_wh)
-    maximum_step = int(settings.capacity_wh * settings.target_soc / 100 // step_wh)
-    # The observed SOC is the source of truth for the starting energy.  The
-    # initial energy is therefore taken directly from telemetry and is NOT
-    # clamped to the charge *target* ceiling.  A battery physically at 100% SOC
-    # must plan from 100%, even when target_soc < 100 (previously the
-    # ``min(maximum_step, ...)`` clamp silently re-based every replan onto the
-    # projected target SOC, so a 100% battery was planned as if it held ~90%).
-    # A hard non-negative floor keeps a drained battery planning sensibly; the
-    # dynamic program still caps any *future* charge transitions at target.
+    # The observed SOC is the source of truth for the starting energy.  Take it
+    # directly from telemetry and never clamp it down to the charge *target*
+    # ceiling.  A battery physically above target (e.g. 100% with target 90%)
+    # must be able to plan and discharge that extra energy, so the planning SOC
+    # ceiling is the higher of target_soc and the observed SOC.  A non-negative
+    # floor keeps a drained battery planning sensibly; the dynamic program still
+    # caps any *future* charge transitions at this ceiling.
+    #
+    # If the ceiling stayed pinned to target_soc while the initial energy was
+    # anchored at the higher observed SOC, the DP clamp on every transition
+    # would drag the first block down to target with zero battery throughput --
+    # a phantom discharge that disagrees with the inverter's real power.
     initial_step = round(settings.capacity_wh * soc / 100 / step_wh)
     initial_step = max(0, initial_step)
+    maximum_step = max(
+        int(settings.capacity_wh * settings.target_soc / 100 // step_wh),
+        initial_step,
+    )
     initial_lock = max(0, mode_lock_remaining_minutes)
     # Keep the legacy count argument for callers that cannot provide timestamps.
     # A timestamp-aware caller releases *executed* transitions at their true
@@ -307,13 +313,16 @@ def optimize(
     # price (>72 h) is avoided because it misprices today's decision.
     horizon_start = valid[0].start
     known_charge_candidates = [
-        s for s in valid
+        s
+        for s in valid
         if s.source == "known"
         and (s.start - horizon_start).total_seconds() <= 72 * 3600
     ]
     if not known_charge_candidates:
         known_charge_candidates = valid[:1]  # fallback
-    cheapest_charge_price = min(s.charge_price_dkk_per_kwh for s in known_charge_candidates)
+    cheapest_charge_price = min(
+        s.charge_price_dkk_per_kwh for s in known_charge_candidates
+    )
     discharge_price_floor = (
         cheapest_charge_price / settings.round_trip_efficiency
         + settings.degradation_cost_dkk_per_kwh
@@ -332,9 +341,10 @@ def optimize(
             ),
         ):
             node = previous_layer[state]
-            active_transitions = sum(
-                expiry > slot.start for expiry in historical_expiries
-            ) + state.planned_transitions
+            active_transitions = (
+                sum(expiry > slot.start for expiry in historical_expiries)
+                + state.planned_transitions
+            )
             force_grid_exit = (
                 state.action is Action.BATTERY
                 and state.energy_step > minimum_step
@@ -430,9 +440,7 @@ def optimize(
             node.detail
         )
         next_energy = next_state.energy_step * step_wh
-        baseline = (
-            max(0.0, slot.expected_load_wh) / 1000 * slot.price
-        )
+        baseline = max(0.0, slot.expected_load_wh) / 1000 * slot.price
         planned.append(
             PlannedSlot(
                 start=slot.start,
@@ -460,7 +468,11 @@ def optimize(
     # economic benefit is not understated (the optimizer already credits
     # the terminal value internally when selecting the final state).
     terminal_value = (
-        (final_state.energy_step - minimum_step) * step_wh * discharge_efficiency / 1000 * terminal_net_price
+        (final_state.energy_step - minimum_step)
+        * step_wh
+        * discharge_efficiency
+        / 1000
+        * terminal_net_price
     )
     savings = baseline_cost - expected_cost + terminal_value
     throughput = (
