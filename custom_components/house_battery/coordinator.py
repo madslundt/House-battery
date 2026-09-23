@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util
 
 from .accounting import calendar_period_bounds
 from .actuator import LocalControlAdapter, soc_control_problems
+from .dailyplan import local_day_bounds, reconcile_daily_plan
 from .const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
@@ -85,6 +86,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.store = RuntimeStore(hass, entry.entry_id)
         self.runtime = RuntimeState()
         self.plan: Plan | None = None
+        self._daily_plan_dirty = False
         self._startup_guard_passed = False
         self._last_decision_key: tuple[str, str] | None = None
         self._forecast_evidence_changed = False
@@ -611,6 +613,21 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     command_result = await self._force_safe_if_needed(now)
             else:
                 self._startup_control_gate_reason = None
+                # Re-anchor the whole day onto actual telemetry: keep the
+                # published past (before the replan cutoff) immutable and replace
+                # only the future portion with this fresh optimization.  The
+                # optimizer already starts its future SOC from the observed SOC
+                # (see ``optimize``), so no predicted SOC is treated as authority.
+                local_now = dt_util.as_local(now)
+                day_start, day_end = local_day_bounds(local_now)
+                self.runtime.daily_plan = reconcile_daily_plan(
+                    self.runtime.daily_plan,
+                    self.plan.slots,
+                    cutoff=now,
+                    day_start=day_start,
+                    day_end=day_end,
+                )
+                self._daily_plan_dirty = True
                 commissioned = bool(self.config.get(CONF_COMMISSIONED, False))
                 state = (
                     "ACTIVE"
@@ -650,8 +667,17 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self.runtime.decisions = self.runtime.decisions[-DECISION_HISTORY_LIMIT:]
             self._last_decision_key = decision_key
-        if decision_changed or self._forecast_evidence_changed:
+        if (
+            decision_changed
+            or self._forecast_evidence_changed
+            or self._daily_plan_dirty
+        ):
+            # RuntimeStore writes atomically, so persisting the whole runtime
+            # publishes the reconciled daily plan without risk of a partial
+            # timeline corrupting the stored day.  Clear the flag afterwards so a
+            # no-op refresh does not rewrite storage every minute.
             await self.store.save(self.runtime)
+            self._daily_plan_dirty = False
 
         local_now = dt_util.as_local(now)
         periods = {
@@ -751,6 +777,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             "plan": (
                 self.plan.today_dict(local_now) if self.plan else None
+            ),
+            # Persisted 00:00 -> 24:00 daily timeline (immutable past + fresh
+            # future).  Shown even during bootstrap/degraded/restart so the
+            # dashboard never loses the current day's plan.
+            "daily_plan": self.runtime.daily_plan.view_dict(
+                actual_soc=soc,
+                terminal_price_dkk_per_kwh=(
+                    self.plan.terminal_price_dkk_per_kwh if self.plan else None
+                ),
             ),
             **periods,
             "lifetime_charge_kwh": self.runtime.ledger.total_charge_kwh,

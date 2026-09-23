@@ -271,8 +271,16 @@ def optimize(
     step_wh = settings.energy_step_wh
     minimum_step = ceil(settings.capacity_wh * settings.reserve_soc / 100 / step_wh)
     maximum_step = int(settings.capacity_wh * settings.target_soc / 100 // step_wh)
+    # The observed SOC is the source of truth for the starting energy.  The
+    # initial energy is therefore taken directly from telemetry and is NOT
+    # clamped to the charge *target* ceiling.  A battery physically at 100% SOC
+    # must plan from 100%, even when target_soc < 100 (previously the
+    # ``min(maximum_step, ...)`` clamp silently re-based every replan onto the
+    # projected target SOC, so a 100% battery was planned as if it held ~90%).
+    # A hard non-negative floor keeps a drained battery planning sensibly; the
+    # dynamic program still caps any *future* charge transitions at target.
     initial_step = round(settings.capacity_wh * soc / 100 / step_wh)
-    initial_step = min(maximum_step, max(minimum_step, initial_step))
+    initial_step = max(0, initial_step)
     initial_lock = max(0, mode_lock_remaining_minutes)
     # Keep the legacy count argument for callers that cannot provide timestamps.
     # A timestamp-aware caller releases *executed* transitions at their true

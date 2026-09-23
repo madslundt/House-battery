@@ -17,7 +17,7 @@ from house_battery.sensor import (
     FbpModeSensor,
     FbpPlanExecutionSensor,
     FbpPlannedLoadPowerSensor,
-    _plan_blocks,
+    daily_plan_blocks,
 )
 from house_battery.switch import FbpExternalForecastSwitch
 
@@ -150,24 +150,29 @@ def test_current_plan_slot_exposes_auditable_planner_inputs() -> None:
 
 
 def test_operation_plan_blocks_expose_expected_grid_use_and_cost() -> None:
-    blocks = _plan_blocks(
+    # FbpPlanSensor now reads the persisted daily plan's merged blocks
+    # (already produced by DailyPlan.view_dict), not raw price slots.
+    blocks = daily_plan_blocks(
         {
-            "slots": [
-                {
-                    "start": "2026-09-22T10:00:00+00:00",
-                    "end": "2026-09-22T10:15:00+00:00",
-                    "action": "grid",
-                    "expected_load_wh": 125,
-                    "grid_import_wh": 125,
-                    "battery_charge_wh": 0,
-                    "battery_discharge_wh": 0,
-                    "soc_start": 52,
-                    "soc_end": 52,
-                    "interval_cost_dkk": 0.25,
-                    "baseline_cost_dkk": 0.25,
-                    "reason": "Grid supplies the load",
-                }
-            ]
+            "daily_plan": {
+                "date": "2026-09-22",
+                "blocks": [
+                    {
+                        "start": "2026-09-22T10:00:00+00:00",
+                        "end": "2026-09-22T10:15:00+00:00",
+                        "action": "grid",
+                        "expected_load_kwh": 0.125,
+                        "expected_grid_import_kwh": 0.125,
+                        "expected_cost_dkk": 0.25,
+                        "expected_savings_dkk": 0.0,
+                        "energy_kwh": 0.0,
+                        "soc_start": 52.0,
+                        "soc_end": 52.0,
+                        "actual_soc": 100.0,
+                        "reason": "Grid supplies the load",
+                    }
+                ],
+            }
         }
     )
 

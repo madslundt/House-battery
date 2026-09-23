@@ -307,59 +307,21 @@ async def async_setup_entry(
     )
 
 
-def _plan_blocks(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not plan:
+def daily_plan_blocks(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the complete-day operating blocks from the persisted daily plan.
+
+    The daily plan is the authoritative 00:00 -> 24:00 timeline: the published
+    past before the last replan is immutable and the future is the latest
+    optimization, so the dashboard always shows the whole current day instead of
+    restarting at the current interval.
+    """
+    plan = data.get("daily_plan")
+    if not isinstance(plan, dict):
         return []
-    blocks: list[dict[str, Any]] = []
-    for slot in plan.get("slots", []):
-        if (
-            blocks
-            and blocks[-1]["action"] == slot["action"]
-            and blocks[-1]["end"] == slot["start"]
-        ):
-            blocks[-1]["end"] = slot["end"]
-            blocks[-1]["expected_savings_dkk"] += (
-                slot["baseline_cost_dkk"] - slot["interval_cost_dkk"]
-            )
-            blocks[-1]["expected_cost_dkk"] += slot["interval_cost_dkk"]
-            blocks[-1]["energy_kwh"] += (
-                slot["battery_charge_wh"] + slot["battery_discharge_wh"]
-            ) / 1000
-            blocks[-1]["expected_load_kwh"] += slot["expected_load_wh"] / 1000
-            blocks[-1]["expected_grid_import_kwh"] += slot["grid_import_wh"] / 1000
-            blocks[-1]["soc_end"] = slot["soc_end"]
-        else:
-            blocks.append(
-                {
-                    "start": slot["start"],
-                    "end": slot["end"],
-                    "action": slot["action"],
-                    "expected_savings_dkk": slot["baseline_cost_dkk"]
-                    - slot["interval_cost_dkk"],
-                    "expected_cost_dkk": slot["interval_cost_dkk"],
-                    "energy_kwh": (
-                        slot["battery_charge_wh"] + slot["battery_discharge_wh"]
-                    )
-                    / 1000,
-                    "expected_load_kwh": slot["expected_load_wh"] / 1000,
-                    "expected_grid_import_kwh": slot["grid_import_wh"] / 1000,
-                    "soc_start": slot["soc_start"],
-                    "soc_end": slot["soc_end"],
-                    "reason": slot["reason"],
-                }
-            )
-    for block in blocks:
-        for key in (
-            "expected_savings_dkk",
-            "expected_cost_dkk",
-            "energy_kwh",
-            "expected_load_kwh",
-            "expected_grid_import_kwh",
-            "soc_start",
-            "soc_end",
-        ):
-            block[key] = round(block[key], 3)
-    return blocks
+    # ``actual_soc`` is already attached to the first block by
+    # ``DailyPlan.view_dict``; the daily plan itself only ever appends the
+    # observed curve, never rewrites the published pre-replan history.
+    return list(plan.get("blocks", []))
 
 
 class FbpSystemStateSensor(Fbp1200Entity, SensorEntity):
@@ -460,14 +422,16 @@ class FbpPlanSensor(Fbp1200Entity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        # Read the cost fields from the same today-scoped plan dict that
-        # feeds the blocks, so the displayed numbers always match the
-        # displayed blocks.  The full-horizon values remain available on the
-        # dedicated plan-savings sensor.
-        plan = self.coordinator.data.get("plan")
+        # The complete-day timeline is the persisted daily plan (00:00 -> 24:00);
+        # the full-horizon plan dict remains available on the other plan sensors
+        # for the current actionable slot and horizon economics.
+        plan = self.coordinator.data.get("daily_plan")
         return {
-            "blocks": _plan_blocks(plan),
-            "horizon_slots": len(plan.get("slots", [])) if plan else 0,
+            "blocks": daily_plan_blocks(self.coordinator.data),
+            "date": plan.get("date") if plan else None,
+            "created_at": plan.get("created_at") if plan else None,
+            "actual_soc": plan.get("actual_soc") if plan else None,
+            "horizon_slots": plan.get("horizon_slots", 0) if plan else 0,
             "expected_cost_dkk": plan.get("expected_cost_dkk") if plan else None,
             "baseline_cost_dkk": plan.get("baseline_cost_dkk") if plan else None,
             "expected_savings_dkk": plan.get("expected_savings_dkk") if plan else None,

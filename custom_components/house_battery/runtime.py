@@ -9,6 +9,7 @@ from typing import Any
 from homeassistant.helpers.storage import Store
 
 from .accounting import EnergyLedger
+from .dailyplan import DailyPlan
 from .const import DEFAULT_SETTINGS, DOMAIN, STORAGE_KEY, STORAGE_VERSION
 from .forecast import ForecastAccuracy
 from .learning import BatteryLearner, LoadLearner
@@ -31,6 +32,12 @@ class RuntimeState:
     transitions: list[str] = field(default_factory=list)
     forecast_enabled: bool = False
     forecast_accuracies: dict[str, ForecastAccuracy] = field(default_factory=dict)
+    # Persisted, reconciled timeline for the current local calendar day.  The
+    # optimizer only plans the future; this is what the dashboard shows as the
+    # complete 00:00 -> 24:00 day.  It survives restarts and midnight and is
+    # only ever updated by reconciling a fresh optimization on top of the
+    # immutable published past.
+    daily_plan: DailyPlan = field(default_factory=lambda: DailyPlan(date=""))
 
     def forecast_accuracy_for(self, source: str) -> ForecastAccuracy:
         """Return the independent accuracy history for one forecast entity."""
@@ -122,6 +129,7 @@ class RuntimeState:
                 source: accuracy.as_dict()
                 for source, accuracy in self.forecast_accuracies.items()
             },
+            "daily_plan": self.daily_plan.as_dict(),
         }
 
     def export(self, entry_title: str, status: dict[str, Any]) -> dict[str, Any]:
@@ -181,6 +189,7 @@ class RuntimeState:
             transitions=list(data.get("transitions", []))[-100:],
             forecast_enabled=bool(data.get("forecast_enabled", False)),
             forecast_accuracies=accuracies,
+            daily_plan=DailyPlan.from_dict(data.get("daily_plan", {})),
         )
 
 
