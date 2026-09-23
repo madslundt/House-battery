@@ -460,16 +460,22 @@ class FbpPlanSensor(Fbp1200Entity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        # Read the cost fields from the same today-scoped plan dict that
+        # feeds the blocks, so the displayed numbers always match the
+        # displayed blocks.  The full-horizon values remain available on the
+        # dedicated plan-savings sensor.
         plan = self.coordinator.data.get("plan")
         return {
             "blocks": _plan_blocks(plan),
             "horizon_slots": len(plan.get("slots", [])) if plan else 0,
-            "expected_cost_dkk": self.coordinator.data.get("expected_cost_dkk"),
-            "baseline_cost_dkk": self.coordinator.data.get("baseline_cost_dkk"),
-            "expected_savings_dkk": self.coordinator.data.get("expected_savings_dkk"),
-            "terminal_price_dkk_per_kwh": self.coordinator.data.get(
+            "expected_cost_dkk": plan.get("expected_cost_dkk") if plan else None,
+            "baseline_cost_dkk": plan.get("baseline_cost_dkk") if plan else None,
+            "expected_savings_dkk": plan.get("expected_savings_dkk") if plan else None,
+            "terminal_price_dkk_per_kwh": plan.get(
                 "terminal_price_dkk_per_kwh"
-            ),
+            )
+            if plan
+            else None,
         }
 
 

@@ -135,7 +135,13 @@ class Plan:
         }
 
     def today_dict(self, now: datetime) -> dict[str, Any]:
-        """Return plan dict filtered to today's remaining slots (from *now*).
+        """Return plan dict filtered to the local day containing *now*.
+
+        ``now`` must be expressed in the user's local time zone (e.g.
+        ``dt_util.as_local``).  The day boundary follows that local calendar
+        day — not UTC — so a plan created at 00:19 local (UTC+2) still shows
+        the whole remaining local day instead of only the two hours before
+        UTC midnight.
 
         This gives a clean daily overview without past slots or tomorrow's
         forecast bleeding into the user's view.

@@ -750,7 +750,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.plan.created_at.isoformat() if self.plan else None
             ),
             "plan": (
-                self.plan.today_dict(now) if self.plan else None
+                self.plan.today_dict(local_now) if self.plan else None
             ),
             **periods,
             "lifetime_charge_kwh": self.runtime.ledger.total_charge_kwh,
