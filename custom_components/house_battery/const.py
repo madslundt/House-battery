@@ -6,13 +6,20 @@ DOMAIN = "house_battery"
 NAME = "House Battery"
 PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button", "select"]
 UPDATE_INTERVAL = timedelta(minutes=1)
-# Schema v2 introduces the canonical load-vs-grid power-flow model. The
-# battery-learning and battery-flow accounting evidence produced before this
-# version used the (incorrect) FBP ``Discharge`` telemetry, so it is reset on
-# load while settings, scheduled loads, forecast evidence and the manual mode
-# preference are preserved. Storage *file* identity is unchanged so existing
-# state is still read and migrated rather than discarded wholesale.
-STORAGE_VERSION = 2
+# The HA Store *major* version deliberately stays at 1 across the schema-v2
+# rewrite. HA 2026.x has no ``migrate_func`` on its Store, so bumping the
+# major version would activate HA's own storage-migration path, which raises
+# ``NotImplementedError`` (and, on a version mismatch, refuses to read the data
+# at all) - i.e. upgrading a user would lose access to their state entirely.
+# Instead the payload's ``schema_version`` field carries the semantic version.
+# RuntimeState.from_dict reads existing state regardless and applies the
+# reset-on-load migration itself: battery-learning and flow-accounting evidence
+# produced before this model used the (incorrect) FBP ``Discharge`` telemetry,
+# so those totals are discarded while settings, scheduled loads, forecast
+# evidence and the manual mode preference are preserved. The on-disk file
+# identity (STORAGE_KEY) is unchanged, so state is read and migrated, not
+# discarded wholesale.
+STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.state"
 
 CONF_SOC = "soc_entity"
