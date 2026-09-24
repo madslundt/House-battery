@@ -6,7 +6,13 @@ DOMAIN = "house_battery"
 NAME = "House Battery"
 PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button", "select"]
 UPDATE_INTERVAL = timedelta(minutes=1)
-STORAGE_VERSION = 1
+# Schema v2 introduces the canonical load-vs-grid power-flow model. The
+# battery-learning and battery-flow accounting evidence produced before this
+# version used the (incorrect) FBP ``Discharge`` telemetry, so it is reset on
+# load while settings, scheduled loads, forecast evidence and the manual mode
+# preference are preserved. Storage *file* identity is unchanged so existing
+# state is still read and migrated rather than discarded wholesale.
+STORAGE_VERSION = 2
 STORAGE_KEY = f"{DOMAIN}.state"
 
 CONF_SOC = "soc_entity"
@@ -28,9 +34,11 @@ CONF_PRICE_ENTITIES = "price_entities"
 CONF_PRICE_FORECAST_ENTITY = "price_forecast_entity"
 CONF_PRICE_FORECAST_ENTITIES = "price_forecast_entities"
 CONF_COMMISSIONED = "commissioned"
-# The complete Storage_list off-grid total is the direct adapter's only
-# battery-served load model. Other local readings remain diagnostic only.
-DIRECT_LOAD_FIELD = "off_grid_load_power_total_w"
+# The direct adapter's canonical connected-load source is the FOSSiBOT
+# smart-load total. This versioned identifier intentionally invalidates any
+# load profile learned from the previous off-grid-load source, so the learner
+# is reset on load.
+DIRECT_LOAD_SOURCE = "direct:smart_load_total:v2"
 
 # A direct local connection is the default setup path. The entity keys above
 # remain supported for entries created before direct local support existed.
@@ -123,3 +131,14 @@ FORECAST_MAX_AGE = timedelta(minutes=180)
 LOCAL_TCP_RECOVERY_GRACE = timedelta(minutes=2)
 DECISION_HISTORY_LIMIT = 500
 LEDGER_HISTORY_LIMIT = 96 * 62
+
+# Canonical power-flow thresholds. ``FLOW_NOISE_FLOOR_W`` is the small bound
+# used when deriving physical flow (meter jitter around zero export is
+# ignored). ``FLOW_UI_ACTIVE_THRESHOLD_W`` is the slightly larger bound used
+# to classify the observed power source, so ordinary measurement noise does
+# not make the Power source entity jump between states. ``EXPORT_SAFETY_W`` is
+# the grid-meter export level that is treated as a real export fault rather
+# than noise; export is only ever observed at the meter, never commanded.
+FLOW_NOISE_FLOOR_W = 5.0
+FLOW_UI_ACTIVE_THRESHOLD_W = 20.0
+EXPORT_SAFETY_W = 10.0

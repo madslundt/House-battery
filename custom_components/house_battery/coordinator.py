@@ -30,9 +30,12 @@ from .const import (
     CONF_SOC,
     DECISION_HISTORY_LIMIT,
     DEFAULT_PORT,
-    DIRECT_LOAD_FIELD,
+    DIRECT_LOAD_SOURCE,
+    EXPORT_SAFETY_W,
     DOMAIN,
     FORECAST_MAX_AGE,
+    FLOW_NOISE_FLOOR_W,
+    FLOW_UI_ACTIVE_THRESHOLD_W,
     LOCAL_TCP_RECOVERY_GRACE,
     MODE_BATTERY,
     MODE_CHARGE,
@@ -62,10 +65,11 @@ from .local_tcp import (
 )
 from .models import (
     Action,
+    PowerFlowSnapshot,
     Plan,
     PlannerSettings,
     PriceSlot,
-    normalize_grid_flow,
+    derive_power_flow,
 )
 from .planner import optimize
 from .policy import (
@@ -125,6 +129,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             else None
         )
         self._local_snapshot: FbpLocalSnapshot | None = None
+        # Canonical load-vs-grid physical flow, rebuilt once per refresh and
+        # shared by evidence, sensors and the export-safety layer.
+        self.power_flow: PowerFlowSnapshot | None = None
+        # Latched grid-export fault (meter-observed). High hysteresis so a
+        # few-watt meter fluctuation never disables automatic control.
+        self._export_fault_since: datetime | None = None
         self._local_controls: dict[str, str] = {}
         self._local_telemetry_validator = FbpTelemetryValidator()
         self._local_tcp_unavailable_since: datetime | None = None
@@ -141,7 +151,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.evidence = EvidenceCollector(
             lambda: self.runtime,
-            self._observed_power,
+            self._power_flow,
             lambda: self.store.save(self.runtime),
         )
 
@@ -170,7 +180,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         )
         if self.is_direct_local:
-            learner_source = "direct:off_grid_total"
+            learner_source = DIRECT_LOAD_SOURCE
             if self.runtime.load_learner_source != learner_source:
                 self.runtime.load_learner = LoadLearner()
                 self.runtime.load_learner.configure_time_zone(
@@ -194,14 +204,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self.hass.states.get(entity_id) if entity_id else None
 
     def _float(self, key: str, default: float | None = None) -> float | None:
-        if self._local_snapshot is not None:
-            local_values = {
-                CONF_SOC: self._local_snapshot.soc,
-                CONF_BATTERY_CHARGE_POWER: self._local_snapshot.charge_power_w,
-                CONF_BATTERY_DISCHARGE_POWER: self._local_snapshot.discharge_power_w,
-            }
-            if key in local_values:
-                return local_values[key]
+        # For a direct-local entry only SOC comes from the TCP snapshot. Load
+        # and grid flow are read from the canonical PowerFlowSnapshot, and the
+        # raw device charge/discharge values are diagnostics, not model inputs.
+        if self.is_direct_local and self._local_snapshot is not None and key == CONF_SOC:
+            return self._local_snapshot.soc
         state = self._state(key)
         try:
             return (
@@ -213,26 +220,29 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return default
 
     def _load_power(self, default: float | None = None) -> float | None:
-        """Return only a configured or explicitly confirmed served-load value."""
-        configured = self._float(CONF_LOAD_POWER)
-        if configured is not None and not self.is_direct_local:
-            return configured
+        """Return only a configured or explicitly confirmed connected-load value.
+
+        For a direct-local entry this is the FOSSiBOT smart-load total,
+        ``TotalSmartLoadElectricalPower``. It is never derived from the device's
+        reported discharge, which would wrongly assume the battery supplies the
+        whole load.
+        """
         if self.is_direct_local and self._local_snapshot is not None:
-            diagnostics = self._local_snapshot.load_diagnostics
-            value = diagnostics.get(DIRECT_LOAD_FIELD)
-            if isinstance(value, (int, float)):
+            value = self._local_snapshot.load_power_w
+            if isinstance(value, (int, float)) and math.isfinite(value):
                 return float(value)
-        return default
+            return None
+        return self._float(CONF_LOAD_POWER, default)
 
     def _direct_load_problem(self) -> str | None:
         """Explain why direct-local load data is not safe for the model yet."""
         if not self.is_direct_local:
             return None
         if self._local_snapshot is None:
-            return "battery-served off-grid load cannot be read without local telemetry"
-        value = self._local_snapshot.load_diagnostics.get(DIRECT_LOAD_FIELD)
-        if not isinstance(value, (int, float)):
-            return "complete battery-served off-grid load is unavailable"
+            return "connected load cannot be read without local telemetry"
+        value = self._local_snapshot.load_power_w
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
+            return "connected load is unavailable"
         return None
 
     def _direct_soc_control_problems_from_snapshot(self) -> list[str]:
@@ -252,6 +262,30 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if key == CONF_LOAD_POWER:
             return self._load_power(default)
         return self._float(key, default)
+
+    def _power_flow(self) -> PowerFlowSnapshot | None:
+        """Build the canonical load-vs-grid flow for this refresh.
+
+        This is the single adapter boundary between FBP1200 raw telemetry and
+        every downstream layer. For a direct-local entry the connected load is
+        the smart-load total and the grid flow is the meter; for a legacy
+        (HA-entity) entry the configured load and grid entities are used. Battery
+        flow is always inferred from the balance, never read from the device.
+        """
+        now = datetime.now(UTC)
+        if self.is_direct_local and self._local_snapshot is not None:
+            return derive_power_flow(
+                self._local_snapshot.soc,
+                self._local_snapshot.load_power_w,
+                self._local_snapshot.grid_power_w,
+                timestamp=now,
+            )
+        return derive_power_flow(
+            self._float(CONF_SOC),
+            self._float(CONF_LOAD_POWER),
+            self._float(CONF_GRID_IMPORT_POWER),
+            timestamp=now,
+        )
 
     def _grid_available(self) -> bool | None:
         """Read physical grid availability; never infer it from grid import power."""
@@ -584,12 +618,32 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             direct_control_problems = self._direct_soc_control_problems_from_snapshot()
             problems.extend(direct_control_problems)
         soc = self._float(CONF_SOC)
+        self.power_flow = self._power_flow()
         slots = self._price_slots(now)
         action = self._observed_action()
         grid_available = self._grid_available()
         price = self._current_price(slots, now)
         if soc is not None and not direct_load_problem:
             await self.evidence.async_observe(now, price, action, soc)
+
+        # The grid meter is the authoritative zero-export safety signal. Export
+        # is only ever observed, never commanded; a large or persistent export
+        # while automatic control is enabled fails the optimizer safe and
+        # disables writes. The hysteresis between ``FLOW_NOISE_FLOOR_W`` and
+        # ``EXPORT_SAFETY_W`` keeps a few-watt meter fluctuation from latching.
+        export_w = self.power_flow.grid_export_w if self.power_flow else 0.0
+        export_detected = export_w > FLOW_NOISE_FLOOR_W
+        export_safety_fault = (
+            self.runtime.execution_enabled and export_w > EXPORT_SAFETY_W
+        )
+        if export_safety_fault:
+            if self._export_fault_since is None:
+                self._export_fault_since = now
+            problems.append(
+                f"grid export observed at {round(export_w)} W; failing to grid/idle"
+            )
+        elif self._export_fault_since is not None and not export_detected:
+            self._export_fault_since = None
 
         state = "BOOTSTRAP"
         reason = "Waiting for valid local telemetry and price intervals"
@@ -707,16 +761,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if override_action is not None
                         else self.plan.current_action
                     )
-                    # Enforce zero export at the command boundary: pass the
-                    # measured battery-served load so the execution layer clamps
-                    # the discharge setpoint below the load and a fixed-power
-                    # slot can never export when the house load dips below it.
+                    # Zero export is enforced by the self-consumption mode
+                    # (a firmware guarantee) and by the meter-based export
+                    # safety layer in this same refresh; no load clamp is
+                    # applied at the command boundary.
                     command_result = (
                         await self.actuator.async_command(
                             requested_action,
                             now,
                             target_soc=effective_settings.target_soc,
-                            load_w=self._load_power(0) or 0,
                         )
                     )[1]
 
@@ -784,6 +837,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             reported_health_problems.append(
                 "Local TCP recovery in progress: " + local_problem
             )
+        flow = self.power_flow
         return {
             "system_state": state,
             "healthy": (
@@ -801,18 +855,20 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "grid_available": grid_available,
             "command_result": command_result,
             "soc": soc,
-            "load_power_w": self._load_power(),
-            # Decompose the signed grid meter into import/export here so export
-            # is visible as a first-class quantity rather than clamped to zero.
-            "grid_flow_power_w": self._float(CONF_GRID_IMPORT_POWER),
-            "grid_import_power_w": normalize_grid_flow(
-                self._float(CONF_GRID_IMPORT_POWER) or 0.0
-            )[0],
-            "grid_export_power_w": normalize_grid_flow(
-                self._float(CONF_GRID_IMPORT_POWER) or 0.0
-            )[1],
-            "battery_charge_power_w": self._float(CONF_BATTERY_CHARGE_POWER, 0),
-            "battery_discharge_power_w": self._float(CONF_BATTERY_DISCHARGE_POWER, 0),
+            # Canonical load-vs-grid power flow. Load is the connected load;
+            # grid is the signed meter; battery is inferred from the balance and
+            # never read from the FBP1200's raw charge/discharge telemetry.
+            "load_power_w": flow.load_w if flow else None,
+            "grid_flow_power_w": flow.grid_power_w if flow else None,
+            "grid_import_power_w": flow.grid_import_w if flow else 0.0,
+            "grid_export_power_w": flow.grid_export_w if flow else 0.0,
+            "battery_power_w": flow.battery_net_power_w if flow else 0.0,
+            "battery_charge_power_w": flow.battery_charge_power_w if flow else 0.0,
+            "battery_output_power_w": flow.battery_output_power_w if flow else 0.0,
+            "power_source": flow.classify_power_source() if flow else None,
+            "export_detected": export_detected,
+            "export_safety_fault": export_safety_fault,
+            "export_power_w": export_w,
             "local_connected": self._local_snapshot is not None,
             "local_tcp_recovery_started_at": (
                 self._local_tcp_unavailable_since.isoformat()

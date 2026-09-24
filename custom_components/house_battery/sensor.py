@@ -19,7 +19,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import Fbp1200Coordinator
 from .entity import Fbp1200Entity
-from .models import Action
+from .models import Action, POWER_SOURCE_STATES
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -40,6 +40,8 @@ SENSORS = (
         icon="mdi:battery",
         unit=PERCENTAGE,
         precision=1,
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     FbpSensorDescription(
         key="load_power_w",
@@ -70,11 +72,19 @@ SENSORS = (
         precision=0,
     ),
     FbpSensorDescription(
-        key="battery_discharge_power_w",
+        key="battery_output_power_w",
         name="Battery discharge power",
         icon="mdi:battery-minus",
         unit=UnitOfPower.WATT,
         precision=0,
+    ),
+    FbpSensorDescription(
+        key="battery_power_w",
+        name="Battery power",
+        icon="mdi:battery-sync",
+        unit=UnitOfPower.WATT,
+        precision=0,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     FbpSensorDescription(
         key="current_price_dkk_per_kwh",
@@ -296,6 +306,7 @@ async def async_setup_entry(
             FbpSystemStateSensor(coordinator),
             FbpActionSensor(coordinator),
             FbpModeSensor(coordinator),
+            FbpPowerSourceSensor(coordinator),
             FbpPlanSensor(coordinator),
             FbpCurrentPlanSlotSensor(coordinator),
             FbpPlanExecutionSensor(coordinator),
@@ -379,15 +390,20 @@ class FbpActionSensor(Fbp1200Entity, SensorEntity):
 
 
 def _battery_activity(data: dict[str, Any]) -> str:
-    """Classify physical battery power, never a configured operating mode."""
+    """Classify physical battery power, never a configured operating mode.
+
+    Battery charge/output power are inferred from the measured load and grid
+    meter by the coordinator's canonical power-flow model; they are never the
+    FBP1200's raw reported charge/discharge telemetry.
+    """
     charge = float(data.get("battery_charge_power_w") or 0)
-    discharge = float(data.get("battery_discharge_power_w") or 0)
+    output = float(data.get("battery_output_power_w") or 0)
     threshold_w = 10
-    if charge >= threshold_w and discharge >= threshold_w:
+    if charge >= threshold_w and output >= threshold_w:
         return "conflict"
     if charge >= threshold_w:
         return "charging"
-    if discharge >= threshold_w:
+    if output >= threshold_w:
         return "discharging"
     return "idle"
 
@@ -406,14 +422,50 @@ class FbpModeSensor(Fbp1200Entity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
-            "source": "battery charge/discharge power telemetry",
+            "source": "canonical load-vs-grid power flow",
             "configured_mode": self.coordinator.data.get("local_observed_mode"),
             "configured_action": self.coordinator.data.get("observed_action"),
             "current_decision": self.coordinator.data.get("current_action"),
             "charge_power_w": self.coordinator.data.get("battery_charge_power_w"),
-            "discharge_power_w": self.coordinator.data.get("battery_discharge_power_w"),
+            "output_power_w": self.coordinator.data.get("battery_output_power_w"),
             "active_power_threshold_w": 10,
-            "note": "Physical activity is idle below 10 W. Configured mode is shown separately and does not prove energy movement.",
+            "note": "Physical activity is idle below 10 W. Charge/output power are inferred from the measured load and grid meter, never the FBP1200's raw telemetry. Configured mode is shown separately and does not prove energy movement.",
+        }
+
+
+class FbpPowerSourceSensor(Fbp1200Entity, SensorEntity):
+    """Read-only classification of where the load's power is actually coming from.
+
+    The source is derived from the canonical power-flow model (measured load and
+    grid meter), so it reflects physical reality: what the battery is actually
+    doing, not what the optimizer requested. It reports ``unavailable`` when the
+    flow model cannot produce a source (missing or invalid primary
+    measurements).
+    """
+
+    _attr_name = "Power source"
+    _attr_icon = "mdi:transfer"
+    _attr_options = list(POWER_SOURCE_STATES)
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "power_source")
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.data.get("power_source")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        return {
+            "load_power_w": data.get("load_power_w"),
+            "grid_import_power_w": data.get("grid_import_power_w"),
+            "grid_export_power_w": data.get("grid_export_power_w"),
+            "battery_power_w": data.get("battery_power_w"),
+            "grid_power_w": data.get("grid_flow_power_w"),
+            "export_detected": data.get("export_detected"),
+            "export_safety_fault": data.get("export_safety_fault"),
+            "note": "Derived from the measured load and grid meter, never the FBP1200's raw telemetry.",
         }
 
 
@@ -604,8 +656,8 @@ class FbpPlanExecutionSensor(Fbp1200Entity, SensorEntity):
             "planned_battery_charge_kwh": round(charge_wh / 1000, 4),
             "planned_battery_discharge_kwh": round(discharge_wh / 1000, 4),
             "actual_charge_power_w": self.coordinator.data.get("battery_charge_power_w"),
-            "actual_discharge_power_w": self.coordinator.data.get(
-                "battery_discharge_power_w"
+            "actual_output_power_w": self.coordinator.data.get(
+                "battery_output_power_w"
             ),
             "command_result": self.coordinator.data.get("command_result"),
             "note": "A live mismatch is a diagnostic signal, not proof of a failed plan; assess it over the complete slot.",

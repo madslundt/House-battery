@@ -102,7 +102,7 @@ def test_battery_activity_uses_physical_power_not_configured_mode() -> None:
             data={
                 "observed_action": "battery",
                 "battery_charge_power_w": 0,
-                "battery_discharge_power_w": 0,
+                "battery_output_power_w": 0,
             }
         )
     )
@@ -134,7 +134,7 @@ def test_current_plan_slot_exposes_auditable_planner_inputs() -> None:
             ]
         },
         "battery_charge_power_w": 900,
-        "battery_discharge_power_w": 0,
+        "battery_output_power_w": 0,
         "command_result": "mode set",
     }
     coordinator = SimpleNamespace(data=data)
@@ -200,7 +200,7 @@ def test_plan_execution_reports_an_unexpected_physical_movement() -> None:
                 ]
             },
             "battery_charge_power_w": 0,
-            "battery_discharge_power_w": 200,
+            "battery_output_power_w": 200,
         }
     )
     sensor = SimpleNamespace(coordinator=coordinator)

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -112,6 +113,13 @@ class PlannedSlot:
 # meter with the opposite convention needs exactly one documented override.
 GRID_POWER_IMPORT_POSITIVE = 1.0
 
+# Physical-flow thresholds (kept here so the pure model is self-contained).
+# The coordinator re-exports these from ``const`` for the export-safety layer.
+FLOW_NOISE_FLOOR_W = 5.0
+FLOW_UI_ACTIVE_THRESHOLD_W = 20.0
+# Allowed power-source states for the read-only ``Power source`` sensor.
+POWER_SOURCE_STATES = ("charging", "battery", "grid", "off")
+
 
 @dataclass(frozen=True, slots=True)
 class BatteryTelemetry:
@@ -132,6 +140,93 @@ class BatteryTelemetry:
     charge_w: float
     discharge_w: float
     timestamp: datetime
+
+
+def derive_power_flow(
+    soc: float | None,
+    load_w: float | None,
+    grid_power_w: float | None,
+    *,
+    timestamp: datetime | None = None,
+    sign: float = GRID_POWER_IMPORT_POSITIVE,
+) -> PowerFlowSnapshot | None:
+    """Return the canonical physical power flow for one load/grid sample.
+
+    ``load_w`` is the connected-load consumption regardless of supplier.
+    ``grid_power_w`` is signed with the grid convention (positive = import,
+    negative = export). Battery flow is *inferred* from the balance between
+    them, never taken from the device's reported charge/discharge. Returns
+    ``None`` when either primary measurement is missing so the caller can mark
+    the interval incomplete instead of inventing zero-energy evidence.
+    """
+    if load_w is None or grid_power_w is None:
+        return None
+    if not (math.isfinite(load_w) and math.isfinite(grid_power_w)):
+        return None
+    grid_import_w, grid_export_w = normalize_grid_flow(grid_power_w, sign)
+    battery_net_power_w = load_w - grid_power_w
+    return PowerFlowSnapshot(
+        soc=soc if (soc is not None and math.isfinite(soc)) else 0.0,
+        load_w=load_w,
+        grid_power_w=grid_power_w,
+        grid_import_w=grid_import_w,
+        grid_export_w=grid_export_w,
+        battery_net_power_w=battery_net_power_w,
+        battery_output_power_w=max(battery_net_power_w, 0.0),
+        battery_charge_power_w=max(-battery_net_power_w, 0.0),
+        timestamp=timestamp or datetime.now(UTC),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PowerFlowSnapshot:
+    """Single physical interpretation of load versus grid power.
+
+    This is the one normalisation boundary every downstream layer consumes:
+    the planner, accounting, learning, sensors and safety all read from this
+    structure instead of reaching for the FBP1200's raw charge/discharge
+    telemetry. ``battery_net_power_w`` is positive when the battery supplies
+    energy, negative when it charges. ``battery_output_power_w`` /
+    ``battery_charge_power_w`` are the non-negative decompositions.
+    """
+
+    soc: float
+    load_w: float
+    grid_power_w: float
+    grid_import_w: float
+    grid_export_w: float
+    battery_net_power_w: float
+    battery_output_power_w: float
+    battery_charge_power_w: float
+    timestamp: datetime
+
+    @property
+    def flow_available(self) -> bool:
+        """True when both primary measurements are present and finite."""
+        return all(
+            math.isfinite(value)
+            for value in (self.load_w, self.grid_power_w)
+        )
+
+    def classify_power_source(
+        self, active_threshold: float = FLOW_UI_ACTIVE_THRESHOLD_W
+    ) -> str | None:
+        """Return the observed physical power source, or ``None`` when unavailable.
+
+        The classifier describes *what the battery is actually doing* per the
+        measured load and grid meter, never what the optimizer requested. A
+        missing/invalid sample returns ``None`` (Home Assistant ``unavailable``),
+        which is deliberately distinct from ``off``.
+        """
+        if not self.flow_available:
+            return None
+        if self.battery_charge_power_w > active_threshold:
+            return "charging"
+        if self.battery_output_power_w > active_threshold:
+            return "battery"
+        if self.load_w > active_threshold or self.grid_import_w > active_threshold:
+            return "grid"
+        return "off"
 
 
 @dataclass(frozen=True, slots=True)

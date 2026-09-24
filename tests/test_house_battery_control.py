@@ -13,15 +13,11 @@ import voluptuous as vol
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.actuator import (
-    DISCHARGE_EXPORT_SAFETY_MARGIN_W,
-    LocalControlAdapter,
-    discharge_setpoint_below_load,
-    clamp_setpoint_to_device,
-)
+from house_battery.actuator import LocalControlAdapter
 from house_battery.config_flow import _direct_schema, _schema
 from house_battery.const import (
     CONF_BATTERY_CHARGE_POWER,
+    DIRECT_LOAD_SOURCE,
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
     CONF_GRID_AVAILABLE,
@@ -159,9 +155,10 @@ def test_direct_load_uses_only_complete_off_grid_total() -> None:
         )
         coordinator._local_snapshot = FbpLocalSnapshot(
             50,
+            106,
             0,
-            800,
-            1907,
+            0,
+            0,
             {
                 "SSumInfoList": [{"TotalSmartLoadElectricalPower": 106}],
                 "Storage_list": [{"OffGridLoadPower": 106}],
@@ -295,8 +292,9 @@ def test_direct_tcp_command_uses_allowlisted_client_and_updates_commanded_mode()
 
 def test_direct_battery_reports_the_custom_slot_not_the_native_label() -> None:
     """The reported commanded mode must match what the local adapter actually
-    writes.  On the direct TCP path BATTERY is written as a fixed-power
-    "Discharge" slot, not the native "Self-Gen/Zero Export" select option."""
+    writes.  On the direct TCP path BATTERY is written to the native
+    "Self-Gen/Zero Export" option (zero export is a firmware guarantee), not a
+    fixed-power "Discharge" slot."""
 
     class DirectClient:
         def __init__(self) -> None:
@@ -308,7 +306,10 @@ def test_direct_battery_reports_the_custom_slot_not_the_native_label() -> None:
         async def async_set_mode(
             self, mode: str, power: int, *, min_soc: int, max_soc: int
         ) -> None:
-            self.calls.append(("mode", mode, power))
+            self.calls.append(("mode", mode, power, min_soc, max_soc))
+
+        async def async_set_self_consumption(self) -> None:
+            self.calls.append(("self_consumption",))
 
     state = runtime()
     direct = DirectClient()
@@ -327,15 +328,58 @@ def test_direct_battery_reports_the_custom_slot_not_the_native_label() -> None:
     )
 
     success, _result = asyncio.run(
-        adapter.async_command(
-            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=400
-        )
+        adapter.async_command(Action.BATTERY, datetime.now(UTC), target_soc=90)
     )
 
     assert success
-    # load 400 W clamps the setpoint to 400 - 50 = 350 W, never 800 W.
-    assert direct.calls == [("limits", 20, 90), ("mode", "Discharge", 350)]
-    assert modes == ["Discharge"]
+    # No power setpoint, no load clamp: zero export is a firmware guarantee of
+    # the Self-Gen/Zero Export mode.
+    assert direct.calls == [("limits", 20, 90), ("self_consumption",)]
+    assert modes == ["Self-Gen/Zero Export"]
+
+
+def test_direct_battery_is_written_to_self_consumption_even_when_over_capacity() -> None:
+    """The inverter caps fixed-power charge slots at 1200 W, but BATTERY is no
+    longer a fixed-power slot at all: even an absurdly large configured
+    discharge power must still write Self-Gen/Zero Export, never Discharge."""
+
+    class DirectClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def async_set_limits(self, minimum: int, maximum: int) -> None:
+            del minimum, maximum
+
+        async def async_set_mode(
+            self, mode: str, power: int, *, min_soc: int, max_soc: int
+        ) -> None:
+            self.calls.append(("mode", mode, power, min_soc, max_soc))
+
+        async def async_set_self_consumption(self) -> None:
+            self.calls.append(("self_consumption",))
+
+    state = runtime()
+    state.settings["discharge_power_w"] = 5000
+    direct = DirectClient()
+
+    async def save() -> None:
+        return None
+
+    control = LocalControlAdapter(
+        FakeHass(FakeStates({}), FakeServices(FakeStates({}))),
+        config,
+        lambda: state,
+        save,
+        lambda: direct,
+    )
+
+    success, _result = asyncio.run(
+        control.async_command(Action.BATTERY, datetime.now(UTC), target_soc=90)
+    )
+
+    assert success
+    assert direct.calls == [("self_consumption",)]
+    assert all(call[0] != "mode" for call in direct.calls)
 
 
 def test_battery_command_raises_the_native_minimum_to_the_arbitrage_reserve() -> None:
@@ -352,6 +396,9 @@ def test_battery_command_raises_the_native_minimum_to_the_arbitrage_reserve() ->
             self, mode: str, power: int, *, min_soc: int, max_soc: int
         ) -> None:
             self.calls.append(("mode", mode, power, min_soc, max_soc))
+
+        async def async_set_self_consumption(self) -> None:
+            self.calls.append(("self_consumption",))
 
     state = runtime()
     state.settings["reserve_soc"] = 20
@@ -373,126 +420,7 @@ def test_battery_command_raises_the_native_minimum_to_the_arbitrage_reserve() ->
     )
 
     assert success
-    assert direct.calls == [("limits", 20, 90), ("mode", "Discharge", 800, 20, 90)]
-
-
-def test_direct_battery_discharge_is_clamped_below_measured_load_to_prevent_export() -> None:
-    """Zero export is enforced physically: a fixed-power slot may never exceed
-    the measured load, so a house load below the setpoint cannot export."""
-
-    class DirectClient:
-        def __init__(self) -> None:
-            self.calls: list[tuple[object, ...]] = []
-
-        async def async_set_limits(self, minimum: int, maximum: int) -> None:
-            del minimum, maximum
-
-        async def async_set_mode(self, mode, power, *, min_soc, max_soc) -> None:
-            self.calls.append((mode, power))
-
-    state = runtime()
-    state.settings["discharge_power_w"] = 800
-    direct = DirectClient()
-
-    async def save() -> None:
-        return None
-
-    control = LocalControlAdapter(
-        FakeHass(FakeStates({}), FakeServices(FakeStates({}))),
-        config,
-        lambda: state,
-        save,
-        lambda: direct,
-    )
-
-    success, _result = asyncio.run(
-        control.async_command(
-            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=320
-        )
-    )
-
-    assert success
-    # Load 320 W minus the 50 W safety margin, never the configured 800 W.
-    assert direct.calls == [("Discharge", 270)]
-
-
-def test_direct_battery_discharge_never_exceeds_load_even_when_load_is_small() -> None:
-    """A small measured load forces the discharge toward zero rather than any
-    fixed power that would export."""
-
-    class DirectClient:
-        def __init__(self) -> None:
-            self.calls: list[tuple[object, ...]] = []
-
-        async def async_set_limits(self, minimum: int, maximum: int) -> None:
-            del minimum, maximum
-
-        async def async_set_mode(self, mode, power, *, min_soc, max_soc) -> None:
-            self.calls.append((mode, power))
-
-    state = runtime()
-    state.settings["discharge_power_w"] = 800
-    direct = DirectClient()
-
-    async def save() -> None:
-        return None
-
-    control = LocalControlAdapter(
-        FakeHass(FakeStates({}), FakeServices(FakeStates({}))),
-        config,
-        lambda: state,
-        save,
-        lambda: direct,
-    )
-
-    success, _result = asyncio.run(
-        control.async_command(
-            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=20
-        )
-    )
-
-    assert success
-    # 20 W measured load minus the 50 W margin clamps to 0 (no export).
-    assert direct.calls == [("Discharge", 0)]
-
-
-def test_direct_battery_discharge_no_load_reading_preserves_requested_power() -> None:
-    """Without a load reading the execution layer cannot guarantee zero export,
-    so it does not invent a clamp; the caller is responsible for providing it."""
-
-    class DirectClient:
-        def __init__(self) -> None:
-            self.calls: list[tuple[object, ...]] = []
-
-        async def async_set_limits(self, minimum: int, maximum: int) -> None:
-            del minimum, maximum
-
-        async def async_set_mode(self, mode, power, *, min_soc, max_soc) -> None:
-            self.calls.append((mode, power))
-
-    state = runtime()
-    state.settings["discharge_power_w"] = 800
-    direct = DirectClient()
-
-    async def save() -> None:
-        return None
-
-    control = LocalControlAdapter(
-        FakeHass(FakeStates({}), FakeServices(FakeStates({}))),
-        config,
-        lambda: state,
-        save,
-        lambda: direct,
-    )
-
-    success, _result = asyncio.run(
-        control.async_command(Action.BATTERY, datetime.now(UTC), target_soc=90)
-    )
-
-    assert success
-    # No load provided -> requested discharge is not clamped by the execution
-    # layer (this matches the historical, load-unaware behaviour).
-    assert direct.calls == [("Discharge", 800)]
+    assert direct.calls == [("limits", 20, 90), ("self_consumption",)]
 
 
 def test_direct_battery_discharge_clamps_to_the_device_setpoint_ceiling() -> None:
@@ -523,16 +451,6 @@ def test_direct_battery_discharge_clamps_to_the_device_setpoint_ceiling() -> Non
         save,
         lambda: direct,
     )
-
-    success, _result = asyncio.run(
-        control.async_command(
-            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=None
-        )
-    )
-
-    assert success
-    assert direct.calls == [("Discharge", 1200)]
-
 
 def test_failed_grid_exit_keeps_the_native_reserve_protected() -> None:
     """A failed Idle command must not expose a prior Self-Gen reserve."""
@@ -876,7 +794,9 @@ def test_direct_load_history_is_reset_when_migrating_legacy_source() -> None:
 
         await coordinator.async_initialize()
 
-        assert coordinator.runtime.load_learner_source == "direct:off_grid_total"
+        assert (            coordinator.runtime.load_learner_source
+            == DIRECT_LOAD_SOURCE
+        )
         assert not coordinator.runtime.load_learner.recent_w
         assert store.saved
 
@@ -890,59 +810,3 @@ async def _no_refresh() -> None:
 async def _no_soc_control_problems() -> list[str]:
     """Treat native direct SOC controls as reachable for the recovery seam."""
     return []
-
-
-def test_discharge_setpoint_below_load_caps_at_load_minus_safety_margin() -> None:
-    # Configured 800 W discharge, measured 320 W load, 50 W margin -> 270 W.
-    assert discharge_setpoint_below_load(800.0, 320.0) == 270.0
-    # Load below the margin clamps to zero rather than exporting.
-    assert discharge_setpoint_below_load(800.0, 20.0) == 0.0
-    # A load exactly at the margin also clamps to zero.
-    assert discharge_setpoint_below_load(800.0, DISCHARGE_EXPORT_SAFETY_MARGIN_W) == 0.0
-
-
-def test_discharge_setpoint_below_load_respects_configured_power_when_load_is_high() -> None:
-    # The critical regression: with load far above the configured discharge the
-    # setpoint must stay at the configured ceiling, not climb with the load.
-    # 800 W configured, 1500 W load -> 800 W (not 1500 - 50 = 1450 W).
-    assert discharge_setpoint_below_load(800.0, 1500.0) == 800.0
-    # Load equal to the configured discharge still honours it: the 50 W margin
-    # bites one step below the ceiling, and never pushes the setpoint up to it.
-    assert discharge_setpoint_below_load(800.0, 800.0) == 750.0
-    # Just below the configured ceiling, the load margin is what bites.
-    assert discharge_setpoint_below_load(800.0, 849.0) == 799.0
-    # A larger configured discharge is honoured when the load allows it.
-    assert discharge_setpoint_below_load(1100.0, 1500.0) == 1100.0
-    # Negative requested power never becomes a (positive) discharge.
-    assert discharge_setpoint_below_load(-10.0, 1500.0) == 0.0
-
-
-def test_discharge_setpoint_below_load_then_device_ceiling_chain() -> None:
-    # The two boundaries compose the way the direct actuator chains them:
-    # setpoint clamped below load/configured power, then to the inverter ceiling.
-    # High load, high configured power -> clamped to the 1200 W inverter ceiling.
-    chained = clamp_setpoint_to_device(
-        discharge_setpoint_below_load(2000.0, 1500.0)
-    )
-    assert chained == 1200.0
-    # High load, configured power below the ceiling -> the configured ceiling wins.
-    chained = clamp_setpoint_to_device(
-        discharge_setpoint_below_load(800.0, 1500.0)
-    )
-    assert chained == 800.0
-
-
-def test_discharge_setpoint_below_load_none_load_is_unchanged() -> None:
-    # No load reading means the layer cannot guarantee zero export, so the
-    # requested power is returned untouched for the caller to decide on.
-    assert discharge_setpoint_below_load(800.0, None) == 800.0
-    assert discharge_setpoint_below_load(0.0, None) == 0.0
-
-
-def test_clamp_setpoint_to_device_ceiling_and_floor() -> None:
-    # Above the inverter's accepted range is clamped to the ceiling.
-    assert clamp_setpoint_to_device(2000.0) == 1200.0
-    # The requested power within range passes through unchanged.
-    assert clamp_setpoint_to_device(800.0) == 800.0
-    # A negative request clamps to zero (never a negative discharge).
-    assert clamp_setpoint_to_device(-5.0) == 0.0

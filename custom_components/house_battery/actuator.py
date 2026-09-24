@@ -32,57 +32,31 @@ _ACTION_TO_MODE = {
     Action.SAFE: MODE_SAFE,
 }
 # The reference inverter exposes three *native* Operating Mode options on its
-# select entity (Charge / Idle / Self-Gen/Zero Export) but the local adapter
-# drives its own three custom fixed-power slots (Charge / Idle / Discharge).
-# The two are different physical modes that only partially overlap, so the
-# reported commanded mode must reflect which one is actually written: the
-# native label on the HA select path, the custom slot label on the direct TCP
-# path.  Reporting the native "Self-Gen/Zero Export" label while the device is
-# really in a fixed-power "Discharge" slot would misstate the physical mode.
+# select entity (Charge / Idle / Self-Gen/Zero Export).  The local adapter
+# drives custom fixed-power slots for Charge and Idle, but BATTERY maps to the
+# native "Self-Gen/Zero Export" option because that mode guarantees zero export
+# to the grid by firmware design (the battery only powers the house; any surplus
+# from PV may still go to the grid).  The reported commanded mode reflects which
+# one is actually written: the custom "Charge" / "Idle" slot labels on the
+# direct TCP path, the native label on the HA select path.
 _SOC_CONTROL_KEYS = (CONF_MIN_SOC_CONTROL, CONF_MAX_SOC_CONTROL)
 _UNAVAILABLE_STATES = {"unknown", "unavailable", "none", ""}
 
-# The local adapter commands a *fixed-power* discharge custom slot
-# ("1,00:00,23:59,{power},..."), which pushes energy out of the battery for the
-# whole day regardless of what the house is actually drawing.  A zero export is
-# only guaranteed when the commanded discharge never exceeds the measured load,
-# so the execution layer caps the discharge setpoint below the current load
-# before it is handed to the inverter.  The planner already caps discharge at
-# the *forecast* load; this enforces the same invariant against the *actual*
-# load on every command, so a load dip below the setpoint cannot export.  The
-# small absolute margin absorbs meter/reporting noise; loads below it simply do
-# not discharge rather than risk any export.
-DISCHARGE_EXPORT_SAFETY_MARGIN_W = 50.0
-
-# The fixed-power custom slot is accepted by the inverter up to 1200 W; higher
-# requested discharge power is therefore clamped to that ceiling at the command
-# boundary.
+# The local adapter commands a *fixed-power* Charge custom slot
+# ("1,00:00,23:59,{power},..."), which draws energy into the battery for the
+# whole day regardless of what the house is actually drawing.  The fixed-power
+# slot is accepted by the inverter up to 1200 W; a higher requested charge power
+# is clamped to that ceiling at the command boundary.  The BATTERY action no
+# longer writes a fixed-power Discharge slot: zero export to the grid is now a
+# firmware guarantee of the native "Self-Gen/Zero Export" mode rather than a
+# setpoint clamped against a load reading, so the load-aware clamp helpers are
+# gone.  The grid meter remains the authoritative zero-export safety signal
+# (see the coordinator's export-safety layer).
 _DIRECT_SETPOINT_CEILING_W = 1200
 
 
-def discharge_setpoint_below_load(
-    requested_w: float, load_w: float | None
-) -> float:
-    """Cap a commanded discharge so it can never exceed the actual load.
-
-    ``load_w`` is the measured battery-served load.  When it is ``None`` the
-    caller did not have a load reading, so the requested discharge is returned
-    unchanged and the caller is responsible for the resulting risk; when it is
-    a number the discharge is clamped to ``min(requested, load - margin)`` so
-    a fixed-power slot can neither export to the grid (load below the setpoint)
-    nor exceed the caller's configured discharge power.  The requested ceiling
-    is honoured first, so a low configured discharge (e.g. 800 W) is respected
-    even when the house load is large (e.g. 1500 W); the load margin only bites
-    when the requested discharge would otherwise exceed what the house is
-    actually drawing.
-    """
-    if load_w is None:
-        return max(requested_w, 0.0)
-    return min(max(requested_w, 0.0), max(load_w - DISCHARGE_EXPORT_SAFETY_MARGIN_W, 0.0))
-
-
 def clamp_setpoint_to_device(power_w: float) -> float:
-    """Clamp a commanded discharge setpoint to the inverter's accepted range."""
+    """Clamp a commanded Charge setpoint to the inverter's accepted range."""
     return min(max(0.0, power_w), _DIRECT_SETPOINT_CEILING_W)
 
 
@@ -156,7 +130,6 @@ class LocalControlAdapter:
         action: Action,
         now: datetime,
         target_soc: float | None,
-        load_w: float | None = None,
     ) -> tuple[bool, str] | None:
         """Use the built-in TCP adapter when this is a direct-local entry."""
         client = self._direct_client() if self._direct_client else None
@@ -184,24 +157,14 @@ class LocalControlAdapter:
         direct_command_mode: str | None = None
         try:
             if action is Action.BATTERY:
-                # Enforce zero export physically: never command a discharge that
-                # exceeds the measured load, so the fixed-power slot cannot push
-                # energy back to the grid if the house load dips below the
-                # setpoint.
-                power_w = round(
-                    clamp_setpoint_to_device(
-                        discharge_setpoint_below_load(
-                            runtime.settings["discharge_power_w"], load_w
-                        )
-                    )
-                )
-                direct_command_mode = "Discharge"
-                await client.async_set_mode(
-                    "Discharge",
-                    power_w,
-                    min_soc=minimum,
-                    max_soc=maximum,
-                )
+                # Self-Gen/Zero Export: zero export to the grid is a firmware
+                # guarantee of this native mode, not a setpoint clamped against
+                # a load reading.  The battery only powers the house; any PV
+                # surplus may still export.  Zero export is therefore enforced
+                # by the meter-based safety layer in the coordinator, never by
+                # clamping the commanded power to the (noisy) load.
+                direct_command_mode = MODE_BATTERY
+                await client.async_set_self_consumption()
             elif action is Action.SAFE:
                 direct_command_mode = "Idle"
                 await client.async_set_mode(
@@ -320,18 +283,17 @@ class LocalControlAdapter:
         now: datetime,
         *,
         target_soc: float | None = None,
-        load_w: float | None = None,
     ) -> tuple[bool, str]:
         """Apply limits, issue one mode change, and require immediate read-back.
 
-        ``load_w`` is the measured battery-served load.  It is passed to the
-        execution layer so the discharge setpoint can be clamped below the load
-        (see :func:`discharge_setpoint_below_load`), enforcing zero export
-        physically at the command boundary rather than trusting the planner's
-        forecast load.
+        BATTERY maps to the native "Self-Gen/Zero Export" mode, whose zero
+        export is a firmware guarantee of the mode, so no measured load or
+        discharge setpoint is needed at the command boundary.  Zero export to
+        the grid is enforced by the meter-based safety layer in the
+        coordinator.
         """
         direct_result = await self._async_direct_command(
-            action, now, target_soc, load_w
+            action, now, target_soc
         )
         if direct_result is not None:
             return direct_result

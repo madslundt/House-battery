@@ -19,16 +19,17 @@ those known rows.
 | Config-flow field | Expected entity | Notes |
 | --- | --- | --- |
 | Battery-served local load | Local telemetry | Direct-local entries automatically use the complete per-storage off-grid total. Smart-load and backup-load readings remain diagnostics. An incomplete stack total fails closed. |
-| Grid import power | `sensor` | Numeric watts. Used for accounting/telemetry. |
+| Grid import power | `sensor` (single signed reading: import positive, export negative, or separate import/export entities) | Numeric watts. Required to derive the power-flow model — it defines battery output/charge power and load balance — and for accounting/telemetry and zero-export verification. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
 | External price forecast entities | optional ordered `sensor` list | Same row format; each is scored independently; the first usable source that can safely extend the horizon is used for planning. |
 
 Fault state and online state are optional.
-Battery SOC, charge/discharge power, the **Operating mode** selector, and the
-native minimum/maximum SOC controls come from the direct connection. Native
-SOC limits are read back after every automatic limit write and checked again
-before control can be enabled.
+Battery SOC, the **Operating mode** selector, and the native
+minimum/maximum SOC controls come from the direct connection. Native SOC limits
+are read back after every automatic limit write and checked again before control
+can be enabled. Battery charge/power flow is *derived* from the load, grid, and
+SOC balance — it is not read from any battery telemetry.
 
 ## Grid availability is not grid use
 
@@ -96,8 +97,10 @@ The adapter uses exactly these proven local options:
 | `safe` | `Self-Gen/Zero Export` (vendor label) |
 
 **Operating mode** shows the last command acknowledged by the battery's local
-interface. The vendor app can change the mode separately, so measured
-charge/discharge power remains the physical confirmation of actual behaviour.
+interface. The vendor app can change the mode separately. The physical
+confirmation of what actually happened is the **grid meter** (zero export) and
+the derived **Battery output power** / **Power source**, which are reconciled
+against the load and grid rather than taken from the inverter's raw registers.
 
 ## Commissioning checklist
 

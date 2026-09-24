@@ -46,13 +46,37 @@ class LocalProtocolError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class FbpLocalSnapshot:
-    """Accepted physical values decoded from an EnergyParameter response."""
+    """Accepted physical values decoded from an EnergyParameter response.
+
+    Two values are first-class inputs to the canonical power-flow model:
+
+    * ``load_power_w`` — the connected-load consumption (``TotalSmartLoadElectricalPower``).
+    * ``grid_power_w`` — the signed grid-meter flow (``MeterTotalActivePower``).
+
+    ``charge_power_w`` / ``discharge_power_w`` are the raw device-reported
+    values (``TotalChargePower`` / ``TotalBatteryOutputPower``). They are kept
+    purely for diagnostics and troubleshooting: they must never feed planning,
+    accounting or learning, because the device reports them as if it were the
+    sole supplier of the load and so cannot be used to infer battery-to-load
+    flow.
+    """
 
     soc: float
+    load_power_w: float | None
+    grid_power_w: float | None
     charge_power_w: float
     discharge_power_w: float
-    grid_power_w: float | None
     raw: dict[str, Any]
+
+    @property
+    def raw_reported_charge_power_w(self) -> float:
+        """Raw device-reported charge power (diagnostic only)."""
+        return self.charge_power_w
+
+    @property
+    def raw_reported_output_power_w(self) -> float:
+        """Raw device-reported output power (diagnostic only)."""
+        return self.discharge_power_w
 
     @property
     def load_diagnostics(self) -> dict[str, Any]:
@@ -320,9 +344,10 @@ def decode_energy_parameter(response: dict[str, Any]) -> FbpLocalSnapshot:
     )
     return FbpLocalSnapshot(
         soc,
+        _number(summary, "TotalSmartLoadElectricalPower"),
+        _number(summary, "MeterTotalActivePower"),
         max(0, charge),
         max(0, discharge),
-        _number(summary, "MeterTotalActivePower"),
         response,
     )
 

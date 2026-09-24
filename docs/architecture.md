@@ -84,18 +84,53 @@ above reserve receives a terminal value based on the latter part of the known
 horizon, preventing the planner from emptying a useful battery solely because
 the horizon ends.
 
-### Zero export is enforced at the command boundary, not only by the plan
+### The power-flow model: battery flow is derived, never read from the device
 
-The plan already caps discharge at the *forecast* load, but a fixed-power local
-slot can still export when the actual load drops below the setpoint. Zero export
-is therefore a physical invariant enforced in every layer:
+The FBP1200 reports raw charge/output power in its EMS registers, but those
+figures include converter loss and are not a trustworthy measure of energy
+actually moving in or out of the cells. The integration therefore does not feed
+any device-reported charge/discharge power into planning, accounting, or
+learning. Instead it computes a canonical power flow every refresh from three
+first-class inputs:
 
-- the planner caps discharge at the predicted load;
-- the execution layer caps the commanded discharge at the *measured* load minus
-  a small safety margin, on every refresh, so a load dip below the setpoint
-  cannot push energy back to the grid; and
-- accounting and telemetry report grid export as a first-class quantity so any
-  export is immediately visible rather than clamped away.
+- connected-load power (from the configured load entity),
+- grid power (signed at the grid meter: positive import, negative export), and
+- the battery SOC.
+
+Battery charge power is what the load *isn't* taking from the grid-plus-battery
+sum while SOC is rising; battery output power is the residual the battery
+supplies when load exceeds grid import. The raw device charge/output powers are
+kept as diagnostics only (`battery_charge_power_w` / `battery_output_power_w`
+downstream of the device) and are exposed for inspection, never for control.
+
+### Zero export is enforced at the meter, not by clamping a setpoint
+
+The old approach clamped the commanded discharge at the measured load minus a
+safety margin and hoped the residual stayed non-positive. The current approach
+makes zero export a firmware guarantee and verifies it at the meter:
+
+- **Self-Gen / Zero Export is the only battery action.** When automatic control
+  is on and the plan wants to move the battery, the actuator calls the
+  inverter's native `Self-Gen/Zero Export` mode. That mode is a hardware
+  guarantee that no energy is pushed to the grid; it is not a load-dependent
+  setpoint that can drift above the load and export.
+- **The meter independently verifies the guarantee.** The coordinator
+  decomposes the grid-meter reading into import and export. Any export above a
+  small noise floor lights an `Export detected` binary sensor; export above a
+  slightly higher safety floor while automatic control is enabled latches an
+  `Export safety fault` that **disables all inverter writes** until the operator
+  resets execution. This is fail-closed: an export can never continue through
+  the next planning cycle.
+- **The planner still keeps a head of safety.** Because zero export is a
+  firmware guarantee, the planner no longer has to reserve a load-dip margin to
+  avoid exporting; it can value stored energy on its genuine opportunity cost.
+- **Accounting and telemetry report grid export as a first-class quantity** so
+  any export stays immediately visible rather than being silently clamped away.
+
+The battery's energy flow used everywhere downstream (planning targets,
+savings, degradation, learning, the `Battery activity` sensor, and the
+`Power source` sensor) is therefore derived from the load/grid/SOC balance and
+is reconciled against the meter, never copied from the device.
 
 See `docs/commissioning.md` for how to verify the invariant on the physical unit.
 
@@ -110,17 +145,19 @@ higher ceiling.
 ## Accounting and degradation
 
 The evidence ledger is updated in 15-minute intervals from sampled observed
-connected-load power, grid-import power, battery charge/discharge power,
-SOC, the current price, and the optimizer's current action. It records
-estimated realized savings and charge/discharge energy for today, month, and
-lifetime. Forecast load and future plan values are not treated as observed
-ledger inputs.
+connected-load power, grid power (decomposed into import and export), the
+derived battery charge/output power, SOC, the current price, and the
+optimizer's current action. It records estimated realized savings and
+charge/discharge energy for today, month, and lifetime. Forecast load and future
+plan values are not treated as observed ledger inputs. Export is reported in the
+ledger but never credited: exported energy is not valued as avoided import
+because there is no export contract to settle against.
 
 Equivalent full cycles are lifetime battery discharge energy divided by usable
-capacity. Estimated degradation uses learned capacity when it is ready;
-otherwise it is a conservative cycle-life-reference estimate. These are
-estimates for decision support—not an authoritative battery-health report from
-the battery BMS.
+capacity. Estimated degradation is applied to discharged energy through the
+learned capacity when it is ready; otherwise it is a conservative
+cycle-life-reference estimate. These are estimates for decision support—not an
+authoritative battery-health report from the battery BMS.
 
 ## Explainability and export
 

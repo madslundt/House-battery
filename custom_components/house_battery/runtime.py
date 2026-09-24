@@ -36,6 +36,11 @@ class RuntimeState:
     # physical functions can be verified independently of the price plan.
     override_action: str = "auto"
     forecast_accuracies: dict[str, ForecastAccuracy] = field(default_factory=dict)
+    # ISO-8601 timestamp recorded when the schema-v2 power-flow model first
+    # loaded this entry. Pre-v2 battery-learning and flow-accounting evidence
+    # used the (incorrect) FBP "Discharge" telemetry, so those totals are
+    # reset on migration while everything else is preserved.
+    flow_model_started_at: str | None = None
     # Persisted, reconciled timeline for the current local calendar day.  The
     # optimizer only plans the future; this is what the dashboard shows as the
     # complete 00:00 -> 24:00 day.  It survives restarts and midnight and is
@@ -114,6 +119,7 @@ class RuntimeState:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": 2,
             "settings": self.settings,
             "load_learner": self.load_learner.as_dict(),
             "load_learner_source": self.load_learner_source,
@@ -132,6 +138,7 @@ class RuntimeState:
             },
             "daily_plan": self.daily_plan.as_dict(),
             "override_action": self.override_action,
+            "flow_model_started_at": self.flow_model_started_at,
         }
 
     def export(self, entry_title: str, status: dict[str, Any]) -> dict[str, Any]:
@@ -158,6 +165,13 @@ class RuntimeState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RuntimeState:
+        # Schema-v2 introduced the canonical load-vs-grid power-flow model. Any
+        # payload produced before it (no schema_version, or an explicit 1) used
+        # the incorrect FBP "Discharge" telemetry for both battery learning and
+        # flow accounting, so those totals must be discarded on first load. Every
+        # other field is preserved so the optimizer keeps its settings, forecast
+        # evidence and manual mode preference across the upgrade.
+        is_legacy = data.get("schema_version", 1) < 2
         settings = dict(DEFAULT_SETTINGS)
         settings.update(
             {
@@ -173,7 +187,7 @@ class RuntimeState:
         legacy_accuracy = data.get("forecast_accuracy")
         if not accuracies and isinstance(legacy_accuracy, dict):
             accuracies["legacy"] = ForecastAccuracy.from_dict(legacy_accuracy)
-        return cls(
+        state = cls(
             settings=settings,
             load_learner=LoadLearner.from_dict(data.get("load_learner", {})),
             load_learner_source=(
@@ -181,8 +195,16 @@ class RuntimeState:
                 if isinstance(data.get("load_learner_source"), str)
                 else None
             ),
-            battery_learner=BatteryLearner.from_dict(data.get("battery_learner", {})),
-            ledger=EnergyLedger.from_dict(data.get("ledger", {})),
+            battery_learner=(
+                BatteryLearner()
+                if is_legacy
+                else BatteryLearner.from_dict(data.get("battery_learner", {}))
+            ),
+            ledger=(
+                EnergyLedger()
+                if is_legacy
+                else EnergyLedger.from_dict(data.get("ledger", {}))
+            ),
             decisions=list(data.get("decisions", []))[-500:],
             scheduled_loads=list(data.get("scheduled_loads", [])),
             execution_enabled=bool(data.get("execution_enabled", False)),
@@ -193,7 +215,18 @@ class RuntimeState:
             override_action=str(data.get("override_action", "auto") or "auto"),
             forecast_accuracies=accuracies,
             daily_plan=DailyPlan.from_dict(data.get("daily_plan", {})),
+            flow_model_started_at=(
+                data.get("flow_model_started_at")
+                if isinstance(data.get("flow_model_started_at"), str)
+                else None
+            ),
         )
+        # Stamp the moment the v2 flow model first loaded this entry. Legacy
+        # payloads have no timestamp, so the first v2 load records "now"; a
+        # v2 payload preserves the value it already carried.
+        if not state.flow_model_started_at:
+            state.flow_model_started_at = datetime.now(UTC).isoformat()
+        return state
 
 
 class RuntimeStore:

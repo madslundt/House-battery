@@ -1,4 +1,12 @@
-"""Continuous interval accounting and conservative battery learning."""
+"""Continuous interval accounting and conservative battery learning.
+
+All evidence is derived from the coordinator's canonical
+:class:`~house_battery.models.PowerFlowSnapshot`. Load, grid and battery power
+are inferred from the measured load and grid meter; the FBP1200's raw
+reported charge/discharge telemetry is never recorded. When the canonical flow
+cannot be produced (a missing or invalid primary measurement) no energy is
+accumulated, so an absent grid meter never invents zero-energy evidence.
+"""
 
 from __future__ import annotations
 
@@ -7,13 +15,7 @@ from datetime import datetime
 from math import sqrt
 
 from .accounting import IntervalAccumulator
-from .const import (
-    CONF_BATTERY_CHARGE_POWER,
-    CONF_BATTERY_DISCHARGE_POWER,
-    CONF_GRID_IMPORT_POWER,
-    CONF_LOAD_POWER,
-)
-from .models import Action, GRID_POWER_IMPORT_POSITIVE
+from .models import Action, GRID_POWER_IMPORT_POSITIVE, PowerFlowSnapshot
 from .runtime import RuntimeState
 
 
@@ -23,11 +25,11 @@ class EvidenceCollector:
     def __init__(
         self,
         runtime: Callable[[], RuntimeState],
-        value: Callable[[str, float | None], float | None],
+        flow: Callable[[], PowerFlowSnapshot | None],
         save: Callable[[], Awaitable[None]],
     ) -> None:
         self._runtime = runtime
-        self._value = value
+        self._flow = flow
         self._save = save
         self._accumulator: IntervalAccumulator | None = None
         self._last_sample_at: datetime | None = None
@@ -58,29 +60,43 @@ class EvidenceCollector:
                 )
             self._accumulator = None
             await self._save()
+        flow = self._flow()
+        # Without a canonical flow there is no trustworthy load/grid/battery
+        # balance, so skip this refresh entirely rather than recording zeros.
+        if flow is None or not flow.flow_available:
+            return
         if self._accumulator is None:
             self._accumulator = IntervalAccumulator(bucket)
         elapsed = (
-            min(60.0, max(0.0, (now - self._last_sample_at).total_seconds()))
+            min(
+                60.0,
+                max(0.0, (now - self._last_sample_at).total_seconds()),
+            )
             if self._last_sample_at
             else 0
         )
         self._last_sample_at = now
         self._accumulator.add(
             seconds=elapsed,
-            load_w=self._value(CONF_LOAD_POWER, 0) or 0,
-            grid_power_w=self._value(CONF_GRID_IMPORT_POWER, 0) or 0,
+            load_w=flow.load_w,
+            grid_power_w=flow.grid_power_w,
             grid_sign=GRID_POWER_IMPORT_POSITIVE,
-            charge_w=self._value(CONF_BATTERY_CHARGE_POWER, 0) or 0,
-            discharge_w=self._value(CONF_BATTERY_DISCHARGE_POWER, 0) or 0,
+            charge_w=flow.battery_charge_power_w,
+            discharge_w=flow.battery_output_power_w,
             price=price,
-            soc=soc,
+            soc=flow.soc,
             action=action,
         )
 
-    async def _learn_battery(self, now: datetime, action: Action, soc: float) -> None:
+    async def _learn_battery(
+        self, now: datetime, action: Action, soc: float
+    ) -> None:
+        flow = self._flow()
         elapsed = (
-            min(120.0, max(0.0, (now - self._battery_sample_at).total_seconds()))
+            min(
+                120.0,
+                max(0.0, (now - self._battery_sample_at).total_seconds()),
+            )
             if self._battery_sample_at
             else 0.0
         )
@@ -91,10 +107,11 @@ class EvidenceCollector:
             self._session_start_soc = soc
             self._session_energy_wh = 0.0
         power = 0.0
-        if action is Action.CHARGE:
-            power = self._value(CONF_BATTERY_CHARGE_POWER, 0) or 0
-        elif action is Action.BATTERY:
-            power = self._value(CONF_BATTERY_DISCHARGE_POWER, 0) or 0
+        if flow is not None and flow.flow_available:
+            if action is Action.CHARGE:
+                power = flow.battery_charge_power_w
+            elif action is Action.BATTERY:
+                power = flow.battery_output_power_w
         self._session_energy_wh += max(0.0, power) * elapsed / 3600
 
     async def _finish_battery_session(self, end_soc: float) -> None:
