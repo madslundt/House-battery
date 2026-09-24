@@ -29,6 +29,7 @@ the local provider, and the mode read-back before re-enabling automatic control.
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
 | **Local load diagnostics** | Direct-local entries only. Comparison of the FOSSiBOT whole-site meter, smart-load total, backup-load total, and every storage unit's off-grid reading. The complete per-storage off-grid total is automatically used for learning, planning, and automatic control; incomplete stack data fails closed. |
 | **Grid import power** | Current whole-site power bought from the grid; used for evidence and accounting. |
+| **Grid export power** | Whole-site power sent to the grid. Must read 0 (or non-positive) at all times while automatic control runs; any sustained positive value is the zero-export invariant being violated. |
 | **Battery charge/discharge power** | Measured instantaneous battery flow; used for learning, throughput, and realized savings estimates. |
 | **Native minimum/maximum SOC** | Allowlisted battery hardware SOC registers. | They are read back after changes and used as the direct control limits. |
 | **Current electricity price** | Price for the current known price interval. |

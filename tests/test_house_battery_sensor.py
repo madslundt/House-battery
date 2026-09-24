@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
-from homeassistant.const import UnitOfEnergy
+from homeassistant.const import UnitOfEnergy, UnitOfPower
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
@@ -73,6 +73,19 @@ def test_daily_plan_blocks_covers_the_complete_local_day() -> None:
 def test_daily_plan_blocks_is_empty_without_a_daily_plan() -> None:
     assert daily_plan_blocks({}) == []
     assert daily_plan_blocks({"daily_plan": None}) == []
+
+
+def test_grid_export_power_is_exposed_with_power_metadata() -> None:
+    """Export power must be a first-class, observable quantity (not clamped to
+    zero) so zero export can be verified from the live meter."""
+    descriptions = {item.key: item for item in SENSORS}
+    assert "grid_export_power_w" in descriptions
+    export = descriptions["grid_export_power_w"]
+    assert export.unit is UnitOfPower.WATT
+    # Import and export sensors share metadata so they read as peers.
+    assert export.icon == descriptions["grid_import_power_w"].icon.replace(
+        "import", "export"
+    )
 
 
 def test_lifetime_energy_is_exposed_for_the_energy_dashboard() -> None:

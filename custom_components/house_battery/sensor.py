@@ -56,6 +56,13 @@ SENSORS = (
         precision=0,
     ),
     FbpSensorDescription(
+        key="grid_export_power_w",
+        name="Grid export power",
+        icon="mdi:transmission-tower-export",
+        unit=UnitOfPower.WATT,
+        precision=0,
+    ),
+    FbpSensorDescription(
         key="battery_charge_power_w",
         name="Battery charge power",
         icon="mdi:battery-plus",
