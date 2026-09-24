@@ -2,6 +2,7 @@
 
 import sys
 from datetime import UTC, datetime
+from dataclasses import asdict
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -121,6 +122,39 @@ def test_export_totals_round_trip_through_storage() -> None:
     restored = EnergyLedger.from_dict(ledger.as_dict())
     assert restored.total_export_kwh == pytest.approx(ledger.total_export_kwh)
     assert restored.total_export_kwh > 0.0
+
+
+def test_ledger_loads_when_grid_export_field_is_missing() -> None:
+    # A ledger persisted before the 1.4.0 release (no ``grid_export_kwh`` field)
+    # must still load, defaulting export to zero rather than failing setup.
+    legacy = {
+        "intervals": [
+            {
+                "start": "2025-01-08T08:00:00+00:00",
+                "end": "2025-01-08T08:15:00+00:00",
+                "action": "battery",
+                "price_dkk_per_kwh": 0.5,
+                "load_kwh": 0.1,
+                "grid_import_kwh": 0.0,
+                "battery_charge_kwh": 0.0,
+                "battery_discharge_kwh": 0.05,
+                "soc_start": 60.0,
+                "soc_end": 58.0,
+                "baseline_cost_dkk": 0.05,
+                "actual_cost_dkk": 0.025,
+                "degradation_dkk": 0.0,
+                "net_savings_dkk": 0.025,
+                "quality": "observed",
+            }
+        ],
+        "total_charge_kwh": 0.0,
+        "total_discharge_kwh": 0.05,
+        "total_export_kwh": 0.0,
+        "total_net_savings_dkk": 0.025,
+    }
+    restored = EnergyLedger.from_dict(legacy)
+    assert restored.intervals[0].grid_export_kwh == pytest.approx(0.0)
+    assert "grid_export_kwh" in asdict(restored.intervals[0])
 
 
 def test_calendar_period_totals_survive_restart_and_retain_previous_periods() -> None:

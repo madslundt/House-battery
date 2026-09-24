@@ -198,8 +198,12 @@ class EnergyLedger:
     def from_dict(cls, data: dict[str, Any]) -> EnergyLedger:
         intervals = []
         for value in data.get("intervals", []):
-            # Keep grid_export_kwh: it is now a first-class ledger field.
-            intervals.append(LedgerInterval(**value))
+            # Keep grid_export_kwh: it is now a first-class ledger field. Ledger
+            # intervals persisted by the 1.3.x line predate the field, so default
+            # it to 0.0 to keep old ledgers loadable across the upgrade.
+            interval = dict(value)
+            interval.setdefault("grid_export_kwh", 0.0)
+            intervals.append(LedgerInterval(**interval))
         return cls(
             intervals=intervals[-LEDGER_HISTORY_LIMIT:],
             total_charge_kwh=float(data.get("total_charge_kwh", 0)),
