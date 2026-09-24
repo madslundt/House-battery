@@ -23,6 +23,7 @@ from house_battery.forecast import (
     detect_extreme_price_movement,
     extend_known_horizon,
 )
+from house_battery.forecast_plan import ForecastPlan
 from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 from house_battery.price import extract_rows, normalize_price_rows
@@ -174,6 +175,124 @@ def test_stromligning_current_tomorrow_and_forecast_entities_extend_the_plan() -
         assert slots[0].source == "known"
         assert slots[69].price == 1.297170  # cheap window
         assert slots[91].price == 6.619447  # expensive spike
+
+    asyncio.run(scenario())
+
+
+def test_price_entity_flagged_forecast_is_not_treated_as_known() -> None:
+    """A price entity with forecast_data:true contributes no known-price slots."""
+
+    async def scenario() -> None:
+        now = datetime.fromisoformat("2026-09-22T09:30:00+02:00")
+        start = datetime.fromisoformat("2026-09-22T09:00:00+02:00")
+        known = _stromligning_prices(
+            start, intervals=3, cadence=timedelta(hours=1), default_price=2.0
+        )
+        forecast_start = datetime.fromisoformat("2026-09-23T00:00:00+02:00")
+        forecast = _stromligning_prices(
+            forecast_start, intervals=4, cadence=timedelta(hours=1), default_price=9.9
+        )
+        hass = HomeAssistant("/tmp")
+        entry = _Entry(
+            {
+                CONF_PRICE_ENTITIES: [
+                    "sensor.stromligning_current_price_vat",
+                    "sensor.stromligning_prices_tomorrow_vat",
+                ],
+                CONF_PRICE_FORECAST_ENTITIES: [],
+            }
+        )
+        coordinator = Fbp1200Coordinator(hass, entry)
+        coordinator.runtime.forecast_enabled = True
+        hass.states.async_set(
+            "sensor.stromligning_current_price_vat", "2.0", {"prices": known}
+        )
+        hass.states.async_set(
+            "sensor.stromligning_prices_tomorrow_vat",
+            forecast_start.isoformat(),
+            {"forecast_data": True, "prices": forecast},
+        )
+
+        slots = coordinator._price_slots(now.astimezone(UTC))
+
+        # The forecast-flagged entity never contributes known-price slots;
+        # only the confirmed-price entity drives planning.
+        assert len(slots) == 3
+        assert [slot.price for slot in slots] == [2.0, 2.0, 2.0]
+        assert all(slot.source == "known" for slot in slots)
+        # The flagged entity is routed through the forecast path instead.
+        assert coordinator._forecast_source == "sensor.stromligning_prices_tomorrow_vat"
+
+    asyncio.run(scenario())
+
+
+def test_coordinator_builds_a_separate_forecast_plan_from_forecast_slots() -> None:
+    """The forecast-horizon guideline is built, separate from the real plan."""
+
+    async def scenario() -> None:
+        now = datetime.fromisoformat("2026-09-22T12:00:00+02:00")
+        known_start = datetime.fromisoformat("2026-09-22T09:00:00+02:00")
+        # Three hourly *known* prices (baseline ~2.0) ending at local noon.
+        current = _stromligning_prices(
+            known_start, intervals=3, cadence=timedelta(hours=1), default_price=2.0
+        )
+        # The forecast entity covers the rest of the day after known prices.
+        forecast_start = datetime.fromisoformat("2026-09-22T12:00:00+02:00")
+        forecast = _stromligning_prices(
+            forecast_start,
+            intervals=12,
+            cadence=timedelta(hours=1),
+            default_price=2.0,
+        )
+        forecast[0]["price"] = 0.5  # 12:00-13:00, overnight dip -> charge
+        forecast[1]["price"] = 0.5  # 13:00-14:00
+        forecast[9]["price"] = 4.0  # 21:00-22:00, evening spike -> use battery
+        forecast[10]["price"] = 4.0
+        hass = HomeAssistant("/tmp")
+        entry = _Entry(
+            {
+                CONF_PRICE_ENTITIES: ["sensor.stromligning_current_price_vat"],
+                CONF_PRICE_FORECAST_ENTITIES: ["sensor.stromligning_forecasts_vat"],
+            }
+        )
+        coordinator = Fbp1200Coordinator(hass, entry)
+        coordinator.runtime.forecast_enabled = True
+        hass.states.async_set(
+            "sensor.stromligning_current_price_vat",
+            "2.0",
+            {"prices": current},
+        )
+        hass.states.async_set(
+            "sensor.stromligning_forecasts_vat",
+            forecast_start.isoformat(),
+            {"prices": forecast},
+        )
+
+        coordinator._price_slots(now.astimezone(UTC))
+        plan = coordinator._forecast_plan
+
+        assert isinstance(plan, ForecastPlan)
+        # Judged against the recent known-price baseline.
+        assert plan.baseline_price_dkk_per_kwh == 2.0
+        # Only considered *after* the known prices end (local noon).
+        assert plan.horizon_start == now
+        assert plan.horizon_end == datetime.fromisoformat(
+            "2026-09-23T00:00:00+02:00"
+        )
+        # Major dip -> charge, major spike -> use the battery.
+        assert [block.recommendation for block in plan.blocks] == [
+            Action.CHARGE,
+            Action.BATTERY,
+        ]
+        assert plan.blocks[0].start.hour == 12
+        assert plan.blocks[0].end.hour == 14
+        assert plan.blocks[1].start.hour == 21
+        assert plan.blocks[1].end.hour == 23
+        # It is deliberately separate from the real optimizer plan, which
+        # ``_price_slots`` never populates.
+        assert plan is not coordinator.plan
+        assert coordinator.plan is None
+        assert plan.summary() != "no major forecast swings detected"
 
     asyncio.run(scenario())
 

@@ -50,6 +50,7 @@ from .forecast import (
     detect_extreme_price_movement,
     extend_known_horizon,
 )
+from .forecast_plan import build_forecast_plan
 from .health import get_health_problems
 from .learning import LoadLearner
 from .local_tcp import (
@@ -105,6 +106,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_last_updated: str | None = None
         self._forecast_sources: dict[str, dict[str, Any]] = {}
         self._forecast_planning_source: str | None = None
+        # Coarse, non-detailed guideline over the *forecast* horizon only.
+        # This is deliberately separate from ``self.plan``: the forecast is
+        # uncertain and must never drive the optimizer, but it is useful
+        # guidance for when to charge or use the battery after known prices.
+        self._forecast_plan = None
         self._extreme_price_indicator: dict[str, float | bool] = {
             "is_extreme": False,
             "baseline": 0.0,
@@ -271,13 +277,26 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         return sources
 
     def _price_slots(self, now: datetime) -> list[PriceSlot]:
-        rows: list[Any] = []
+        known_rows: list[Any] = []
+        forecast_price_entities: list[str] = []
         for entity_id in self.config.get(CONF_PRICE_ENTITIES, []):
             state = self.hass.states.get(entity_id)
-            if state:
-                rows.extend(extract_rows(dict(state.attributes)))
-        known_slots = normalize_price_rows(rows)
+            if not state:
+                continue
+            attributes = dict(state.attributes)
+            if attributes.get("forecast_data"):
+                # A price entity may flag its rows as a forecast rather than a
+                # confirmed price.  Forecast data must never be optimised as if
+                # it were known pricing, so route it through the forecast path
+                # instead of the known-price set.
+                forecast_price_entities.append(entity_id)
+                continue
+            known_rows.extend(extract_rows(attributes))
+        known_slots = normalize_price_rows(known_rows)
         sources = self._forecast_entities()
+        for extra in forecast_price_entities:
+            if extra not in sources:
+                sources.append(extra)
         for source in sources:
             self.runtime.migrate_legacy_forecast_accuracy(source)
 
@@ -398,6 +417,18 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._extreme_price_ratio = self._extreme_price_indicator.get("ratio", 0.0)
         self._extreme_price_is_extreme = self._extreme_price_indicator.get(
             "is_extreme", False
+        )
+        # Build the coarse forecast-only guideline.  All available forecast
+        # sources are merged so the guideline reflects the whole forecast
+        # horizon; contiguity gaps between sources are handled inside the
+        # builder.  It never feeds the optimizer (``slots``/``known_slots``).
+        all_forecast_slots: list[PriceSlot] = []
+        for _, forecast_slots in available_forecasts:
+            all_forecast_slots.extend(forecast_slots)
+        self._forecast_plan = build_forecast_plan(
+            all_forecast_slots,
+            now=now,
+            known_slots=known_slots,
         )
         result: list[PriceSlot] = []
         for slot in slots:
@@ -867,6 +898,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             # when prices deviate sharply from the recent baseline.
             "price_forecast_extreme_ratio": self._extreme_price_ratio,
             "price_forecast_is_extreme": self._extreme_price_is_extreme,
+            # Coarse forecast-horizon guideline (separate from the real plan).
+            "price_forecast_plan": (
+                self._forecast_plan.as_dict() if self._forecast_plan else None
+            ),
+            "price_forecast_recommendation": (
+                self._forecast_plan.summary() if self._forecast_plan else None
+            ),
+            "price_forecast_blocks": (
+                len(self._forecast_plan.blocks) if self._forecast_plan else 0
+            ),
             "price_forecast_accuracy": (
                 primary_accuracy.quality if primary_accuracy else "unknown"
             ),
