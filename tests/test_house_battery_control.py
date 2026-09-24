@@ -901,6 +901,37 @@ def test_discharge_setpoint_below_load_caps_at_load_minus_safety_margin() -> Non
     assert discharge_setpoint_below_load(800.0, DISCHARGE_EXPORT_SAFETY_MARGIN_W) == 0.0
 
 
+def test_discharge_setpoint_below_load_respects_configured_power_when_load_is_high() -> None:
+    # The critical regression: with load far above the configured discharge the
+    # setpoint must stay at the configured ceiling, not climb with the load.
+    # 800 W configured, 1500 W load -> 800 W (not 1500 - 50 = 1450 W).
+    assert discharge_setpoint_below_load(800.0, 1500.0) == 800.0
+    # Load equal to the configured discharge still honours it: the 50 W margin
+    # bites one step below the ceiling, and never pushes the setpoint up to it.
+    assert discharge_setpoint_below_load(800.0, 800.0) == 750.0
+    # Just below the configured ceiling, the load margin is what bites.
+    assert discharge_setpoint_below_load(800.0, 849.0) == 799.0
+    # A larger configured discharge is honoured when the load allows it.
+    assert discharge_setpoint_below_load(1100.0, 1500.0) == 1100.0
+    # Negative requested power never becomes a (positive) discharge.
+    assert discharge_setpoint_below_load(-10.0, 1500.0) == 0.0
+
+
+def test_discharge_setpoint_below_load_then_device_ceiling_chain() -> None:
+    # The two boundaries compose the way the direct actuator chains them:
+    # setpoint clamped below load/configured power, then to the inverter ceiling.
+    # High load, high configured power -> clamped to the 1200 W inverter ceiling.
+    chained = clamp_setpoint_to_device(
+        discharge_setpoint_below_load(2000.0, 1500.0)
+    )
+    assert chained == 1200.0
+    # High load, configured power below the ceiling -> the configured ceiling wins.
+    chained = clamp_setpoint_to_device(
+        discharge_setpoint_below_load(800.0, 1500.0)
+    )
+    assert chained == 800.0
+
+
 def test_discharge_setpoint_below_load_none_load_is_unchanged() -> None:
     # No load reading means the layer cannot guarantee zero export, so the
     # requested power is returned untouched for the caller to decide on.

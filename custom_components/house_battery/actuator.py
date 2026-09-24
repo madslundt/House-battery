@@ -68,12 +68,17 @@ def discharge_setpoint_below_load(
     ``load_w`` is the measured battery-served load.  When it is ``None`` the
     caller did not have a load reading, so the requested discharge is returned
     unchanged and the caller is responsible for the resulting risk; when it is
-    a number the discharge is clamped to ``load - margin`` so a fixed-power
-    slot cannot export to the grid if the house load falls below the setpoint.
+    a number the discharge is clamped to ``min(requested, load - margin)`` so
+    a fixed-power slot can neither export to the grid (load below the setpoint)
+    nor exceed the caller's configured discharge power.  The requested ceiling
+    is honoured first, so a low configured discharge (e.g. 800 W) is respected
+    even when the house load is large (e.g. 1500 W); the load margin only bites
+    when the requested discharge would otherwise exceed what the house is
+    actually drawing.
     """
     if load_w is None:
-        return requested_w
-    return max(load_w - DISCHARGE_EXPORT_SAFETY_MARGIN_W, 0.0)
+        return max(requested_w, 0.0)
+    return min(max(requested_w, 0.0), max(load_w - DISCHARGE_EXPORT_SAFETY_MARGIN_W, 0.0))
 
 
 def clamp_setpoint_to_device(power_w: float) -> float:

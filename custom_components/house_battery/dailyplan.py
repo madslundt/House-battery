@@ -232,17 +232,22 @@ def reconcile_daily_plan(
 
 
 def merge_adjacent_blocks(slots: tuple[PlannedSlot, ...]) -> list[PlannedSlot]:
-    """Merge contiguous slots that share the same effective operating state.
+    """Merge contiguous slots that share the same operating action.
 
-    Two intervals are merged only when they touch (``a.end == b.start``) **and**
-    carry the same action, price and reason.  Merging merely on the action is
-    dropped on purpose: a merged block exposes a single ``price`` and ``reason``
-    metadata field, so combining, say, a low-price charge with a high-price
-    charge (or two charge windows with justifications that disagree) would
-    falsely imply the whole merged block ran at one price for one reason.  Power,
-    expected load and energy are intensive to the operating state and are summed
-    as a faithful aggregate over the merged span; the merged SOC ``start``/``end``
-    are the endpoints of a contiguous SOC curve and stay correct.
+    Two intervals are merged when they touch (``a.end == b.start``) and carry the
+    same action, so a run of price quarters collapses into a single operating
+    block (``00:00-00:15 grid`` + ``00:15-00:30 grid`` -> ``00:00-00:30 grid``).
+
+    Merging is intentionally action-only: the block view is the user-facing
+    overview, so it reads as a sequence of operating periods rather than one row
+    per price quarter.  Because a merged block exposes a single ``price`` and
+    ``reason`` field, those come from the first sub-interval; that is a
+    deliberate simplification and only affects the *overview* display.  The full
+    per-quarter economic detail is preserved verbatim in the persisted
+    ``slots`` (:meth:`DailyPlan.as_dict`), and the merged energy, grid import,
+    load and cost are summed as a faithful aggregate over the whole span, so no
+    economics are lost.  The merged SOC ``start``/``end`` are the endpoints of
+    the contiguous SOC curve and stay correct.
     """
     ordered = sorted((slot for slot in slots if slot.start < slot.end), key=lambda s: s.start)
     blocks: list[PlannedSlot] = []
@@ -251,8 +256,6 @@ def merge_adjacent_blocks(slots: tuple[PlannedSlot, ...]) -> list[PlannedSlot]:
             blocks
             and slot.start == blocks[-1].end
             and blocks[-1].action is slot.action
-            and abs(blocks[-1].price - slot.price) <= 1e-9
-            and blocks[-1].reason == slot.reason
         ):
             previous = blocks[-1]
             blocks[-1] = PlannedSlot(

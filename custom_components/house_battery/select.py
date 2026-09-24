@@ -1,4 +1,15 @@
-"""Manual operating override for the battery storage controller."""
+"""Manual operating override for the battery storage controller.
+
+There are two distinct controls here:
+
+* The native **Battery Operating Mode** select on the FBP1200 device
+  (``Charge / Idle / Self-Gen/Zero Export``) is configured separately through
+  the integration options (``CONF_OPERATING_MODE``) and is owned by the device
+  integration.  This entity is the physical actuator.
+* This **Operation mode** select is the integration's own policy control with
+  ``auto / charge / battery / grid``.  ``auto`` follows the optimizer plan; a
+  forced mode commands the native Battery Operating Mode every refresh.
+"""
 
 from __future__ import annotations
 
@@ -16,22 +27,23 @@ from .const import (
 from .coordinator import Fbp1200Coordinator
 from .entity import Fbp1200Entity
 
-_OVERRIDE_NAME = "Storage override"
-_OVERRIDE_ICON = "mdi:battery-clock"
+_OPERATION_NAME = "Operation mode"
+_OPERATION_ICON = "mdi:battery-clock"
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: Fbp1200Coordinator = entry.runtime_data
-    async_add_entities([FbpStorageOverrideSelect(coordinator)])
+    async_add_entities([FbpOperatingModeSelect(coordinator)])
 
 
-class FbpStorageOverrideSelect(Fbp1200Entity, SelectEntity):
+class FbpOperatingModeSelect(Fbp1200Entity, SelectEntity):
     """Force the commanded battery action to test each physical function.
 
     ``auto`` (default) follows the optimizer plan. A forced mode commands that
-    action every refresh regardless of price:
+    action every refresh regardless of price by setting the native Battery
+    Operating Mode:
 
     - ``charge`` raises the native ceiling to the maximum charge SOC and never
       charges above it.
@@ -40,15 +52,16 @@ class FbpStorageOverrideSelect(Fbp1200Entity, SelectEntity):
     - ``grid`` holds the inverter idle.
 
     The override only changes the commanded action; it never bypasses the
-    configured SOC ceiling/floor.
+    configured SOC ceiling/floor.  It is the integration's own control and is
+    separate from the native ``Battery Operating Mode`` hardware select.
     """
 
-    _attr_name = _OVERRIDE_NAME
-    _attr_icon = _OVERRIDE_ICON
+    _attr_name = _OPERATION_NAME
+    _attr_icon = _OPERATION_ICON
     _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: Fbp1200Coordinator) -> None:
-        super().__init__(coordinator, "storage_override")
+        super().__init__(coordinator, "operating_mode_override")
         self._attr_options = list(OVERRIDE_OPTIONS)
 
     @property
@@ -68,7 +81,8 @@ class FbpStorageOverrideSelect(Fbp1200Entity, SelectEntity):
             "auto_follows_plan": self.coordinator.runtime.override_action
             == OVERRIDE_AUTO,
             "note": (
-                "auto follows the plan; forced modes command the action every "
-                "refresh without bypassing the SOC ceiling/floor."
+                "auto follows the plan; forced modes command the native "
+                "Battery Operating Mode every refresh without bypassing the "
+                "SOC ceiling/floor."
             ),
         }

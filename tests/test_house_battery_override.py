@@ -23,7 +23,7 @@ from house_battery.const import (
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.models import Action
 from house_battery.runtime import RuntimeState
-from house_battery.select import FbpStorageOverrideSelect
+from house_battery.select import FbpOperatingModeSelect
 
 
 class Entry:
@@ -176,7 +176,7 @@ async def _no_refresh() -> None:
 def test_override_select_exposes_the_four_modes_and_current_choice() -> None:
     coordinator = make_coordinator()
     coordinator.runtime.override_action = OVERRIDE_BATTERY
-    select = FbpStorageOverrideSelect(coordinator)
+    select = FbpOperatingModeSelect(coordinator)
 
     assert select.options == list(OVERRIDE_OPTIONS)
     assert set(OVERRIDE_OPTIONS) == {OVERRIDE_AUTO, "charge", "battery", "grid"}
@@ -187,7 +187,7 @@ def test_override_select_commands_the_coordinator() -> None:
     coordinator = make_coordinator()
     coordinator.runtime.override_action = OVERRIDE_AUTO
     coordinator.store = StaticStore(RuntimeState())
-    select = FbpStorageOverrideSelect(coordinator)
+    select = FbpOperatingModeSelect(coordinator)
 
     asyncio.run(select.async_select_option(OVERRIDE_GRID))
 

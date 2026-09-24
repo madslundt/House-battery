@@ -979,9 +979,14 @@ def test_tomorrow_plan_visible_when_tomorrow_prices_available() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_merge_rejects_same_action_different_price() -> None:
-    """Two adjacent CHARGE blocks at different prices must NOT merge into a
-    single block carrying one misleading price."""
+def test_merge_combines_same_action_different_price() -> None:
+    """Two adjacent CHARGE blocks at different prices DO merge into one block.
+
+    Merging is action-only by design: the block view is the overview, so a run
+    of price quarters collapses regardless of price.  The shown price/reason
+    come from the first sub-interval; the per-quarter economic detail is kept in
+    the persisted slots and the summed energy/cost stay faithful.
+    """
     slots = (
         slot(datetime(2026, 9, 20, 0, 0, tzinfo=UTC),
              datetime(2026, 9, 20, 1, 0, tzinfo=UTC), Action.CHARGE, price=0.2,
@@ -991,11 +996,14 @@ def test_merge_rejects_same_action_different_price() -> None:
              reason="expensive"),
     )
     blocks = merge_adjacent_blocks(slots)
-    assert len(blocks) == 2
-    assert [b.price for b in blocks] == [0.2, 3.0]
+    assert len(blocks) == 1
+    assert blocks[0].action is Action.CHARGE
+    # The overview shows the first sub-interval's price/reason; the merged span
+    # still aggregates the underlying economics faithfully.
+    assert blocks[0].price == pytest.approx(0.2)
 
 
-def test_merge_rejects_same_action_price_but_differing_reason() -> None:
+def test_merge_combines_same_action_differing_reason() -> None:
     slots = (
         slot(datetime(2026, 9, 20, 0, 0, tzinfo=UTC),
              datetime(2026, 9, 20, 1, 0, tzinfo=UTC), Action.CHARGE,
@@ -1005,7 +1013,8 @@ def test_merge_rejects_same_action_price_but_differing_reason() -> None:
              reason="second justification"),
     )
     blocks = merge_adjacent_blocks(slots)
-    assert len(blocks) == 2
+    assert len(blocks) == 1
+    assert blocks[0].action is Action.CHARGE
 
 
 def test_merge_keeps_compatible_intervals_and_sums_aggregates() -> None:
@@ -1030,3 +1039,30 @@ def test_merge_keeps_compatible_intervals_and_sums_aggregates() -> None:
     assert merged.interval_cost_dkk == pytest.approx(2.0)
     assert merged.soc_start == pytest.approx(90)
     assert merged.soc_end == pytest.approx(86)
+
+
+def test_merge_collapses_the_user_grid_grid_battery_example() -> None:
+    """The reported example: three 15-minute quarters compress to two blocks.
+
+    ``00:00-00:15 grid`` + ``00:15-00:30 grid`` + ``00:30-00:45 battery`` ->
+    ``00:00-00:30 grid`` + ``00:30-00:45 battery``.
+    """
+    slots = (
+        slot(datetime(2026, 9, 20, 0, 0, tzinfo=UTC),
+             datetime(2026, 9, 20, 0, 15, tzinfo=UTC), Action.GRID,
+             price=0.5, reason="grid-a"),
+        slot(datetime(2026, 9, 20, 0, 15, tzinfo=UTC),
+             datetime(2026, 9, 20, 0, 30, tzinfo=UTC), Action.GRID,
+             price=0.9, reason="grid-b"),
+        slot(datetime(2026, 9, 20, 0, 30, tzinfo=UTC),
+             datetime(2026, 9, 20, 0, 45, tzinfo=UTC), Action.BATTERY,
+             price=0.9, reason="discharge"),
+    )
+    blocks = merge_adjacent_blocks(slots)
+    assert len(blocks) == 2
+    assert blocks[0].action is Action.GRID
+    assert blocks[0].start == datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
+    assert blocks[0].end == datetime(2026, 9, 20, 0, 30, tzinfo=UTC)
+    assert blocks[1].action is Action.BATTERY
+    assert blocks[1].start == datetime(2026, 9, 20, 0, 30, tzinfo=UTC)
+    assert blocks[1].end == datetime(2026, 9, 20, 0, 45, tzinfo=UTC)
