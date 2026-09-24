@@ -294,3 +294,26 @@ def test_battery_at_target_holds_and_uses_grid() -> None:
         slot.grid_import_wh >= slot.expected_load_wh
         for slot in plan.slots
     ), "Grid should supply at least the load"
+
+
+def test_savings_without_battery_movement_is_terminal_only() -> None:
+    """When the battery never moves, reported savings is a notional terminal credit.
+
+    The optimizer credits stored energy at the terminal price so the objective
+    is not understated, but that credit only becomes real money if the battery
+    is actually discharged at that price.  With zero throughput the headline
+    ``expected_savings_dkk`` is therefore entirely a terminal-value accounting
+    line, and ``realized_savings_dkk`` (savings minus that credit) must be ~0.
+    """
+    plan = optimize(
+        slots([1.00] * 8 + [1.25] * 8),
+        now=BASE - timedelta(seconds=1),
+        soc=60,
+        settings=settings(),
+    )
+    assert plan.battery_throughput_kwh == 0
+    assert plan.terminal_value_dkk > 0
+    # The realized figure is exactly the headline figure minus the terminal credit.
+    assert plan.realized_savings_dkk == plan.expected_savings_dkk - plan.terminal_value_dkk
+    # No battery movement -> no realizable savings, only the notional terminal line.
+    assert abs(plan.realized_savings_dkk) < 1e-9

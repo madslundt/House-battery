@@ -531,6 +531,38 @@ def test_daily_plan_view_exposes_planned_and_actual_soc() -> None:
     ).isoformat()
 
 
+def test_daily_plan_view_dedupes_identical_soc() -> None:
+    """A block whose start/end SOC are identical reports a single ``soc``.
+
+    Grid/idle blocks never move the battery, so ``soc_start`` and ``soc_end``
+    are equal.  Reporting one value instead of a redundant pair keeps the
+    timeline readable and makes the "no work" blocks obvious.  A block that
+    actually moves the battery keeps the ``soc_start``/``soc_end`` pair.
+    """
+    daily = DailyPlan(
+        date="2026-09-20",
+        slots=(
+            slot(datetime(2026, 9, 20, 0, 0, tzinfo=UTC),
+                 datetime(2026, 9, 20, 12, 0, tzinfo=UTC), Action.GRID,
+                 soc_start=57.5, soc_end=57.5),
+            slot(datetime(2026, 9, 20, 12, 0, tzinfo=UTC),
+                 datetime(2026, 9, 20, 14, 0, tzinfo=UTC), Action.CHARGE,
+                 soc_start=57.5, soc_end=71.5),
+        ),
+    )
+    view = daily.view_dict(actual_soc=57.5)
+    idle, moving = view["blocks"]
+    # Idle block: exactly one SOC field, no start/end pair.
+    assert "soc" in idle
+    assert "soc_start" not in idle and "soc_end" not in idle
+    assert idle["soc"] == 57.5
+    # Moving block: the start/end pair is preserved.
+    assert "soc_start" in moving and "soc_end" in moving
+    assert "soc" not in moving
+    assert moving["soc_start"] == 57.5
+    assert moving["soc_end"] == 71.5
+
+
 def test_daily_plan_view_always_covers_the_complete_day() -> None:
     """Future-only optimizer output must never be what the dashboard shows."""
     daily = DailyPlan(

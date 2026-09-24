@@ -503,4 +503,5 @@ def optimize(
         throughput,
         terminal_price,
         f"{action.value}: {reason}",
+        terminal_value,
     )

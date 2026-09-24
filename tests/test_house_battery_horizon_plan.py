@@ -592,9 +592,12 @@ def test_view_exposes_actual_soc_and_actual_soc_at_without_touching_blocks() -> 
     assert view["actual_soc_at"] == "2026-09-20T13:05:00+02:00"
     # The current observation is NOT bound to the midnight block.
     assert "actual_soc" not in view["blocks"][0]
-    # The published projected SOC curve is untouched.
-    assert view["blocks"][0]["soc_start"] == 100.0
-    assert view["blocks"][0]["soc_end"] == 100.0
+    # The published projected SOC curve is untouched.  A grid block that never
+    # moves the battery collapses its identical start/end SOC into one ``soc``
+    # field, so the projected reading is still visible, just not duplicated.
+    assert view["blocks"][0]["soc"] == 100.0
+    assert "soc_start" not in view["blocks"][0]
+    assert "soc_end" not in view["blocks"][0]
 
 
 def test_view_without_actual_soc_reports_none() -> None:

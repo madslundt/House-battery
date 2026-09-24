@@ -325,26 +325,44 @@ class DailyPlan:
         """
         merged = merge_adjacent_blocks(self.slots)
         totals = _slot_totals(self.slots)
-        blocks = [
-            {
-                "start": slot.start.isoformat(),
-                "end": slot.end.isoformat(),
-                "action": slot.action.value,
-                "soc_start": round(float(slot.soc_start), 3),
-                "soc_end": round(float(slot.soc_end), 3),
-                "expected_cost_dkk": round(float(slot.interval_cost_dkk), 3),
-                "expected_savings_dkk": round(
-                    float(slot.baseline_cost_dkk - slot.interval_cost_dkk), 3
-                ),
-                "energy_kwh": round(
-                    float(slot.battery_charge_wh + slot.battery_discharge_wh) / 1000, 3
-                ),
-                "expected_load_kwh": round(float(slot.expected_load_wh) / 1000, 3),
-                "expected_grid_import_kwh": round(float(slot.grid_import_wh) / 1000, 3),
-                "reason": slot.reason,
-            }
-            for slot in merged
-        ]
+        blocks: list[dict[str, Any]] = []
+        for slot in merged:
+            # A grid (or otherwise idle) block never moves the battery, so its
+            # start/end SOC are identical.  Reporting one value instead of a
+            # redundant pair keeps the timeline tidy and makes the "no work"
+            # blocks stand out from the ones that actually charge/discharge.
+            if round(float(slot.soc_start), 3) == round(float(slot.soc_end), 3):
+                soc: dict[str, Any] = {"soc": round(float(slot.soc_start), 3)}
+            else:
+                soc = {
+                    "soc_start": round(float(slot.soc_start), 3),
+                    "soc_end": round(float(slot.soc_end), 3),
+                }
+            blocks.append(
+                {
+                    "start": slot.start.isoformat(),
+                    "end": slot.end.isoformat(),
+                    "action": slot.action.value,
+                    **soc,
+                    "expected_cost_dkk": round(float(slot.interval_cost_dkk), 3),
+                    "expected_savings_dkk": round(
+                        float(slot.baseline_cost_dkk - slot.interval_cost_dkk), 3
+                    ),
+                    "energy_kwh": round(
+                        float(
+                            slot.battery_charge_wh + slot.battery_discharge_wh
+                        )
+                        / 1000,
+                        3,
+                    ),
+                    "expected_load_kwh": round(float(slot.expected_load_wh) / 1000, 3),
+                    "expected_grid_import_kwh": round(
+                        float(slot.grid_import_wh) / 1000, 3
+                    ),
+                    "reason": slot.reason,
+                }
+            )
+
         # The earliest published slot marks where history actually begins: the
         # local midnight today once history is persisted, or the replan cutoff on
         # a mid-day cold start (everything before it is "unavailable history").

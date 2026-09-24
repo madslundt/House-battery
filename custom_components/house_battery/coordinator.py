@@ -841,6 +841,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "expected_savings_dkk": self.plan.expected_savings_dkk
             if self.plan
             else None,
+            "realized_savings_dkk": self.plan.realized_savings_dkk
+            if self.plan
+            else None,
+            "terminal_value_dkk": (
+                self.plan.terminal_value_dkk if self.plan else None
+            ),
             "expected_cost_dkk": self.plan.expected_cost_dkk if self.plan else None,
             "baseline_cost_dkk": self.plan.baseline_cost_dkk if self.plan else None,
             "planned_battery_throughput_kwh": self.plan.battery_throughput_kwh

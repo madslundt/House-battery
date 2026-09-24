@@ -146,10 +146,24 @@ class Plan:
     battery_throughput_kwh: float
     terminal_price_dkk_per_kwh: float
     reason: str
+    terminal_value_dkk: float = 0.0
 
     @property
     def current_action(self) -> Action:
         return self.slots[0].action if self.slots else Action.SAFE
+
+    @property
+    def realized_savings_dkk(self) -> float:
+        """Savings from actually moving the battery, excluding the terminal credit.
+
+        ``expected_savings_dkk`` bundles the terminal value the optimizer credits
+        for energy held to the end of the horizon.  That credit is *notional*: it
+        only becomes real money if the battery is actually discharged at that
+        price.  When throughput is zero the headline savings is entirely a
+        terminal-value accounting line, so consumers that want "money in the
+        pocket" should read this field instead.
+        """
+        return self.expected_savings_dkk - self.terminal_value_dkk
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -157,6 +171,8 @@ class Plan:
             "expected_cost_dkk": round(self.expected_cost_dkk, 4),
             "baseline_cost_dkk": round(self.baseline_cost_dkk, 4),
             "expected_savings_dkk": round(self.expected_savings_dkk, 4),
+            "realized_savings_dkk": round(self.realized_savings_dkk, 4),
+            "terminal_value_dkk": round(self.terminal_value_dkk, 4),
             "battery_throughput_kwh": round(self.battery_throughput_kwh, 4),
             "terminal_price_dkk_per_kwh": round(self.terminal_price_dkk_per_kwh, 4),
             "reason": self.reason,
@@ -189,7 +205,9 @@ class Plan:
             "created_at": self.created_at.isoformat(),
             "expected_cost_dkk": round(expected_cost, 4),
             "baseline_cost_dkk": round(baseline_cost, 4),
-            "expected_savings_dkk": round(savings, 4),
+            "expected_savings_dkk": round(savings + self.terminal_value_dkk, 4),
+            "realized_savings_dkk": round(savings, 4),
+            "terminal_value_dkk": round(self.terminal_value_dkk, 4),
             "battery_throughput_kwh": round(throughput, 4),
             "terminal_price_dkk_per_kwh": round(self.terminal_price_dkk_per_kwh, 4),
             "reason": self.reason,
