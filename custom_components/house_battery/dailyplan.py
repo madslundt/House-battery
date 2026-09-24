@@ -2,15 +2,19 @@
 
 The optimizer (:mod:`planner`) only ever plans the *future*: from ``now`` to the
 end of the known/forecast price horizon.  The dashboard, however, must always
-show the complete current local day (``00:00 -> 24:00``).  This module bridges
-the two by keeping a small, timezone-aware, per-day timeline that
+show a complete, uninterrupted overview, so this module bridges the two by
+keeping a small, timezone-aware, persisted timeline that
 
-* is persisted so it survives restarts/reloads and midnight,
+* starts at the beginning of the current local day and extends through the
+  whole known-price horizon (today plus any following days whose prices are
+  already available),
 * never rewrites the already-published past (intervals before the replan
   ``cutoff`` are immutable),
 * replaces only the future portion on every replan, and
 * stays invariant-clean (sorted, non-overlapping, non-duplicate, non-zero
-  duration, ``start < end``, bounded to the local calendar day).
+  duration, ``start < end``, bounded to ``[day_start, horizon_end]``). The
+  timeline is also normalised to a single local timezone offset so its
+  timestamps are never ambiguous.
 
 The stored timeline keeps one slot per price interval so the economic detail
 (per-slot cost/energy/SOC) stays correct.  Adjacent identical-action slots are
@@ -20,7 +24,7 @@ merged lazily for display via :func:`merge_adjacent_blocks`.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .models import Action, PlannedSlot
@@ -40,44 +44,71 @@ def local_day_bounds(now: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
-def _clip_to_day(slot: PlannedSlot, start: datetime, end: datetime) -> PlannedSlot | None:
-    """Clip a slot to ``[start, end)``; drop it entirely if it does not fit."""
-    new_start = max(slot.start, start)
-    new_end = min(slot.end, end)
+def _clip_to_window(
+    slot: PlannedSlot, start: datetime, end: datetime, tz: timezone
+) -> PlannedSlot | None:
+    """Clip a slot to ``[start, end)`` and normalise to a single local offset.
+
+    ``start``/``end`` may arrive in a different timezone than the slot itself
+    (the price feed is commonly UTC while the day anchor is local).  The
+    comparison uses the instants, but the *returned* endpoints are expressed in
+    ``tz`` so every stored interval shares one offset and never mixes ``+00:00``
+    on its start with ``+02:00`` on its end.
+    """
+
+    new_start = _to_zone(max(slot.start, start), tz)
+    new_end = _to_zone(min(slot.end, end), tz)
     if new_start >= new_end:
         return None
     return replace(slot, start=new_start, end=new_end)
 
 
+def _to_zone(value: datetime, tz: timezone) -> datetime:
+    """Return ``value`` in ``tz`` without changing the underlying instant."""
+
+    return value.astimezone(tz)
+
+
 def _history_before(
-    slots: tuple[PlannedSlot, ...], cutoff: datetime, day_start: datetime, day_end: datetime
+    slots: tuple[PlannedSlot, ...],
+    cutoff: datetime,
+    day_start: datetime,
+    horizon_end: datetime,
+    tz: timezone,
 ) -> list[PlannedSlot]:
     """Keep the published past, truncating any interval that straddles ``cutoff``.
 
     Intervals ending at or before ``cutoff`` are kept whole.  Intervals starting
     at or after ``cutoff`` are dropped (they belong to the mutable future).  An
     interval that spans ``cutoff`` is truncated to ``[start, cutoff)`` so the
-    timeline never overlaps or duplicates across the replan point.
+    timeline never overlaps or duplicates across the replan point.  Everything
+    is bounded to ``[day_start, horizon_end]`` and normalised to a local offset.
     """
     kept: list[PlannedSlot] = []
     for slot in slots:
         if slot.end <= cutoff:
-            clipped = _clip_to_day(slot, day_start, day_end)
+            clipped = _clip_to_window(slot, day_start, horizon_end, tz)
             if clipped is not None:
                 kept.append(clipped)
         elif slot.start >= cutoff:
             continue
         else:
-            clipped = _clip_to_day(replace(slot, end=cutoff), day_start, day_end)
+            clipped = _clip_to_window(
+                replace(slot, end=cutoff), day_start, horizon_end, tz
+            )
             if clipped is not None:
                 kept.append(clipped)
     return kept
 
 
 def _future_clipped(
-    slots: tuple[PlannedSlot, ...], cutoff: datetime, day_start: datetime, day_end: datetime
+    slots: tuple[PlannedSlot, ...],
+    cutoff: datetime,
+    day_start: datetime,
+    horizon_end: datetime,
+    tz: timezone,
 ) -> list[PlannedSlot]:
-    """Keep only the optimizer's future intervals, clipped to the day."""
+    """Keep only the optimizer's future intervals, clipped to the horizon."""
     clipped: list[PlannedSlot] = []
     for slot in slots:
         # The optimizer starts at ``now``; anything at/after ``cutoff`` is the
@@ -85,7 +116,7 @@ def _future_clipped(
         # are ignored defensively.
         if slot.start < cutoff:
             continue
-        kept = _clip_to_day(slot, day_start, day_end)
+        kept = _clip_to_window(slot, day_start, horizon_end, tz)
         if kept is not None:
             clipped.append(kept)
     return clipped
@@ -124,23 +155,31 @@ def reconcile_daily_plan(
     *,
     cutoff: datetime,
     day_start: datetime,
-    day_end: datetime,
+    horizon_end: datetime,
 ) -> DailyPlan:
-    """Rebuild the daily timeline at ``cutoff`` from history + a fresh plan.
+    """Rebuild the timeline from ``day_start`` to ``horizon_end`` at ``cutoff``.
 
-    ``existing`` is the previously persisted timeline for the current local
-    day.  Its past (before ``cutoff``) is preserved exactly; its future is
-    discarded and replaced by ``future_slots`` (the optimizer's result).  A
-    boundary replan (``cutoff`` landing on an interval edge) yields no duplicate
-    or zero-duration interval.  If the day has rolled over, the previous day's
-    timeline is never merged into the new one.
+    ``existing`` is the previously persisted timeline.  Its past (before
+    ``cutoff``) is preserved exactly; its future is discarded and replaced by
+    ``future_slots`` (the optimizer's result).  The timeline starts at the
+    ``day_start`` (the beginning of the current local day) and extends through
+    the whole ``horizon_end`` (the end of the known-price horizon, so following
+    days whose prices are already known are shown too).  A boundary replan
+    (``cutoff`` landing on an interval edge) yields no duplicate or
+    zero-duration interval.  If the local day has rolled over, the previous
+    day's timeline is never merged into the new one.
+
+    Every resulting slot is normalised to the local timezone offset of
+    ``day_start`` so the whole timeline shares one, unambiguous offset.
     """
+
+    tz = day_start.tzinfo or timezone.utc
     today = day_start.date().isoformat()
     if existing is None or existing.date != today:
         history: list[PlannedSlot] = []
     else:
-        history = _history_before(existing.slots, cutoff, day_start, day_end)
-    future = _future_clipped(future_slots, cutoff, day_start, day_end)
+        history = _history_before(existing.slots, cutoff, day_start, horizon_end, tz)
+    future = _future_clipped(future_slots, cutoff, day_start, horizon_end, tz)
     normalized = _normalize(history + future)
     return DailyPlan(date=today, slots=tuple(normalized), created_at=cutoff)
 

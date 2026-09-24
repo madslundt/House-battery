@@ -80,10 +80,18 @@ def assert_invariants(daily: DailyPlan) -> None:
         )
 
 
-def assert_within_day(daily: DailyPlan, day_start: datetime, day_end: datetime) -> None:
+def assert_within_horizon(
+    daily: DailyPlan, day_start: datetime, horizon_end: datetime
+) -> None:
+    # The timeline now spans the whole known-price horizon from the start of
+    # the current local day forward, so slots are bounded by the horizon, not
+    # just the current calendar day.
     for s in daily.slots:
         assert s.start >= day_start
-        assert s.end <= day_end
+        assert s.end <= horizon_end
+        # Every slot shares a single, unambiguous local timezone offset.
+        assert s.start.utcoffset() == day_start.utcoffset()
+        assert s.end.utcoffset() == day_start.utcoffset()
 
 
 # --------------------------------------------------------------------------- #
@@ -214,7 +222,7 @@ def test_replan_inside_an_existing_interval_truncates_cleanly() -> None:
         slot(cutoff, datetime(2026, 9, 20, 15, 0, tzinfo=UTC), Action.GRID),
     )
     result = reconcile_daily_plan(
-        existing, future, cutoff=cutoff, day_start=day_start, day_end=day_end
+        existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     assert_invariants(result)
     assert [(s.start.time(), s.action) for s in result.slots] == [
@@ -239,7 +247,7 @@ def test_replan_exactly_on_a_boundary_has_no_duplicates_or_zero_duration() -> No
         slot(cutoff, datetime(2026, 9, 20, 15, 30, tzinfo=UTC), Action.CHARGE),
     )
     result = reconcile_daily_plan(
-        existing, future, cutoff=cutoff, day_start=day_start, day_end=day_end
+        existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     assert_invariants(result)
     # No duplicate 12:00 -> 13:30 interval and no zero-duration interval.
@@ -272,7 +280,7 @@ def test_history_before_the_cutoff_is_never_rewritten() -> None:
              datetime(2026, 9, 20, 17, 0, tzinfo=UTC), Action.CHARGE),
     )
     result = reconcile_daily_plan(
-        existing, future, cutoff=cutoff, day_start=day_start, day_end=day_end
+        existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     # The 00:00 -> 12:00 portion is byte-for-byte preserved.
     assert result.slots[0].action is Action.GRID
@@ -301,7 +309,7 @@ def test_same_action_on_both_sides_of_cutoff_merges() -> None:
         slot(cutoff, datetime(2026, 9, 20, 15, 0, tzinfo=UTC), Action.BATTERY),
     )
     result = reconcile_daily_plan(
-        existing, future, cutoff=cutoff, day_start=day_start, day_end=day_end
+        existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     # The reconciled timeline keeps two touching BATTERY slots...
     assert_invariants(result)
@@ -356,10 +364,10 @@ def test_consecutive_replans_never_accumulate_gaps_or_overlaps() -> None:
                  Action.GRID if minute % 2 else Action.CHARGE),
         )
         daily = reconcile_daily_plan(
-            daily, future, cutoff=cutoff, day_start=day_start, day_end=day_end
+            daily, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
         )
         assert_invariants(daily)
-        assert_within_day(daily, day_start, day_end)
+        assert_within_horizon(daily, day_start, day_end)
 
     # Every point in the day is covered by exactly one interval (no gaps/overlaps).
     covered = 0.0
@@ -397,7 +405,7 @@ def test_daily_plan_survives_serialization_and_restart() -> None:
         slot(cutoff, datetime(2026, 9, 20, 9, 0, tzinfo=UTC), Action.GRID),
     )
     after_restart = reconcile_daily_plan(
-        reloaded, future, cutoff=cutoff, day_start=day_start, day_end=day_end
+        reloaded, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     assert_invariants(after_restart)
     assert after_restart.slots[0].start == datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
@@ -422,7 +430,7 @@ def test_midnight_starts_a_fresh_timeline_and_does_not_merge_yesterday() -> None
     result = reconcile_daily_plan(
         yesterday, future,
         cutoff=datetime(2026, 9, 20, 1, 0, tzinfo=UTC),
-        day_start=today_start, day_end=today_end,
+        day_start=today_start, horizon_end=today_end,
     )
     # Yesterday's plan is NOT merged into today.
     assert result.date == "2026-09-20"
@@ -464,7 +472,7 @@ def test_variable_price_interval_durations_are_preserved() -> None:
         slot(cutoff, datetime(2026, 9, 20, 13, 5, tzinfo=UTC), Action.GRID),  # 1h35m
     )
     result = reconcile_daily_plan(
-        existing, future, cutoff=cutoff, day_start=day_start, day_end=day_end
+        existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     assert_invariants(result)
     assert [(s.start.time(), s.end.time(), s.action) for s in result.slots] == [
@@ -525,3 +533,95 @@ def test_daily_plan_view_always_covers_the_complete_day() -> None:
     assert view["blocks"][0]["start"] == datetime(2026, 9, 20, 0, 0, tzinfo=UTC).isoformat()
     assert view["blocks"][-1]["end"] == datetime(2026, 9, 21, 0, 0, tzinfo=UTC).isoformat()
     assert len(view["blocks"]) == 7
+
+
+# --------------------------------------------------------------------------- #
+# Timezone normalisation + multi-day horizon (regression fixes)
+#
+# The optimizer builds slots in the raw price-feed timezone (spot feeds are
+# usually UTC), while the local-day anchor is the user's offset.  Clipping with
+# mixed offsets left a single interval starting at +00:00 and ending at +02:00,
+# which rendered as confusing, seemingly-overlapping timestamps.  The timeline
+# must also extend through the whole known-price horizon, not only the current
+# local calendar day.
+# --------------------------------------------------------------------------- #
+
+def _plus2() -> timezone:
+    return timezone(timedelta(hours=2))
+
+
+def test_daily_plan_normalises_mixed_timezones_to_one_local_offset() -> None:
+    """A UTC plan slot clipped against a local day must not mix offsets."""
+    local_start = datetime(2026, 9, 20, 0, 0, tzinfo=_plus2())  # 22:00 UTC day before
+    # Optimizer horizon in UTC, crossing into the next local day.
+    horizon_end_utc = local_start + timedelta(hours=30)
+    cutoff = local_start.astimezone(UTC) + timedelta(hours=6)  # 08:00 local
+    future = (
+        slot(
+            cutoff,
+            horizon_end_utc + timedelta(hours=3),
+            Action.BATTERY,
+        ),
+    )
+    result = reconcile_daily_plan(
+        None,
+        future,
+        cutoff=cutoff,
+        day_start=local_start,
+        horizon_end=horizon_end_utc,
+    )
+    assert_invariants(result)
+    for s in result.slots:
+        # No interval may start before the local day or span two offsets.
+        assert s.start.utcoffset() == local_start.utcoffset()
+        assert s.end.utcoffset() == local_start.utcoffset()
+    # The UTC start 04:00Z is 06:00 local on the 20th, not a stray +00:00 stamp.
+    assert result.slots[0].start == datetime(2026, 9, 20, 6, 0, tzinfo=_plus2())
+
+
+def test_multi_day_horizon_includes_following_days_when_prices_are_known() -> None:
+    """Known prices past midnight must be shown, not silently dropped."""
+    local_start = datetime(2026, 9, 20, 0, 0, tzinfo=_plus2())
+    horizon_end = local_start + timedelta(days=2, hours=5)  # two full days known
+    cutoff = local_start + timedelta(hours=8)  # 08:00 local on the 20th
+    # History: the immutable morning of the 20th.
+    existing = DailyPlan(
+        date="2026-09-20",
+        slots=(
+            slot(local_start, cutoff, Action.GRID),
+        ),
+    )
+    # Fresh optimizer future spanning the rest of the 20th, all of the 21st and
+    # into the 22nd -- all within the known horizon.
+    future = (
+        slot(
+            cutoff,
+            horizon_end,
+            Action.BATTERY,
+        ),
+    )
+    result = reconcile_daily_plan(
+        existing,
+        future,
+        cutoff=cutoff,
+        day_start=local_start,
+        horizon_end=horizon_end,
+    )
+    assert_invariants(result)
+    # The past morning is preserved exactly.
+    assert result.slots[0].action is Action.GRID
+    assert result.slots[0].start == local_start
+    assert result.slots[0].end == cutoff
+    # The recomputed future reaches past midnight into the following days.
+    last = result.slots[-1]
+    assert last.end == horizon_end
+    # A single continuous action block is allowed, but it must clearly extend
+    # past the end of the current local day into following days.
+    assert last.start.date() == datetime(2026, 9, 20).date()
+    assert last.end.date() == datetime(2026, 9, 22).date()
+    # Timeline stays contiguous from the local day start to the horizon end.
+    previous = local_start
+    for s in result.slots:
+        assert s.start == previous
+        previous = s.end
+    assert previous == horizon_end
