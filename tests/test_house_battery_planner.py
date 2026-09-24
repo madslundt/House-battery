@@ -317,3 +317,32 @@ def test_savings_without_battery_movement_is_terminal_only() -> None:
     assert plan.realized_savings_dkk == plan.expected_savings_dkk - plan.terminal_value_dkk
     # No battery movement -> no realizable savings, only the notional terminal line.
     assert abs(plan.realized_savings_dkk) < 1e-9
+
+
+def test_no_banking_through_horizon_end_evening_peak() -> None:
+    """Energy held to the horizon edge must not be banked through a spike.
+
+    A cheap afternoon dip followed by an expensive evening peak at the very end
+    of the known-price horizon is the classic place a terminal value that is too
+    high turns the optimizer into a hoarder: it charges into the dip and then
+    holds the battery full through the most expensive slots instead of
+    discharging. The headline ``expected_savings_dkk`` still looks positive (the
+    over-inflated terminal credit), but ``realized_savings_dkk`` is negative - a
+    real loss. The terminal value is a conservative avoided-purchase floor, so
+    the optimizer must drain into the peak, realise a profit, and end well below
+    target rather than banked full.
+    """
+    plan = optimize(
+        slots([2.00] * 8 + [0.90] * 4 + [2.00] * 8 + [3.60] * 4, load_w=100),
+        now=BASE - timedelta(seconds=1),
+        soc=49,
+        settings=settings(),
+    )
+    actions = [slot.action for slot in plan.slots]
+    # The battery moves and drains into the late peak rather than holding it.
+    assert plan.battery_throughput_kwh > 0
+    assert Action.BATTERY in actions
+    # Realised (not headline) savings must be positive: charging to hold was a loss.
+    assert plan.realized_savings_dkk > 0
+    # Ending well below target confirms the energy was spent, not banked full.
+    assert plan.slots[-1].soc_end < 60

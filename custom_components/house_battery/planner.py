@@ -58,20 +58,22 @@ def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
 
 
 def _terminal_price(slots: list[PriceSlot]) -> float:
-    """Value of stored energy at the end of the planning horizon.
+    """Conservative per-kWh value of stored energy at the end of the horizon.
 
-    Uses the average of the *median* and *75th percentile* of ALL slot prices.
-    The old approach used the last 48 slots (12 h) and took p95 + max / 2,
-    which over-valued the terminal state when the tail happens to contain
-    evening peaks (e.g. 2.97 DKK).  A moderate median-based estimate avoids
-    encouraging premature discharge while still crediting stored energy.
+    Stored energy at the horizon edge is valued at the *avoided-purchase
+    floor*: the cheapest known price over the horizon. This has to be
+    conservative. The terminal value credits energy that cannot be spent once
+    the horizon closes, so crediting it at the average market price (p50 + p75) / 2
+    over-values the last unit and makes the DP *bank* energy at the horizon edge:
+    it charges into the afternoon dip and then holds the battery full through the
+    most expensive evening peak instead of discharging (realising a net loss).
+    A floor well below the peak-discharge benefit keeps holding energy from
+    dominating real arbitrage, so the optimizer still drains into spikes while
+    never banking through them.
     """
-    prices = sorted(slot.discharge_price_dkk_per_kwh for slot in slots)
-    n = len(prices)
-    p50 = prices[n // 2]
-    p75_idx = min(int(n * 0.75), n - 1)
-    p75 = prices[p75_idx]
-    return (p50 + p75) / 2
+    if not slots:
+        return 0.0
+    return min(slot.discharge_price_dkk_per_kwh for slot in slots)
 
 
 def _allowed_actions(
