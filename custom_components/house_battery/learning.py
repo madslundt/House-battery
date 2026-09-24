@@ -13,6 +13,39 @@ BUCKETS_PER_DAY = 96
 MIN_HISTORY_WEIGHT_COUNT = 4
 FULL_HISTORY_WEIGHT_COUNT = 12
 
+# Horizon-dependent load blending.  The weight given to the historical
+# weekday/time-of-day profile grows with how far ahead the prediction reaches:
+# the very near future tracks recent usage, the medium horizon blends, and the
+# longer horizon increasingly trusts the historical profile.  A fixed blend for
+# every future interval would over-trust noisy recent usage far out and
+# under-trust the profile that is the only signal we have past recent memory.
+NEAR_HORIZON_HOURS = 2.0
+LONG_HORIZON_HOURS = 12.0
+# Bounding history weights (fraction of the prediction drawn from history).
+NEAR_HISTORY_WEIGHT = 0.10
+LONG_HISTORY_WEIGHT = 0.70
+
+
+def _distance_history_weight(hours_ahead: float) -> float:
+    """Return the history weight for a prediction ``hours_ahead`` into the future.
+
+    Ramps linearly from ``NEAR_HISTORY_WEIGHT`` (recent usage dominates) to
+    ``LONG_HISTORY_WEIGHT`` (historical profile dominates) between
+    ``NEAR_HORIZON_HOURS`` and ``LONG_HORIZON_HOURS``, and is flat outside that
+    band.  A prediction exactly now (``hours_ahead == 0``) always weights recent
+    usage heavily.
+    """
+    if hours_ahead <= NEAR_HORIZON_HOURS:
+        return NEAR_HISTORY_WEIGHT
+    if hours_ahead >= LONG_HORIZON_HOURS:
+        return LONG_HISTORY_WEIGHT
+    fraction = (
+        hours_ahead - NEAR_HORIZON_HOURS
+    ) / (LONG_HORIZON_HOURS - NEAR_HORIZON_HOURS)
+    return NEAR_HISTORY_WEIGHT + (
+        LONG_HISTORY_WEIGHT - NEAR_HISTORY_WEIGHT
+    ) * fraction
+
 
 @dataclass(slots=True)
 class LoadBucket:
@@ -65,7 +98,24 @@ class LoadLearner:
         local = when.astimezone(self.time_zone)
         return f"{local.weekday()}:{local.hour * 4 + local.minute // 15}"
 
-    def predict_w(self, when: datetime, fallback_w: float = 0.0) -> float:
+    def predict_w(
+        self, when: datetime, fallback_w: float = 0.0, now: datetime | None = None
+    ) -> float:
+        """Predict load watts at ``when``.
+
+        ``now`` is optional: when supplied the blend between recent and
+        historical usage depends on how far ``when`` lies ahead of ``now`` (see
+        :func:`_distance_history_weight`), so nearer intervals trust recent
+        usage and farther intervals trust the historical profile.  When
+        ``now`` is omitted the distance is treated as zero, which is what the
+        online :meth:`observe` path wants: a live observation is "now", so it
+        never borrows history weight from a distant prediction.
+        """
+        if when.tzinfo is None:
+            raise ValueError("Load-learning timestamps must be timezone-aware")
+        hours_ahead = 0.0
+        if now is not None:
+            hours_ahead = max(0.0, (when - now).total_seconds() / 3600)
         bucket = self.buckets.get(self.key(when))
         recent = (
             sum(self.recent_w) / len(self.recent_w)
@@ -73,13 +123,20 @@ class LoadLearner:
             else max(0.0, fallback_w)
         )
         if bucket is None or bucket.count < MIN_HISTORY_WEIGHT_COUNT:
+            # Not enough history yet: track recent usage (or the fallback).
             return recent
-        history_weight = min(
-            0.30,
-            0.30
-            * (bucket.count - MIN_HISTORY_WEIGHT_COUNT + 1)
+        # Scale the distance-based history weight by how much evidence backs the
+        # bucket, so a sparse bucket still leans on recent usage far out while a
+        # well-sampled bucket lets the historical profile dominate.
+        evidence_factor = min(
+            1.0,
+            (bucket.count - MIN_HISTORY_WEIGHT_COUNT + 1)
             / (FULL_HISTORY_WEIGHT_COUNT - MIN_HISTORY_WEIGHT_COUNT + 1),
         )
+        distance_weight = _distance_history_weight(hours_ahead)
+        history_weight = NEAR_HISTORY_WEIGHT + (
+            distance_weight - NEAR_HISTORY_WEIGHT
+        ) * evidence_factor
         return recent * (1 - history_weight) + bucket.mean_w * history_weight
 
     def observe(self, when: datetime, watts: float) -> None:

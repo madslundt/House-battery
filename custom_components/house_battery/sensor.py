@@ -325,9 +325,10 @@ def daily_plan_blocks(data: dict[str, Any]) -> list[dict[str, Any]]:
     plan = data.get("daily_plan")
     if not isinstance(plan, dict):
         return []
-    # ``actual_soc`` is already attached to the first block by
-    # ``DailyPlan.view_dict``; the daily plan itself only ever appends the
-    # observed curve, never rewrites the published pre-replan history.
+    # The observed SOC is surfaced at the top level of ``view_dict`` as
+    # ``actual_soc``/``actual_soc_at`` (never bound to the first block, which
+    # starts at 00:00); the daily plan itself only ever appends the observed
+    # curve, never rewrites the published pre-replan history.
     return list(plan.get("blocks", []))
 
 

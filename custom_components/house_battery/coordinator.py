@@ -404,7 +404,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             if slot.end <= now:
                 continue
             load_w = self.runtime.load_learner.predict_w(
-                slot.start, self._load_power(0) or 0
+                slot.start, self._load_power(0) or 0, now=now
             )
             scheduled_wh = self._scheduled_load_wh(slot.start, slot.end)
             # Known prices go to the optimizer with their full value.
@@ -830,6 +830,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             # dashboard never loses the current day's plan.
             "daily_plan": self.runtime.daily_plan.view_dict(
                 actual_soc=soc,
+                actual_soc_at=local_now.isoformat(),
                 terminal_price_dkk_per_kwh=(
                     self.plan.terminal_price_dkk_per_kwh if self.plan else None
                 ),

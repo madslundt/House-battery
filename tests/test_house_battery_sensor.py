@@ -19,6 +19,8 @@ def _fake_daily_plan() -> dict[str, Any]:
         "date": "2026-09-20",
         "created_at": None,
         "actual_soc": 100.0,
+        "actual_soc_at": day.isoformat(),
+        "history_available_from": day.isoformat(),
         "blocks": [
             {
                 "start": (day).isoformat(),
@@ -31,7 +33,6 @@ def _fake_daily_plan() -> dict[str, Any]:
                 "energy_kwh": 0.0,
                 "expected_load_kwh": 0.6,
                 "expected_grid_import_kwh": 0.6,
-                "actual_soc": 100.0,
                 "reason": "low price",
             },
             {
@@ -45,7 +46,6 @@ def _fake_daily_plan() -> dict[str, Any]:
                 "energy_kwh": 0.0,
                 "expected_load_kwh": 0.6,
                 "expected_grid_import_kwh": 0.6,
-                "actual_soc": 100.0,
                 "reason": "low price",
             },
         ],
@@ -66,8 +66,12 @@ def test_daily_plan_blocks_covers_the_complete_local_day() -> None:
     assert (
         blocks[-1]["end"] == datetime(2026, 9, 21, tzinfo=timezone.utc).isoformat()
     )
-    # Observed SOC is surfaced on the first block (requirement #9).
-    assert blocks[0]["actual_soc"] == 100.0
+    # Observed SOC is surfaced at the top level (requirement #9), not bound to
+    # the midnight block, so its timestamp is reported explicitly.
+    assert data["daily_plan"]["actual_soc"] == 100.0
+    assert data["daily_plan"]["actual_soc_at"] == datetime(
+        2026, 9, 20, tzinfo=timezone.utc
+    ).isoformat()
 
 
 def test_daily_plan_blocks_is_empty_without_a_daily_plan() -> None:

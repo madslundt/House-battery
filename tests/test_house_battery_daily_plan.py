@@ -319,8 +319,13 @@ def test_same_action_on_both_sides_of_cutoff_merges() -> None:
     assert blocks[0].action is Action.BATTERY
     assert blocks[0].start == datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
     assert blocks[0].end == datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
-    # Economic detail is summed across the merged underlying slots.
-    assert blocks[0].interval_cost_dkk == pytest.approx(2.0)
+    # Economic detail is summed across the merged underlying slots.  The
+    # truncated history head is prorated to its 1.5h/2h = 0.75 fraction
+    # (1.0 * 0.75) and the full 1.5h future head adds 1.0, so 1.75 total.
+    assert blocks[0].interval_cost_dkk == pytest.approx(1.75)
+    # The proration scaled every extensive quantity by the same fraction.
+    assert result.slots[0].expected_load_wh == pytest.approx(75.0)
+    assert result.slots[0].interval_cost_dkk == pytest.approx(0.75)
 
 
 def test_merge_keeps_separate_when_actions_differ() -> None:
@@ -490,6 +495,15 @@ def test_variable_price_interval_durations_are_preserved() -> None:
 # --------------------------------------------------------------------------- #
 
 def test_daily_plan_view_exposes_planned_and_actual_soc() -> None:
+    """The observed SOC is surfaced as a top-level field with its timestamp,
+    not attached to the first (00:00) block.
+
+    Attaching the *current* SOC to the midnight block would misreport when the
+    reading was taken, so the real observation is exposed explicitly as
+    ``actual_soc``/``actual_soc_at`` while the published per-block projected SOC
+    is left untouched.  On a cold start the earliest slot marks where history
+    begins; everything before it is "unavailable history".
+    """
     daily = DailyPlan(
         date="2026-09-20",
         slots=(
@@ -498,12 +512,23 @@ def test_daily_plan_view_exposes_planned_and_actual_soc() -> None:
                  soc_start=89.0, soc_end=85.0),
         ),
     )
-    view = daily.view_dict(actual_soc=100.0, terminal_price_dkk_per_kwh=3.21)
+    view = daily.view_dict(
+        actual_soc=100.0,
+        actual_soc_at="2026-09-20T13:05:00+02:00",
+        terminal_price_dkk_per_kwh=3.21,
+    )
     assert view["actual_soc"] == 100.0
-    assert view["blocks"][0]["actual_soc"] == 100.0
+    assert view["actual_soc_at"] == "2026-09-20T13:05:00+02:00"
+    # The observed SOC is NOT bound to the midnight block anymore.
+    assert "actual_soc" not in view["blocks"][0]
     # The published pre-replan projected SOC is left intact (deviation is visible).
     assert view["blocks"][0]["soc_start"] == 89.0
+    assert view["blocks"][0]["soc_end"] == 85.0
     assert view["terminal_price_dkk_per_kwh"] == 3.21
+    # Cold start: the earliest published slot marks where history begins.
+    assert view["history_available_from"] == datetime(
+        2026, 9, 20, 12, 0, tzinfo=UTC
+    ).isoformat()
 
 
 def test_daily_plan_view_always_covers_the_complete_day() -> None:
@@ -533,6 +558,10 @@ def test_daily_plan_view_always_covers_the_complete_day() -> None:
     assert view["blocks"][0]["start"] == datetime(2026, 9, 20, 0, 0, tzinfo=UTC).isoformat()
     assert view["blocks"][-1]["end"] == datetime(2026, 9, 21, 0, 0, tzinfo=UTC).isoformat()
     assert len(view["blocks"]) == 7
+    # A full-day plan reports history as available from local midnight.
+    assert view["history_available_from"] == datetime(
+        2026, 9, 20, 0, 0, tzinfo=UTC
+    ).isoformat()
 
 
 # --------------------------------------------------------------------------- #

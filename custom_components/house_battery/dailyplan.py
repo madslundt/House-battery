@@ -69,6 +69,53 @@ def _to_zone(value: datetime, tz: timezone) -> datetime:
     return value.astimezone(tz)
 
 
+def _prorate_head(
+    slot: PlannedSlot,
+    cutoff: datetime,
+    day_start: datetime,
+    horizon_end: datetime,
+    tz: timezone,
+) -> PlannedSlot | None:
+    """Truncate a straddling interval to ``[slot.start, cutoff)`` with proration.
+
+    A replan cuts an already-published interval in two.  The retained head must
+    stay economically and physically consistent with its *shortened* duration,
+    so every extensive quantity is scaled by the fraction of the interval that
+    survives (``fraction = retained / total``) and the end SOC is interpolated
+    linearly between the original SOC endpoints instead of kept at its
+    end-of-interval value.  The result is bounded to ``[day_start, horizon_end]``
+    and normalised to the local offset.
+
+    ``fraction`` is exactly ``1.0`` for an interval kept whole, so this helper
+    is also safe to reuse for window clipping without altering whole intervals.
+    """
+    end = _to_zone(min(cutoff, horizon_end), tz)
+    start = _to_zone(max(slot.start, day_start), tz)
+    if start >= end:
+        return None
+    total = (slot.end - slot.start).total_seconds()
+    retained = (end - start).total_seconds()
+    fraction = retained / total if total > 0 else 0.0
+    if fraction <= 0:
+        return None
+    # SOC changes roughly linearly with energy under a constant-power interval,
+    # so a shortened interval ends partway between the original SOC endpoints.
+    soc_end = slot.soc_start + (slot.soc_end - slot.soc_start) * fraction
+    return replace(
+        slot,
+        start=start,
+        end=end,
+        expected_load_wh=slot.expected_load_wh * fraction,
+        grid_import_wh=slot.grid_import_wh * fraction,
+        battery_charge_wh=slot.battery_charge_wh * fraction,
+        battery_discharge_wh=slot.battery_discharge_wh * fraction,
+        interval_cost_dkk=slot.interval_cost_dkk * fraction,
+        baseline_cost_dkk=slot.baseline_cost_dkk * fraction,
+        soc_start=slot.soc_start,
+        soc_end=soc_end,
+    )
+
+
 def _history_before(
     slots: tuple[PlannedSlot, ...],
     cutoff: datetime,
@@ -80,9 +127,11 @@ def _history_before(
 
     Intervals ending at or before ``cutoff`` are kept whole.  Intervals starting
     at or after ``cutoff`` are dropped (they belong to the mutable future).  An
-    interval that spans ``cutoff`` is truncated to ``[start, cutoff)`` so the
-    timeline never overlaps or duplicates across the replan point.  Everything
-    is bounded to ``[day_start, horizon_end]`` and normalised to a local offset.
+    interval that spans ``cutoff`` is truncated to ``[start, cutoff)`` and every
+    extensive quantity is prorated to the shortened head so the immutable past
+    stays consistent with its reduced duration.  The timeline never overlaps or
+    duplicates across the replan point, everything is bounded to
+    ``[day_start, horizon_end]`` and normalised to a local offset.
     """
     kept: list[PlannedSlot] = []
     for slot in slots:
@@ -93,9 +142,7 @@ def _history_before(
         elif slot.start >= cutoff:
             continue
         else:
-            clipped = _clip_to_window(
-                replace(slot, end=cutoff), day_start, horizon_end, tz
-            )
+            clipped = _prorate_head(slot, cutoff, day_start, horizon_end, tz)
             if clipped is not None:
                 kept.append(clipped)
     return kept
@@ -185,13 +232,17 @@ def reconcile_daily_plan(
 
 
 def merge_adjacent_blocks(slots: tuple[PlannedSlot, ...]) -> list[PlannedSlot]:
-    """Merge contiguous slots that share the same effective action.
+    """Merge contiguous slots that share the same effective operating state.
 
-    Two intervals are merged only when they touch (``a.end == b.start``) and
-    carry the same action; differing power/price within an action still merges
-    because the *effective operating decision* is identical, which is what the
-    dashboard renders as a single block.  Economic detail is summed so the
-    merged block stays faithful to the underlying per-slot plan.
+    Two intervals are merged only when they touch (``a.end == b.start``) **and**
+    carry the same action, price and reason.  Merging merely on the action is
+    dropped on purpose: a merged block exposes a single ``price`` and ``reason``
+    metadata field, so combining, say, a low-price charge with a high-price
+    charge (or two charge windows with justifications that disagree) would
+    falsely imply the whole merged block ran at one price for one reason.  Power,
+    expected load and energy are intensive to the operating state and are summed
+    as a faithful aggregate over the merged span; the merged SOC ``start``/``end``
+    are the endpoints of a contiguous SOC curve and stay correct.
     """
     ordered = sorted((slot for slot in slots if slot.start < slot.end), key=lambda s: s.start)
     blocks: list[PlannedSlot] = []
@@ -200,6 +251,8 @@ def merge_adjacent_blocks(slots: tuple[PlannedSlot, ...]) -> list[PlannedSlot]:
             blocks
             and slot.start == blocks[-1].end
             and blocks[-1].action is slot.action
+            and abs(blocks[-1].price - slot.price) <= 1e-9
+            and blocks[-1].reason == slot.reason
         ):
             previous = blocks[-1]
             blocks[-1] = PlannedSlot(
@@ -250,14 +303,22 @@ class DailyPlan:
         self,
         *,
         actual_soc: float | None = None,
+        actual_soc_at: str | None = None,
         terminal_price_dkk_per_kwh: float | None = None,
     ) -> dict[str, Any]:
         """Return the dashboard-ready representation of the daily timeline.
 
-        The blocks merge adjacent identical actions so the timeline reads as a
-        sequence of operating periods rather than raw price intervals, and the
-        observed SOC is surfaced alongside the planned curve so plan deviation
-        is visible.
+        The blocks merge adjacent compatible actions so the timeline reads as a
+        sequence of operating periods rather than raw price intervals.  The
+        observed SOC and the moment it was taken are surfaced as first-class,
+        top-level fields rather than attached to the first block: the first
+        published block starts at local 00:00 (or at ``history_available_from``
+        for a mid-day cold start), so binding a *current* observation to that
+        midnight block would misreport when the reading was taken.  The future
+        SOC curve already begins at the re-anchored observed SOC, so the
+        ``actual_soc``/``actual_soc_at`` pair lets the dashboard overlay the real
+        reading against the planned curve without ever altering the published
+        block data.
         """
         merged = merge_adjacent_blocks(self.slots)
         totals = _slot_totals(self.slots)
@@ -281,17 +342,20 @@ class DailyPlan:
             }
             for slot in merged
         ]
-        # Surface the observed SOC on the first block so the dashboard can
-        # overlay the real curve against the planned curve (requirement #9)
-        # without ever altering the published block data.
-        if blocks and actual_soc is not None:
-            blocks[0]["actual_soc"] = float(actual_soc)
+        # The earliest published slot marks where history actually begins: the
+        # local midnight today once history is persisted, or the replan cutoff on
+        # a mid-day cold start (everything before it is "unavailable history").
+        history_available_from = (
+            self.slots[0].start.isoformat() if self.slots else None
+        )
         return {
             "date": self.date,
             "created_at": (
                 self.created_at.isoformat() if self.created_at is not None else None
             ),
             "actual_soc": float(actual_soc) if actual_soc is not None else None,
+            "actual_soc_at": actual_soc_at,
+            "history_available_from": history_available_from,
             "blocks": blocks,
             "horizon_slots": len(self.slots),
             "terminal_price_dkk_per_kwh": (
