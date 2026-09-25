@@ -11,7 +11,7 @@ import json
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 DEFAULT_PORT = 8080
 REG_MIN_SOC = "3023"
@@ -33,8 +33,11 @@ CONTROL_REGISTERS = (
     REG_CUSTOM_MODE,
 )
 _READ_TIMEOUT_SECONDS = 10
+_READ_RETRY_DELAYS_SECONDS = (0.25, 0.75)
+_MAX_CONFIRMED_WRITE_ATTEMPTS = 2
 _MAX_FRAME_BYTES = 256 * 1024
 _MODE_VERIFY_DELAY_SECONDS = 0.5
+_GRID_IDLE_ACTIVE_POWER_W = 5.0
 _SOC_ZERO_WARMUP_SECONDS = 60
 _MAX_SOC_CHANGE_PER_MINUTE = 10.0
 _ACTIVE_POWER_W = 50.0
@@ -102,12 +105,41 @@ class FbpLocalSnapshot:
             "backup_load_power_w": _number(summary, "TotalBackUpPower"),
             "off_grid_load_power_per_unit_w": _off_grid_per_unit(self.raw),
             "off_grid_load_power_total_w": _off_grid_total(self.raw),
+            "off_grid_load_validation_error": self.off_grid_load_validation_error,
         }
 
     @property
     def off_grid_load_total_w(self) -> float | None:
-        """Complete per-storage off-grid total, or None when a unit is missing."""
+        """Complete per-storage load, cross-checked against the system total."""
+        if self.off_grid_load_validation_error is not None:
+            return None
         return _off_grid_total(self.raw)
+
+    @property
+    def off_grid_load_validation_error(self) -> str | None:
+        """Reject contradictory readings for the same off-grid power scope.
+
+        AECC defines ``TotalBackUpPower`` as the device's total off-grid power
+        and ``OffGridLoadPower`` as the per-storage off-grid load, both in W.
+        When every storage unit reports its value, their sum must agree with the
+        system summary within rounding tolerance. A mismatch makes the load
+        unsafe for planning, so the caller receives ``None`` until telemetry is
+        internally consistent.
+        """
+        per_storage_total = _off_grid_total(self.raw)
+        system_total = _number(
+            _first_mapping(self.raw.get("SSumInfoList")), "TotalBackUpPower"
+        )
+        if per_storage_total is None or system_total is None:
+            return None
+        tolerance_w = max(5.0, max(abs(per_storage_total), abs(system_total)) * 0.05)
+        if abs(per_storage_total - system_total) > tolerance_w:
+            return (
+                "per-storage off-grid total "
+                f"({per_storage_total:g} W) disagrees with device total backup "
+                f"power ({system_total:g} W)"
+            )
+        return None
 
 
 class FbpTelemetryValidator:
@@ -177,30 +209,43 @@ class FbpLocalTcpClient:
         self._reader = self._writer = None
 
     async def async_snapshot(self) -> FbpLocalSnapshot:
-        """Read telemetry, retrying one failed read on a fresh TCP socket.
+        """Read telemetry, retrying transient failures on fresh TCP sockets.
 
-        Some PS240 firmware closes an idle or recently displaced local session
-        before accepting the first request. Retrying this read-only operation
-        is safe; mutating control operations intentionally remain single-shot.
+        Some compatible firmware closes an idle or displaced local session.
+        Retrying this read-only operation is safe. Mutating control writes are
+        retried only if read-back proves that the first absolute update did not
+        apply; an ambiguous result is never blindly replayed.
         """
-        for attempt in range(2):
-            try:
-                response = await self._request({"Get": "EnergyParameter"})
-                return decode_energy_parameter(response)
-            except LocalProtocolError:
-                await self.async_close()
-                if attempt:
-                    raise
-        raise AssertionError("unreachable")
+        return await self._async_read_with_retry(
+            {"Get": "EnergyParameter"}, decode_energy_parameter
+        )
 
     async def async_read_controls(self) -> dict[str, str]:
-        response = await self._request(
+        """Read control state, reconnecting and retrying transient failures."""
+        return await self._async_read_with_retry(
             {
                 "Get": "Energycontrolparameters",
                 "RegControlAddr": [int(register) for register in CONTROL_REGISTERS],
-            }
+            },
+            decode_controls,
         )
-        return decode_controls(response)
+
+    async def _async_read_with_retry(
+        self,
+        command: dict[str, Any],
+        decoder: Callable[[dict[str, Any]], Any],
+    ) -> Any:
+        """Retry idempotent reads three times, reconnecting between attempts."""
+        attempts = len(_READ_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(attempts):
+            try:
+                return decoder(await self._request(command))
+            except LocalProtocolError:
+                await self.async_close()
+                if attempt + 1 == attempts:
+                    raise
+                await asyncio.sleep(_READ_RETRY_DELAYS_SECONDS[attempt])
+        raise AssertionError("unreachable")
 
     async def async_set_limits(self, minimum_soc: int, maximum_soc: int) -> None:
         if not 0 <= minimum_soc <= maximum_soc <= 100:
@@ -212,11 +257,14 @@ class FbpLocalTcpClient:
     async def async_set_mode(
         self, mode: str, power_w: int, *, min_soc: int, max_soc: int
     ) -> None:
-        """Write the proven custom-slot controls; never retry a mutating call."""
+        """Write the custom-slot controls, retrying only a verified non-apply."""
         if mode not in {"Charge", "Idle", "Discharge"} or not 0 <= power_w <= 1200:
             raise LocalProtocolError("unsupported local battery command")
         if mode == "Idle":
-            slot = f"0,00:00,00:00,0,0,0,0,0,0,{max_soc},{min_soc}"
+            # Keep the all-day slot enabled at an explicit 0 W. Disabling the
+            # slot only changed the reported mode on this FBP1200; a preceding
+            # fixed-power charge kept running until another active mode arrived.
+            slot = f"1,00:00,23:59,0,0,6,5,0,0,{max_soc},{min_soc}"
         else:
             signed_power = -power_w if mode == "Charge" else power_w
             slot = f"1,00:00,23:59,{signed_power},0,6,5,0,0,{max_soc},{min_soc}"
@@ -236,8 +284,8 @@ class FbpLocalTcpClient:
         """Return to the device's local self-consumption / zero-export mode.
 
         This is the small, allowlisted AI restore sequence used by compatible
-        compatible devices. It intentionally does not retry: an ambiguous write is
-        always safer than issuing the same battery command again.
+        compatible devices. The common write path retries only after a successful
+        read-back proves the first absolute register update did not apply.
         """
         await self._write_and_verify(
             {
@@ -253,6 +301,73 @@ class FbpLocalTcpClient:
             },
             label="self-consumption mode",
         )
+
+    async def async_set_grid_idle(self, minimum_soc: int, maximum_soc: int) -> None:
+        """Stop active battery power, then leave the device in grid/Idle mode.
+
+        On this FBP1200, disabling a custom slot can leave an already-running
+        fixed-power charge active even though the registers report Idle. When
+        physical telemetry shows charge/discharge still flowing, temporarily
+        set the native minimum SOC to 100%, enter Self-Gen/Zero Export to cancel
+        that flow, then write an active 0 W custom slot before restoring the
+        requested SOC limits. If already physically idle, use the shorter path.
+        """
+        if not 0 <= minimum_soc <= maximum_soc <= 100:
+            raise LocalProtocolError("invalid requested SOC limits")
+        controls = await self.async_read_controls()
+        try:
+            snapshot = await self.async_snapshot()
+        except LocalProtocolError:
+            snapshot = None
+
+        observed_mode = operating_mode_from_controls(controls)
+        active = snapshot is None or max(
+            snapshot.charge_power_w, snapshot.discharge_power_w
+        ) > _GRID_IDLE_ACTIVE_POWER_W
+
+        if observed_mode == "Idle" and not active:
+            idle_slot = (
+                f"1,00:00,23:59,0,0,6,5,0,0,{maximum_soc},{minimum_soc}"
+            )
+            expected = {
+                REG_EMS_ENABLE: "1",
+                REG_CONTROL_TIME_1: idle_slot,
+                REG_SCHEDULE_MODE: "6",
+                REG_AI_SMART_CHARGE: "0",
+                REG_AI_SMART_DISCHARGE: "0",
+                REG_MIN_SOC: str(minimum_soc),
+                REG_MAX_SOC: str(maximum_soc),
+                REG_CUSTOM_MODE: "1",
+            }
+            if _controls_match(expected, controls):
+                return
+            await self.async_set_limits(minimum_soc, maximum_soc)
+            await self.async_set_mode(
+                "Idle", 0, min_soc=minimum_soc, max_soc=maximum_soc
+            )
+            return
+
+        await self.async_set_limits(100, 100)
+        await self.async_set_self_consumption()
+        for attempt in range(5):
+            snapshot = await self.async_snapshot()
+            if max(snapshot.charge_power_w, snapshot.discharge_power_w) <= (
+                _GRID_IDLE_ACTIVE_POWER_W
+            ):
+                break
+            if attempt == 4:
+                raise LocalProtocolError(
+                    "battery power did not stop under the 100% SOC floor; "
+                    "left Self-Gen/Zero Export active"
+                )
+            await asyncio.sleep(2)
+        # Leave Self-Gen while its 100% native floor is still active. The custom
+        # zero-power slot can already carry the requested bounds; restoring the
+        # native limits afterwards does not enable battery output in Idle.
+        await self.async_set_mode(
+            "Idle", 0, min_soc=minimum_soc, max_soc=maximum_soc
+        )
+        await self.async_set_limits(minimum_soc, maximum_soc)
 
     async def _request(self, command: dict[str, Any]) -> dict[str, Any]:
         async with self._lock:
@@ -308,16 +423,49 @@ class FbpLocalTcpClient:
         raise LocalProtocolError("oversized TCP response")
 
     async def _write_and_verify(self, values: dict[str, str], *, label: str = "SOC") -> None:
-        await self._request(
-            {"Set": "Energycontrolparameters", "SetControlInfo": values}
-        )
-        await asyncio.sleep(_MODE_VERIFY_DELAY_SECONDS)
-        observed = await self.async_read_controls()
-        if any(
-            not _control_value_matches(key, value, observed.get(key))
-            for key, value in values.items()
-        ):
+        """Write absolute registers; retry only when read-back proves no apply.
+
+        A timeout after sending a SET is ambiguous. Read the device state on a
+        fresh connection first: a matching state means the write landed, while
+        a complete mismatching read proves it did not. Only the latter allows
+        one retry. If read-back itself is unavailable, return the original
+        failure without replaying the command.
+        """
+        request = {"Set": "Energycontrolparameters", "SetControlInfo": values}
+        last_mismatch = False
+        for attempt in range(_MAX_CONFIRMED_WRITE_ATTEMPTS):
+            try:
+                await self._request(request)
+            except LocalProtocolError as write_error:
+                try:
+                    observed = await self.async_read_controls()
+                except LocalProtocolError:
+                    raise write_error
+                if _controls_match(values, observed):
+                    return
+                if attempt + 1 == _MAX_CONFIRMED_WRITE_ATTEMPTS:
+                    raise write_error
+                await asyncio.sleep(_READ_RETRY_DELAYS_SECONDS[attempt])
+                continue
+
+            await asyncio.sleep(_MODE_VERIFY_DELAY_SECONDS)
+            observed = await self.async_read_controls()
+            if _controls_match(values, observed):
+                return
+            last_mismatch = True
+            if attempt + 1 < _MAX_CONFIRMED_WRITE_ATTEMPTS:
+                await asyncio.sleep(_READ_RETRY_DELAYS_SECONDS[attempt])
+
+        if last_mismatch:
             raise LocalProtocolError(f"native {label} control read-back mismatch")
+        raise LocalProtocolError(f"native {label} write was not confirmed")
+
+
+def _controls_match(values: dict[str, str], observed: dict[str, str]) -> bool:
+    return all(
+        _control_value_matches(key, value, observed.get(key))
+        for key, value in values.items()
+    )
 
 
 def decode_energy_parameter(response: dict[str, Any]) -> FbpLocalSnapshot:

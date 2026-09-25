@@ -784,6 +784,8 @@ class FbpLocalLoadDiagnosticsSensor(Fbp1200Entity, SensorEntity):
     @property
     def native_value(self) -> str:
         diagnostics = self.coordinator.data.get("local_load_diagnostics")
+        if diagnostics and diagnostics.get("off_grid_load_validation_error"):
+            return "inconsistent"
         return (
             "ready"
             if diagnostics
@@ -804,7 +806,8 @@ class FbpLocalLoadDiagnosticsSensor(Fbp1200Entity, SensorEntity):
             **(self.coordinator.data.get("local_load_diagnostics") or {}),
             "selection_status": (
                 "Uses the complete per-storage off-grid total as the battery-served "
-                "load; incomplete local frames fail closed."
+                "load only when it agrees with the device total backup power; "
+                "incomplete or contradictory frames fail closed."
             ),
             "field_meanings": {
                 "meter_total_active_power_w": "Whole-site meter total; never a battery-load candidate.",
@@ -812,6 +815,7 @@ class FbpLocalLoadDiagnosticsSensor(Fbp1200Entity, SensorEntity):
                 "backup_load_power_w": "FOSSiBOT backup/off-grid output total.",
                 "off_grid_load_power_per_unit_w": "Per-storage off-grid readings in Storage_list order; null means that unit did not report it.",
                 "off_grid_load_power_total_w": "Sum of every per-storage reading, available only when every unit reported one.",
+                "off_grid_load_validation_error": "Contradiction between the per-storage sum and device backup total; a value here blocks planning from using the load.",
             },
         }
 

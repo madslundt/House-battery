@@ -47,8 +47,7 @@ def test_runtime_persists_the_daily_plan_across_a_restart() -> None:
     assert runtime.as_dict()["daily_plan"]["date"] == "2026-09-20"
 
 
-def test_collapses_legacy_rapid_transition_burst() -> None:
-    """Repeated pre-fix commands must not keep direct control locked out."""
+def test_recent_action_changes_remain_diagnostics_only() -> None:
     first = datetime(2026, 9, 21, 16, tzinfo=UTC)
     runtime = RuntimeState(
         transitions=[
@@ -57,10 +56,8 @@ def test_collapses_legacy_rapid_transition_burst() -> None:
         ]
     )
 
-    assert runtime.collapse_rapid_transition_burst(
-        first + timedelta(minutes=5), maximum_transitions=4
-    )
-    assert runtime.transitions == [first.isoformat()]
+    assert runtime.transitions_used(first + timedelta(minutes=5)) == 4
+    assert len(runtime.transitions) == 4
 
 
 def test_schema_v2_payload_is_round_tripped_untouched() -> None:

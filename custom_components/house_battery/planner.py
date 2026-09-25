@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from math import ceil, sqrt
 
 from .models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
@@ -14,8 +14,6 @@ from .models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 class _State:
     energy_step: int
     action: Action
-    locked_minutes: int
-    planned_transitions: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,29 +74,8 @@ def _terminal_price(slots: list[PriceSlot]) -> float:
     return min(slot.discharge_price_dkk_per_kwh for slot in slots)
 
 
-def _allowed_actions(
-    state: _State,
-    settings: PlannerSettings,
-    *,
-    active_transitions: int,
-    force_grid_exit: bool = False,
-) -> tuple[Action, ...]:
-    """Return executable actions, letting physical discharge protection override locks.
-
-    A direct battery's self-consumption mode can physically discharge whenever
-    it remains selected above the native reserve.  The local mode must change
-    to Idle/grid when the economic discharge floor is no longer met, even when
-    that necessary protective exit exceeds the normal anti-chatter budget.
-    """
-    if force_grid_exit:
-        return (Action.GRID,)
-    if state.locked_minutes > 0:
-        return (state.action,)
-    if active_transitions >= settings.maximum_transitions:
-        # This is a normal operational limit.  A required Grid exit from an
-        # uneconomic battery mode is handled above so the inverter cannot keep
-        # drawing stored energy just because the budget was exhausted.
-        return (state.action,)
+def _allowed_actions() -> tuple[Action, ...]:
+    """All physical actions are candidates at every price interval."""
     return (Action.GRID, Action.BATTERY, Action.CHARGE)
 
 
@@ -109,27 +86,12 @@ def _slot_transition(
     settings: PlannerSettings,
     minimum_step: int,
     maximum_step: int,
-    discharge_price_floor: float,
-    active_transitions: int,
 ) -> tuple[_State, tuple[float, float, float, float, float, str], float] | None:
     energy_wh = state.energy_step * settings.energy_step_wh
     load_wh = max(0.0, slot.expected_load_wh)
     charge_efficiency = sqrt(settings.round_trip_efficiency)
     discharge_efficiency = charge_efficiency
     changed = action != state.action
-    is_locked_continuation = not changed and state.locked_minutes > 0
-    is_transition_limited_continuation = (
-        not changed and active_transitions >= settings.maximum_transitions
-    )
-    permits_energy_neutral_continuation = (
-        is_locked_continuation or is_transition_limited_continuation
-    )
-    elapsed_minutes = max(1, round(slot.hours * 60))
-    locked = (
-        max(0, settings.minimum_mode_minutes - elapsed_minutes)
-        if changed
-        else max(0, state.locked_minutes - elapsed_minutes)
-    )
     switch_cost = settings.switching_penalty_dkk if changed else 0.0
 
     grid_wh = load_wh
@@ -139,25 +101,19 @@ def _slot_transition(
 
     if action is Action.CHARGE:
         headroom_wh = max(0.0, maximum_step * settings.energy_step_wh - energy_wh)
+        load_power_w = load_wh / slot.hours if slot.hours > 0 else 0.0
+        available_charge_input_w = max(0.0, settings.charge_power_w - load_power_w)
         input_wh = min(
-            settings.charge_power_w * slot.hours, headroom_wh / charge_efficiency
+            available_charge_input_w * slot.hours,
+            headroom_wh / charge_efficiency,
         )
-        if input_wh <= settings.energy_step_wh / 4:
-            if not permits_energy_neutral_continuation:
-                return None
-            reason = (
-                "Energy-neutral continuation at the charge target while mode "
-                "changes are constrained"
-            )
-        else:
+        if input_wh > settings.energy_step_wh / 4:
             # Never charge on a forecast price that is above the discharge
             # floor.  Forecasts are uncertain hints — charging on a forecast
             # that turns out wrong (price is higher than expected) wastes
             # round-trip efficiency.  Only charge on forecasts when the
             # conservative charge price is clearly below the floor.
             is_forecast = slot.source == "forecast"
-            if is_forecast and slot.charge_price_dkk_per_kwh >= discharge_price_floor:
-                return None
             charged_wh = input_wh * charge_efficiency
             grid_wh += input_wh
             if is_forecast:
@@ -185,14 +141,7 @@ def _slot_transition(
             settings.discharge_power_w * slot.hours,
             available_wh * discharge_efficiency,
         )
-        if deliverable_wh <= settings.energy_step_wh / 4:
-            if not permits_energy_neutral_continuation:
-                return None
-            reason = (
-                "Energy-neutral continuation at the reserve while mode changes "
-                "are constrained"
-            )
-        else:
+        if deliverable_wh > settings.energy_step_wh / 4:
             discharged_wh = deliverable_wh / discharge_efficiency
             grid_wh -= deliverable_wh
             reason = "Battery avoids expensive grid import and clears the configured economic margin"
@@ -227,12 +176,7 @@ def _slot_transition(
         )
     interval_cost += switch_cost
     optimization_cost += switch_cost
-    next_state = _State(
-        new_step,
-        action,
-        locked,
-        state.planned_transitions + int(changed),
-    )
+    next_state = _State(new_step, action)
     detail = (
         grid_wh,
         charged_wh,
@@ -251,9 +195,6 @@ def optimize(
     soc: float,
     settings: PlannerSettings,
     current_action: Action = Action.GRID,
-    mode_lock_remaining_minutes: int = 0,
-    transitions_used: int = 0,
-    transition_times: Iterable[datetime] | None = None,
 ) -> Plan:
     """Return the least-cost executable plan across every known price slot."""
     settings.validate()
@@ -285,48 +226,8 @@ def optimize(
         int(settings.capacity_wh * settings.target_soc / 100 // step_wh),
         initial_step,
     )
-    initial_lock = max(0, mode_lock_remaining_minutes)
-    # Keep the legacy count argument for callers that cannot provide timestamps.
-    # A timestamp-aware caller releases *executed* transitions at their true
-    # rolling-24-hour expiry.  Planned transitions remain counted for this
-    # provisional plan; the coordinator replans before executing later slots,
-    # which both bounds the dynamic-programming state space and never exceeds
-    # the configured transition limit.
-    if transition_times is None:
-        historical_expiries = tuple(
-            now + timedelta(hours=24) for _ in range(transitions_used)
-        )
-    else:
-        historical_expiries = tuple(
-            timestamp + timedelta(hours=24)
-            for timestamp in transition_times
-            if timestamp + timedelta(hours=24) > now
-        )
-    initial = _State(initial_step, current_action, initial_lock, 0)
+    initial = _State(initial_step, current_action)
     layers: list[dict[_State, _Node]] = [{initial: _Node(0.0, 0.0, None, None)}]
-    # Use the cheapest *available* charge price in the known-price window as
-    # the floor basis.  A fixed 72-hour look-ahead window keeps the floor
-    # stable across replans and prevents the floor from being driven by the
-    # current slot (which shifts with every update).  Using a distant cheap
-    # price (>72 h) is avoided because it misprices today's decision.
-    horizon_start = valid[0].start
-    known_charge_candidates = [
-        s
-        for s in valid
-        if s.source == "known"
-        and (s.start - horizon_start).total_seconds() <= 72 * 3600
-    ]
-    if not known_charge_candidates:
-        known_charge_candidates = valid[:1]  # fallback
-    cheapest_charge_price = min(
-        s.charge_price_dkk_per_kwh for s in known_charge_candidates
-    )
-    discharge_price_floor = (
-        cheapest_charge_price / settings.round_trip_efficiency
-        + settings.degradation_cost_dkk_per_kwh
-        + settings.minimum_profit_dkk_per_kwh
-    )
-
     for slot in valid:
         previous_layer = layers[-1]
         layer: dict[_State, _Node] = {}
@@ -335,25 +236,10 @@ def optimize(
             key=lambda item: (
                 item.energy_step,
                 item.action.value,
-                item.planned_transitions,
             ),
         ):
             node = previous_layer[state]
-            active_transitions = (
-                sum(expiry > slot.start for expiry in historical_expiries)
-                + state.planned_transitions
-            )
-            force_grid_exit = (
-                state.action is Action.BATTERY
-                and state.energy_step > minimum_step
-                and slot.discharge_price_dkk_per_kwh + 1e-9 < discharge_price_floor
-            )
-            for action in _allowed_actions(
-                state,
-                settings,
-                active_transitions=active_transitions,
-                force_grid_exit=force_grid_exit,
-            ):
+            for action in _allowed_actions():
                 result = _slot_transition(
                     state,
                     action,
@@ -361,8 +247,6 @@ def optimize(
                     settings,
                     minimum_step,
                     maximum_step,
-                    discharge_price_floor,
-                    active_transitions,
                 )
                 if result is None:
                     continue
@@ -376,7 +260,6 @@ def optimize(
                 existing = layer.get(next_state)
                 candidate_key = (
                     candidate.cost,
-                    next_state.planned_transitions,
                     candidate.throughput_wh,
                     action.value,
                 )
@@ -385,16 +268,13 @@ def optimize(
                 else:
                     existing_key = (
                         existing.cost,
-                        next_state.planned_transitions,
                         existing.throughput_wh,
                         next_state.action.value,
                     )
                     if candidate_key < existing_key:
                         layer[next_state] = candidate
         if not layer:
-            return Plan(
-                now, (), 0, 0, 0, 0, 0, "No plan satisfies battery and mode constraints"
-            )
+            return Plan(now, (), 0, 0, 0, 0, 0, "No plan satisfies battery constraints")
         layers.append(layer)
 
     terminal_price = _terminal_price(valid)
@@ -414,7 +294,7 @@ def optimize(
         - settings.degradation_cost_dkk_per_kwh,
     )
 
-    def final_key(item: tuple[_State, _Node]) -> tuple[float, int, float, str]:
+    def final_key(item: tuple[_State, _Node]) -> tuple[float, float, str]:
         state, node = item
         stored_above_reserve_wh = (state.energy_step - minimum_step) * step_wh
         terminal_value = (
@@ -431,7 +311,6 @@ def optimize(
         cost_term = round(node.cost - terminal_value, 6)
         return (
             cost_term,
-            state.planned_transitions,
             node.throughput_wh,
             state.action.value,
         )

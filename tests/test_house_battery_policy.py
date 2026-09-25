@@ -25,8 +25,6 @@ def settings() -> PlannerSettings:
         degradation_cost_dkk_per_kwh=0.35,
         minimum_profit_dkk_per_kwh=0.75,
         switching_penalty_dkk=0.05,
-        minimum_mode_minutes=30,
-        maximum_transitions=4,
     )
 
 

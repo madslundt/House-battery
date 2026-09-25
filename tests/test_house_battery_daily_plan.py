@@ -26,6 +26,7 @@ from house_battery.dailyplan import (
 )
 from house_battery.models import Action, PlannerSettings, PlannedSlot, PriceSlot
 from house_battery.planner import optimize
+from house_battery.sensor import daily_plan_blocks
 
 UTC = timezone.utc
 # A fixed +02:00 zone keeps the day-boundary tests deterministic while still
@@ -44,19 +45,21 @@ def slot(
     *,
     soc_start: float = 0.0,
     soc_end: float = 0.0,
+    load: float = 100.0,
+    cost: float = 1.0,
 ) -> PlannedSlot:
     return PlannedSlot(
         start=start,
         end=end,
         action=action,
         price=1.0,
-        expected_load_wh=100.0,
+        expected_load_wh=load,
         grid_import_wh=0.0,
         battery_charge_wh=0.0,
         battery_discharge_wh=0.0,
         soc_start=soc_start,
         soc_end=soc_end,
-        interval_cost_dkk=1.0,
+        interval_cost_dkk=cost,
         baseline_cost_dkk=2.0,
         reason="test",
     )
@@ -109,8 +112,6 @@ def _planner_settings() -> PlannerSettings:
         degradation_cost_dkk_per_kwh=0.35,
         minimum_profit_dkk_per_kwh=0.75,
         switching_penalty_dkk=0.05,
-        minimum_mode_minutes=30,
-        maximum_transitions=4,
         energy_step_wh=25,
     )
 
@@ -208,7 +209,12 @@ def test_predicted_soc_is_not_treated_as_authoritative() -> None:
 # #3 / #5 — Recalculate only the future; truncate straddling intervals
 # --------------------------------------------------------------------------- #
 
-def test_replan_inside_an_existing_interval_truncates_cleanly() -> None:
+def test_replan_inside_an_existing_interval_reanchors_as_one_slot() -> None:
+    """The straddling interval is re-anchored at the 1-minute cutoff and stays a
+    single slot: its executed head is frozen (prated from the interval value)
+    and its tail is re-optimised.  This is what stops 1-minute replans from
+    accumulating one history fragment per price interval (the horizon_slots bug).
+    """
     existing = DailyPlan(
         date="2026-09-20",
         slots=(
@@ -225,10 +231,21 @@ def test_replan_inside_an_existing_interval_truncates_cleanly() -> None:
         existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     assert_invariants(result)
-    assert [(s.start.time(), s.action) for s in result.slots] == [
-        (datetime(2026, 9, 20, 12, 0).time(), Action.BATTERY),
-        (datetime(2026, 9, 20, 13, 30).time(), Action.GRID),
+    # The straddling BATTERY head is frozen at the cutoff; the re-optimised tail
+    # and the following price interval follow.  Nothing before 13:30 changes.
+    assert [(s.start.time(), s.end.time(), s.action) for s in result.slots] == [
+        (datetime(2026, 9, 20, 12, 0).time(),
+         datetime(2026, 9, 20, 13, 30).time(), Action.BATTERY),
+        (datetime(2026, 9, 20, 13, 30).time(),
+         datetime(2026, 9, 20, 14, 0).time(), Action.GRID),
+        (datetime(2026, 9, 20, 14, 0).time(),
+         datetime(2026, 9, 20, 15, 0).time(), Action.GRID),
     ]
+    # The frozen head carried 90 of the 120-minute BATTERY head (0.75 fraction).
+    assert result.slots[0].expected_load_wh == pytest.approx(75.0)
+    assert result.slots[0].interval_cost_dkk == pytest.approx(0.75)
+    # The frozen head never exceeds the re-optimised tail, and there is no gap.
+    assert result.slots[1].start == result.slots[0].end
 
 
 def test_replan_exactly_on_a_boundary_has_no_duplicates_or_zero_duration() -> None:
@@ -305,27 +322,37 @@ def test_same_action_on_both_sides_of_cutoff_merges() -> None:
     )
     cutoff = datetime(2026, 9, 20, 13, 30, tzinfo=UTC)
     day_start, day_end = local_day_bounds(cutoff)
+    # The optimiser re-optimises the current interval's tail [13:30, 14:00] and
+    # the following interval [14:00, 15:00] independently (per price interval).
     future = (
-        slot(cutoff, datetime(2026, 9, 20, 15, 0, tzinfo=UTC), Action.BATTERY),
+        slot(cutoff, datetime(2026, 9, 20, 14, 0, tzinfo=UTC), Action.BATTERY, load=25.0, cost=0.25),
+        slot(datetime(2026, 9, 20, 14, 0, tzinfo=UTC), datetime(2026, 9, 20, 15, 0, tzinfo=UTC), Action.BATTERY, load=25.0, cost=0.25),
     )
     result = reconcile_daily_plan(
         existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
-    # The reconciled timeline keeps two touching BATTERY slots...
+    # The straddling interval is re-anchored as ONE slot: its executed head
+    # ([12:00, 13:30]) is frozen (prated to 0.75) and its re-optimised tail
+    # ([13:30, 14:00]) is merged back because the action is the same, so the
+    # current interval stays a single slot instead of accumulating a fragment.
     assert_invariants(result)
-    # ...and normalization merges them into a single logical interval.
+    assert [(s.start.time(), s.end.time()) for s in result.slots] == [
+        (datetime(2026, 9, 20, 12, 0).time(), datetime(2026, 9, 20, 14, 0).time()),
+        (datetime(2026, 9, 20, 14, 0).time(), datetime(2026, 9, 20, 15, 0).time()),
+    ]
+    # The re-anchored current interval = prated head (0.75 * 100 = 75) +
+    # re-optimised 30-min tail (25) = the whole 2h / 1.0 cost.
+    assert result.slots[0].expected_load_wh == pytest.approx(100.0)
+    assert result.slots[0].interval_cost_dkk == pytest.approx(1.0)
+    # ...and the following price interval re-optimises to its own 1h value.
+    assert result.slots[1].expected_load_wh == pytest.approx(25.0)
+    # Normalisation then merges the two touching BATTERY slots into one block.
     blocks = merge_adjacent_blocks(result.slots)
     assert len(blocks) == 1
     assert blocks[0].action is Action.BATTERY
     assert blocks[0].start == datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
     assert blocks[0].end == datetime(2026, 9, 20, 15, 0, tzinfo=UTC)
-    # Economic detail is summed across the merged underlying slots.  The
-    # truncated history head is prorated to its 1.5h/2h = 0.75 fraction
-    # (1.0 * 0.75) and the full 1.5h future head adds 1.0, so 1.75 total.
-    assert blocks[0].interval_cost_dkk == pytest.approx(1.75)
-    # The proration scaled every extensive quantity by the same fraction.
-    assert result.slots[0].expected_load_wh == pytest.approx(75.0)
-    assert result.slots[0].interval_cost_dkk == pytest.approx(0.75)
+    assert blocks[0].interval_cost_dkk == pytest.approx(1.25)
 
 
 def test_merge_keeps_separate_when_actions_differ() -> None:
@@ -381,6 +408,59 @@ def test_consecutive_replans_never_accumulate_gaps_or_overlaps() -> None:
         assert s.start == previous_end
         previous_end = s.end
     assert previous_end == day_end
+
+
+# --------------------------------------------------------------------------- #
+# #13 — No per-minute fragment accumulation across many 1-minute replans
+# --------------------------------------------------------------------------- #
+
+def test_replans_keep_the_current_price_interval_to_one_slot() -> None:
+    """Regression for the `horizon_slots: 1138` fragmentation.
+
+    A real coordinator reconciles once per minute against the current price
+    interval.  The in-progress price interval must stay a SINGLE slot across the
+    whole 15 minutes it is live (its head frozen, its tail re-optimised), so
+    ``horizon_slots`` grows only by one per elapsed price interval -- never one
+    per minute -- and the plan does not explode into thousands of fragments.
+    """
+    day_start, day_end = local_day_bounds(datetime(2026, 9, 20, 0, 0, tzinfo=UTC))
+    interval_start = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    interval_end = datetime(2026, 9, 20, 12, 15, tzinfo=UTC)
+    daily = DailyPlan(
+        date="2026-09-20",
+        slots=(
+            slot(datetime(2026, 9, 20, 0, 0, tzinfo=UTC), interval_start, Action.GRID),
+            slot(interval_start, interval_end, Action.BATTERY),
+            slot(interval_end, datetime(2026, 9, 21, 0, 0, tzinfo=UTC), Action.GRID),
+        ),
+    )
+    slot_counts: list[int] = []
+    for minute in range(1, 16):  # 12:01 .. 12:15, one replan per minute
+        cutoff = interval_start + timedelta(minutes=minute)
+        future = (
+            slot(cutoff, interval_end, Action.BATTERY),            # tail re-opt
+            slot(interval_end, datetime(2026, 9, 21, 0, 0, tzinfo=UTC), Action.GRID),
+        )
+        daily = reconcile_daily_plan(
+            daily, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
+        )
+        assert_invariants(daily)
+        assert_within_horizon(daily, day_start, day_end)
+        slot_counts.append(len(daily.slots))
+        # Contiguous every minute.
+        prev = day_start
+        for s in daily.slots:
+            assert s.start == prev
+            prev = s.end
+        assert prev == day_end
+
+    # The current BATTERY interval is always exactly one slot; the day has 3
+    # price intervals total, so the plan stays at 3 slots for all 15 minutes.
+    assert slot_counts == [3] * 15
+    # The current interval is re-anchored but never leaves its price bounds.
+    current = [s for s in daily.slots if s.action is Action.BATTERY]
+    assert current[0].start == interval_start
+    assert current[0].end == interval_end
 
 
 # --------------------------------------------------------------------------- #
@@ -480,14 +560,17 @@ def test_variable_price_interval_durations_are_preserved() -> None:
         existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     assert_invariants(result)
-    assert [(s.start.time(), s.end.time(), s.action) for s in result.slots] == [
-        (datetime(2026, 9, 20, 10, 0).time(),
-         datetime(2026, 9, 20, 11, 30).time(), Action.BATTERY),
-        (datetime(2026, 9, 20, 11, 30).time(),
-         datetime(2026, 9, 20, 13, 5).time(), Action.GRID),
-    ]
-    # The arbitrary durations survived (not snapped to 15-minute multiples).
-    assert (result.slots[1].end - result.slots[1].start).total_seconds() == 95 * 60
+    # The arbitrary 1h45m BATTERY interval is re-anchored at the cutoff; its
+    # grid tail (re-optimised) and the following price interval follow.  The
+    # straddling interval's start (10:00) is the immutable, non-15-min boundary.
+    assert result.slots[0].start == datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    assert result.slots[0].action is Action.BATTERY
+    # No interval duration was snapped to a 15-minute multiple: the re-optimised
+    # future spans 80 minutes (11:45 -> 13:05), an arbitrary value.
+    assert (result.slots[2].end - result.slots[2].start).total_seconds() == 80 * 60
+    # The timeline stays contiguous across the (now re-anchored) cutoff.
+    assert result.slots[1].start == result.slots[0].end
+    assert result.slots[2].start == result.slots[1].end
 
 
 # --------------------------------------------------------------------------- #
@@ -590,6 +673,21 @@ def test_daily_plan_view_always_covers_the_complete_day() -> None:
     assert view["blocks"][0]["start"] == datetime(2026, 9, 20, 0, 0, tzinfo=UTC).isoformat()
     assert view["blocks"][-1]["end"] == datetime(2026, 9, 21, 0, 0, tzinfo=UTC).isoformat()
     assert len(view["blocks"]) == 7
+    # Verify the exact representation consumed by the operation-plan entity:
+    # every interval is present once, in order, with no gap or overlap.
+    entity_blocks = daily_plan_blocks({"daily_plan": view})
+    assert entity_blocks == view["blocks"]
+    assert datetime.fromisoformat(entity_blocks[0]["start"]) == datetime(
+        2026, 9, 20, 0, 0, tzinfo=UTC
+    )
+    assert datetime.fromisoformat(entity_blocks[-1]["end"]) == datetime(
+        2026, 9, 21, 0, 0, tzinfo=UTC
+    )
+    for previous, current in zip(entity_blocks, entity_blocks[1:]):
+        previous_end = datetime.fromisoformat(previous["end"])
+        current_start = datetime.fromisoformat(current["start"])
+        assert previous_end == current_start
+        assert previous_end > datetime.fromisoformat(previous["start"])
     # A full-day plan reports history as available from local midnight.
     assert view["history_available_from"] == datetime(
         2026, 9, 20, 0, 0, tzinfo=UTC

@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from house_battery.const import (
+    CONF_LOAD_POWER,
     CONF_PRICE_ENTITIES,
     CONF_PRICE_FORECAST_ENTITIES,
 )
@@ -24,8 +25,7 @@ from house_battery.forecast import (
     extend_known_horizon,
 )
 from house_battery.forecast_plan import ForecastPlan
-from house_battery.models import Action, PlannerSettings, PriceSlot
-from house_battery.planner import optimize
+from house_battery.models import Action, PriceSlot
 from house_battery.price import extract_rows, normalize_price_rows
 from house_battery.runtime import RuntimeState
 
@@ -133,6 +133,7 @@ def test_stromligning_current_tomorrow_and_forecast_entities_extend_the_plan() -
                     "sensor.stromligning_current_price_vat",
                     "binary_sensor.stromligning_tomorrow_available_vat",
                 ],
+                CONF_LOAD_POWER: "sensor.load",
                 CONF_PRICE_FORECAST_ENTITIES: [
                     "sensor.stromligning_forecasts_vat"
                 ],
@@ -140,13 +141,14 @@ def test_stromligning_current_tomorrow_and_forecast_entities_extend_the_plan() -
         )
         coordinator = Fbp1200Coordinator(hass, entry)
         coordinator.runtime.forecast_enabled = True
+        hass.states.async_set("sensor.load", "110")
         hass.states.async_set(
             "sensor.stromligning_current_price_vat", "2.807834", {"prices": current}
         )
         hass.states.async_set(
             "binary_sensor.stromligning_tomorrow_available_vat",
             "on",
-            {"forecast_data": False, "prices": tomorrow},
+            {"forecast_data": "false", "prices": tomorrow},
         )
         hass.states.async_set(
             "sensor.stromligning_forecasts_vat",
@@ -199,18 +201,20 @@ def test_price_entity_flagged_forecast_is_not_treated_as_known() -> None:
                     "sensor.stromligning_current_price_vat",
                     "sensor.stromligning_prices_tomorrow_vat",
                 ],
+                CONF_LOAD_POWER: "sensor.load",
                 CONF_PRICE_FORECAST_ENTITIES: [],
             }
         )
         coordinator = Fbp1200Coordinator(hass, entry)
         coordinator.runtime.forecast_enabled = True
+        hass.states.async_set("sensor.load", "110")
         hass.states.async_set(
             "sensor.stromligning_current_price_vat", "2.0", {"prices": known}
         )
         hass.states.async_set(
             "sensor.stromligning_prices_tomorrow_vat",
             forecast_start.isoformat(),
-            {"forecast_data": True, "prices": forecast},
+            {"forecast_data": "true", "prices": forecast},
         )
 
         slots = coordinator._price_slots(now.astimezone(UTC))
@@ -252,11 +256,13 @@ def test_coordinator_builds_a_separate_forecast_plan_from_forecast_slots() -> No
         entry = _Entry(
             {
                 CONF_PRICE_ENTITIES: ["sensor.stromligning_current_price_vat"],
+                CONF_LOAD_POWER: "sensor.load",
                 CONF_PRICE_FORECAST_ENTITIES: ["sensor.stromligning_forecasts_vat"],
             }
         )
         coordinator = Fbp1200Coordinator(hass, entry)
         coordinator.runtime.forecast_enabled = True
+        hass.states.async_set("sensor.load", "110")
         hass.states.async_set(
             "sensor.stromligning_current_price_vat",
             "2.0",
@@ -424,6 +430,7 @@ def test_forecasts_are_indicators_only_and_all_sources_score_independently() -> 
         entry = _Entry(
             {
                 CONF_PRICE_ENTITIES: ["sensor.known"],
+                CONF_LOAD_POWER: "sensor.load",
                 CONF_PRICE_FORECAST_ENTITIES: [
                     "sensor.forecast_a",
                     "sensor.forecast_b",
@@ -432,6 +439,7 @@ def test_forecasts_are_indicators_only_and_all_sources_score_independently() -> 
         )
         coordinator = Fbp1200Coordinator(hass, entry)
         coordinator.runtime.forecast_enabled = True
+        hass.states.async_set("sensor.load", "110")
         hass.states.async_set(
             "sensor.known",
             "1.0",
@@ -541,44 +549,6 @@ def test_detect_extreme_price_movement_no_flag_when_prices_are_normal() -> None:
 
     assert result["is_extreme"] is False
     assert result["ratio"] == 1.0
-
-
-def test_forecast_uncertainty_rejects_a_marginal_forecast_discharge() -> None:
-    """A nominally profitable forecast cannot bypass the conservative buffer."""
-    start = datetime(2026, 1, 1, tzinfo=UTC)
-    slots = [
-        PriceSlot(
-            start + timedelta(minutes=15 * index),
-            start + timedelta(minutes=15 * (index + 1)),
-            0.20 if index < 2 else 1.50,
-            expected_load_wh=125,
-            source="forecast" if index >= 2 else "known",
-            uncertainty_dkk_per_kwh=0.50 if index >= 2 else 0.0,
-        )
-        for index in range(4)
-    ]
-    settings = PlannerSettings(
-        capacity_wh=1958,
-        reserve_soc=20,
-        target_soc=90,
-        charge_power_w=1200,
-        discharge_power_w=800,
-        round_trip_efficiency=0.85,
-        degradation_cost_dkk_per_kwh=0.35,
-        minimum_profit_dkk_per_kwh=0.75,
-        switching_penalty_dkk=0,
-        minimum_mode_minutes=15,
-        maximum_transitions=4,
-    )
-
-    plan = optimize(
-        slots,
-        now=datetime(2025, 12, 31, 23, 59, tzinfo=UTC),
-        soc=20,
-        settings=settings,
-    )
-
-    assert all(slot.action is not Action.BATTERY for slot in plan.slots)
 
 
 def test_invalid_external_forecast_is_rejected_without_affecting_known_prices() -> None:

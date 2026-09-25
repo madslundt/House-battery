@@ -321,6 +321,9 @@ def test_direct_tcp_command_uses_allowlisted_client_and_updates_commanded_mode()
         async def async_set_limits(self, minimum: int, maximum: int) -> None:
             self.calls.append(("limits", minimum, maximum))
 
+        async def async_set_grid_idle(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("grid_idle", minimum, maximum))
+
         async def async_set_mode(
             self, mode: str, power: int, *, min_soc: int, max_soc: int
         ) -> None:
@@ -351,7 +354,7 @@ def test_direct_tcp_command_uses_allowlisted_client_and_updates_commanded_mode()
 
     assert success
     assert "SOC limits read back" in result
-    assert direct.calls == [("limits", 20, 90), ("mode", "Charge", 1200, 20, 90)]
+    assert direct.calls == [("limits", 20, 90), ("mode", "Charge", 800, 20, 90)]
     assert modes == ["Charge"]
 
 
@@ -527,11 +530,14 @@ def test_failed_grid_exit_keeps_the_native_reserve_protected() -> None:
         async def async_set_limits(self, minimum: int, maximum: int) -> None:
             self.calls.append(("limits", minimum, maximum))
 
+        async def async_set_grid_idle(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("grid_idle", minimum, maximum))
+            raise RuntimeError("Idle rejected")
+
         async def async_set_mode(
             self, mode: str, power: int, *, min_soc: int, max_soc: int
         ) -> None:
             self.calls.append(("mode", mode, power, min_soc, max_soc))
-            raise RuntimeError("Idle rejected")
 
     state = runtime()
     direct = DirectClient()
@@ -553,7 +559,7 @@ def test_failed_grid_exit_keeps_the_native_reserve_protected() -> None:
 
     assert not success
     assert "local TCP command failed" in result
-    assert direct.calls == [("limits", 20, 90), ("mode", "Idle", 0, 20, 90)]
+    assert direct.calls == [("grid_idle", 20, 90)]
     assert not state.execution_enabled
 
 
@@ -716,7 +722,7 @@ def test_enabling_control_accepts_commissioned_reachable_native_soc_controls() -
     asyncio.run(scenario())
 
 
-def test_enabling_direct_control_recovers_legacy_rapid_transition_burst() -> None:
+def test_enabling_direct_control_keeps_transition_history_as_diagnostics() -> None:
     async def scenario() -> None:
         from homeassistant.core import HomeAssistant
 
@@ -736,7 +742,7 @@ def test_enabling_direct_control_recovers_legacy_rapid_transition_burst() -> Non
         await coordinator.async_set_execution_enabled(True)
 
         assert coordinator.runtime.execution_enabled
-        assert coordinator.runtime.transitions == [first.isoformat()]
+        assert len(coordinator.runtime.transitions) == 4
 
     asyncio.run(scenario())
 

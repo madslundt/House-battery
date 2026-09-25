@@ -18,7 +18,7 @@ SETTING_NAMES = {
     "absolute_min_soc": ("Absolute emergency SOC", "mdi:battery-alert"),
     "reserve_soc": ("Arbitrage reserve SOC", "mdi:battery-lock"),
     "target_soc": ("Maximum charge SOC", "mdi:battery-charging-90"),
-    "charge_power_w": ("Maximum charge power", "mdi:battery-charging"),
+    "charge_power_w": ("Charge-mode total power budget", "mdi:battery-charging"),
     "discharge_power_w": ("Maximum discharge power", "mdi:battery-arrow-down"),
     "round_trip_efficiency": ("Fallback round-trip efficiency", "mdi:percent-circle"),
     "degradation_cost_dkk_per_kwh": (

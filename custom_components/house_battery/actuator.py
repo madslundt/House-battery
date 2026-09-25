@@ -136,26 +136,25 @@ class LocalControlAdapter:
         if client is None:
             return None
         runtime = self._runtime()
-        limits_warning: str | None = None
-        try:
-            minimum = round(self._minimum_soc_for(action))
-            maximum = round(
-                target_soc if target_soc is not None else runtime.settings["target_soc"]
-            )
-            await client.async_set_limits(minimum, maximum)
-        except Exception as exc:
-            if action is not Action.SAFE:
-                _LOGGER.exception("Local TCP SOC-limit command failed")
-                runtime.execution_enabled = False
-                await self._save()
-                return False, f"local TCP command failed: {exc}"
-            limits_warning = f"SOC limits not confirmed: {exc}"
-            _LOGGER.warning("%s; continuing with requested safe mode", limits_warning)
+        minimum = round(self._minimum_soc_for(action))
+        maximum = round(
+            target_soc if target_soc is not None else runtime.settings["target_soc"]
+        )
         # The custom local slot label actually written to the inverter; report
         # this (not the native Operating Mode label) so the reported commanded
         # mode matches the physical mode the device is really in.
         direct_command_mode: str | None = None
         try:
+            if action in {Action.GRID, Action.SAFE}:
+                # An inactive custom slot did not stop an already-running fixed
+                # power charge on this FBP1200. The client uses a temporary
+                # 100% discharge floor to cancel active power before restoring
+                # the requested limits and leaving an explicit 0 W slot.
+                direct_command_mode = "Idle"
+                await client.async_set_grid_idle(minimum, maximum)
+            else:
+                await client.async_set_limits(minimum, maximum)
+
             if action is Action.BATTERY:
                 # Self-Gen/Zero Export: zero export to the grid is a firmware
                 # guarantee of this native mode, not a setpoint clamped against
@@ -165,14 +164,6 @@ class LocalControlAdapter:
                 # clamping the commanded power to the (noisy) load.
                 direct_command_mode = MODE_BATTERY
                 await client.async_set_self_consumption()
-            elif action is Action.SAFE:
-                direct_command_mode = "Idle"
-                await client.async_set_mode(
-                    "Idle",
-                    0,
-                    min_soc=minimum,
-                    max_soc=maximum,
-                )
             elif action is Action.CHARGE:
                 direct_command_mode = "Charge"
                 await client.async_set_mode(
@@ -181,9 +172,6 @@ class LocalControlAdapter:
                     min_soc=minimum,
                     max_soc=maximum,
                 )
-            else:
-                direct_command_mode = "Idle"
-                await client.async_set_mode("Idle", 0, min_soc=minimum, max_soc=maximum)
         except Exception as exc:
             _LOGGER.exception("Local TCP mode command failed")
             runtime.execution_enabled = False
@@ -197,7 +185,7 @@ class LocalControlAdapter:
             runtime.transitions.append(now.isoformat())
         await self._save()
         result = "local TCP command acknowledged; SOC limits read back"
-        return True, result if limits_warning is None else f"{result}; {limits_warning}"
+        return True, result
 
     async def _set_number(
         self, key: str, value: float, *, required: bool = False

@@ -96,6 +96,24 @@ def test_local_load_diagnostics_are_unavailable_without_any_candidate_value() ->
     assert FbpLocalLoadDiagnosticsSensor.native_value.fget(sensor) == "unavailable"
 
 
+def test_local_load_diagnostics_report_inconsistent_totals() -> None:
+    sensor = SimpleNamespace(
+        coordinator=SimpleNamespace(
+            data={
+                "local_load_diagnostics": {
+                    "off_grid_load_power_total_w": 127,
+                    "off_grid_load_validation_error": (
+                        "per-storage off-grid total (127 W) disagrees with device "
+                        "total backup power (12.7 W)"
+                    ),
+                }
+            }
+        )
+    )
+
+    assert FbpLocalLoadDiagnosticsSensor.native_value.fget(sensor) == "inconsistent"
+
+
 def test_battery_activity_uses_physical_power_not_configured_mode() -> None:
     sensor = SimpleNamespace(
         coordinator=SimpleNamespace(

@@ -77,7 +77,7 @@ from .policy import (
     apply_storage_policy,
     parse_grid_available,
 )
-from .price import extract_rows, normalize_price_rows
+from .price import extract_rows, is_forecast_data, normalize_price_rows
 from .runtime import RuntimeState, RuntimeStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -242,6 +242,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         if self._local_snapshot is None:
             return "connected load cannot be read without local telemetry"
+        if self._local_snapshot.off_grid_load_validation_error:
+            return (
+                "connected load telemetry is inconsistent: "
+                + self._local_snapshot.off_grid_load_validation_error
+            )
         if self._local_snapshot.off_grid_load_total_w is None:
             return "complete battery-served off-grid load is unavailable"
         return None
@@ -349,7 +354,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not state:
                 continue
             attributes = dict(state.attributes)
-            if attributes.get("forecast_data"):
+            if is_forecast_data(attributes):
                 # A price entity may flag its rows as a forecast rather than a
                 # confirmed price.  Forecast data must never be optimised as if
                 # it were known pricing, so route it through the forecast path
@@ -508,9 +513,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
             load_w = self.runtime.load_learner.predict_w(
                 slot.start,
-                current_load if current_load is not None else 0.0,
+                current_load,
                 now=now,
             )
+            if load_w is None:
+                # Unknown load is not a zero-watt forecast.  Without a live
+                # reading or sufficient learned profile, withhold the plan.
+                return []
             scheduled_wh = self._scheduled_load_wh(slot.start, slot.end)
             # Known prices go to the optimizer with their full value.
             # Forecast slots are excluded from the planning horizon
@@ -567,8 +576,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             degradation_cost_dkk_per_kwh=values["degradation_cost_dkk_per_kwh"],
             minimum_profit_dkk_per_kwh=values["minimum_profit_dkk_per_kwh"],
             switching_penalty_dkk=values["switching_penalty_dkk"],
-            minimum_mode_minutes=round(values["minimum_mode_minutes"]),
-            maximum_transitions=round(values["maximum_transitions_per_day"]),
         )
 
     def _observed_action(self) -> Action:
@@ -671,10 +678,14 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         # while automatic control is enabled fails the optimizer safe and
         # disables writes. The hysteresis between ``FLOW_NOISE_FLOOR_W`` and
         # ``EXPORT_SAFETY_W`` keeps a few-watt meter fluctuation from latching.
-        export_w = self.power_flow.grid_export_w if self.power_flow else 0.0
-        export_detected = export_w > FLOW_NOISE_FLOOR_W
+        export_w = self.power_flow.grid_export_w if self.power_flow else None
+        export_detected = (
+            export_w > FLOW_NOISE_FLOOR_W if export_w is not None else None
+        )
         export_safety_fault = (
             self.runtime.execution_enabled and export_w > EXPORT_SAFETY_W
+            if export_w is not None
+            else None
         )
         if export_safety_fault:
             if self._export_fault_since is None:
@@ -682,7 +693,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             problems.append(
                 f"grid export observed at {round(export_w)} W; failing to grid/idle"
             )
-        elif self._export_fault_since is not None and not export_detected:
+        elif self._export_fault_since is not None and export_detected is False:
             self._export_fault_since = None
 
         state = "BOOTSTRAP"
@@ -734,8 +745,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc=soc,
                     settings=settings,
                     current_action=action if action is not Action.SAFE else Action.GRID,
-                    mode_lock_remaining_minutes=self.runtime.mode_lock_remaining(now),
-                    transition_times=self.runtime.active_transition_times(now),
                 )
                 effective_settings = settings
             except ValueError as exc:
@@ -900,11 +909,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             # never read from the FBP1200's raw charge/discharge telemetry.
             "load_power_w": flow.load_w if flow else None,
             "grid_flow_power_w": flow.grid_power_w if flow else None,
-            "grid_import_power_w": flow.grid_import_w if flow else 0.0,
-            "grid_export_power_w": flow.grid_export_w if flow else 0.0,
-            "battery_power_w": flow.battery_net_power_w if flow else 0.0,
-            "battery_charge_power_w": flow.battery_charge_power_w if flow else 0.0,
-            "battery_output_power_w": flow.battery_output_power_w if flow else 0.0,
+            "grid_import_power_w": flow.grid_import_w if flow else None,
+            "grid_export_power_w": flow.grid_export_w if flow else None,
+            "battery_power_w": flow.battery_net_power_w if flow else None,
+            "battery_charge_power_w": flow.battery_charge_power_w if flow else None,
+            "battery_output_power_w": flow.battery_output_power_w if flow else None,
             "power_source": self._classify_power_source(flow),
             "export_detected": export_detected,
             "export_safety_fault": export_safety_fault,
@@ -1057,12 +1066,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Automatic control requires complete battery-served off-grid "
                     f"load: {problem}"
                 )
-            self.runtime.collapse_rapid_transition_burst(
-                datetime.now(UTC),
-                maximum_transitions=round(
-                    self.runtime.settings["maximum_transitions_per_day"]
-                ),
-            )
         was_enabled = self.runtime.execution_enabled
         self.runtime.execution_enabled = enabled
         self._startup_control_gate_reason = None

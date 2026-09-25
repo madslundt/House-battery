@@ -5,6 +5,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from house_battery.learning import BatteryLearner, LoadLearner
@@ -18,6 +20,25 @@ def test_load_profile_ramps_historical_weight_after_four_observations() -> None:
     for week in range(4):
         learner.observe(when - timedelta(weeks=week), 500)
     assert 100 < learner.predict_w(when) < 500
+
+
+def test_load_prediction_blends_live_and_historical_usage_by_horizon() -> None:
+    learner = LoadLearner()
+    now = datetime(2026, 9, 21, 10, 0, tzinfo=UTC)
+    for offset_hours in (1, 18):
+        for week in range(12):
+            learner.observe(
+                now + timedelta(hours=offset_hours, weeks=-week), 500
+            )
+    learner.recent_w.clear()
+    learner.recent_w.extend([100] * 8)
+
+    near = learner.predict_w(now + timedelta(hours=1), now=now)
+    far = learner.predict_w(now + timedelta(hours=18), now=now)
+
+    assert near == pytest.approx(140)
+    assert far == pytest.approx(380)
+    assert far > near
 
 
 def test_load_model_round_trips_through_persistence() -> None:

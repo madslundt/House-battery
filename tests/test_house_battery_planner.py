@@ -37,9 +37,7 @@ def settings(**changes: float) -> PlannerSettings:
         "degradation_cost_dkk_per_kwh": 0.35,
         "minimum_profit_dkk_per_kwh": 0.75,
         "switching_penalty_dkk": 0.05,
-        "minimum_mode_minutes": 30,
-        "maximum_transitions": 4,
-        "energy_step_wh": 25,
+        "energy_step_wh": 5,
     }
     values.update(changes)
     return PlannerSettings(**values)
@@ -67,6 +65,28 @@ def test_small_spread_is_not_worth_battery_wear() -> None:
     )
     assert all(slot.action is Action.GRID for slot in plan.slots)
     assert plan.battery_throughput_kwh == 0
+
+
+def test_higher_wear_and_profit_hurdle_do_not_increase_battery_use() -> None:
+    prices = slots([0.2] * 8 + [2.0] * 8)
+    common = {
+        "now": BASE - timedelta(seconds=1),
+        "soc": 60,
+        "current_action": Action.GRID,
+    }
+    low_hurdle = optimize(
+        prices,
+        **common,
+        settings=settings(degradation_cost_dkk_per_kwh=0.0, minimum_profit_dkk_per_kwh=0.0),
+    )
+    high_hurdle = optimize(
+        prices,
+        **common,
+        settings=settings(degradation_cost_dkk_per_kwh=1.0, minimum_profit_dkk_per_kwh=1.5),
+    )
+
+    assert high_hurdle.battery_throughput_kwh <= low_hurdle.battery_throughput_kwh
+    assert high_hurdle.expected_savings_dkk <= low_hurdle.expected_savings_dkk
 
 
 def test_reserve_is_never_crossed() -> None:
@@ -101,59 +121,49 @@ def test_gap_truncates_horizon_instead_of_inventing_prices() -> None:
     assert len(plan.slots) == 2
 
 
-def test_mode_lock_prevents_early_transition() -> None:
+def test_optimizer_can_switch_modes_on_adjacent_intervals() -> None:
     plan = optimize(
-        slots([0.1, 0.1, 5, 5]),
+        slots([5] + [0.1] * 8 + [5] * 4),
         now=BASE - timedelta(seconds=1),
         soc=50,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
         current_action=Action.GRID,
-        mode_lock_remaining_minutes=30,
     )
-    assert [item.action for item in plan.slots[:2]] == [Action.GRID, Action.GRID]
+    assert plan.slots[0].action is Action.BATTERY
+    assert Action.CHARGE in [item.action for item in plan.slots]
 
 
-def test_locked_charge_at_target_keeps_an_executable_energy_neutral_plan() -> None:
+def test_charge_at_target_does_not_change_grid_import() -> None:
     plan = optimize(
         slots([0.1, 0.1]),
         now=BASE - timedelta(seconds=1),
         soc=90,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
-        current_action=Action.CHARGE,
-        mode_lock_remaining_minutes=30,
     )
 
-    assert [item.action for item in plan.slots] == [Action.CHARGE, Action.CHARGE]
     assert all(item.battery_charge_wh == 0 for item in plan.slots)
     assert all(item.grid_import_wh == 125 for item in plan.slots)
-    assert "Energy-neutral" in plan.slots[0].reason
 
 
-def test_locked_battery_at_reserve_keeps_an_executable_energy_neutral_plan() -> None:
+def test_battery_at_reserve_does_not_discharge() -> None:
     plan = optimize(
         slots([5.0, 5.0]),
         now=BASE - timedelta(seconds=1),
         soc=20,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
-        current_action=Action.BATTERY,
-        mode_lock_remaining_minutes=30,
     )
 
-    assert [item.action for item in plan.slots] == [Action.BATTERY, Action.BATTERY]
     assert all(item.battery_discharge_wh == 0 for item in plan.slots)
     assert all(item.grid_import_wh == 125 for item in plan.slots)
-    assert "Energy-neutral" in plan.slots[0].reason
 
 
-def test_locked_battery_exits_to_grid_below_the_economic_price_floor() -> None:
-    """A mode lock cannot leave hardware in a self-discharging mode."""
+def test_battery_action_is_costed_against_future_opportunity() -> None:
     plan = optimize(
         slots([2.0, 2.0]),
         now=BASE - timedelta(seconds=1),
         soc=60,
         settings=settings(),
         current_action=Action.BATTERY,
-        mode_lock_remaining_minutes=30,
     )
 
     assert plan.slots[0].action is Action.GRID
@@ -194,19 +204,20 @@ def test_existing_stored_energy_discharges_on_opportunity_not_cheapest_floor() -
     assert plan_margin.slots[0].action is Action.GRID
 
 
-def test_transition_budget_keeps_current_mode() -> None:
+def test_optimizer_can_use_multiple_transitions_for_spread() -> None:
     plan = optimize(
         slots([0.1] * 8 + [5.0] * 8),
         now=BASE - timedelta(seconds=1),
         soc=50,
-        settings=settings(maximum_transitions=0),
+        settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
         current_action=Action.GRID,
     )
-    assert all(item.action is Action.GRID for item in plan.slots)
+    actions = [item.action for item in plan.slots]
+    assert Action.CHARGE in actions
+    assert Action.BATTERY in actions
 
 
-def test_expired_transition_budget_allows_a_future_profitable_cycle() -> None:
-    """A rolling limit must release capacity when old transitions expire."""
+def test_long_horizon_can_use_a_future_profitable_cycle() -> None:
     now = BASE
     plan = optimize(
         slots([1.0] * 96 + [0.1] * 8 + [5.0] * 8),
@@ -214,10 +225,6 @@ def test_expired_transition_budget_allows_a_future_profitable_cycle() -> None:
         soc=50,
         settings=settings(),
         current_action=Action.GRID,
-        transition_times=[
-            now - timedelta(hours=23, minutes=30) + timedelta(minutes=index)
-            for index in range(4)
-        ],
     )
 
     actions = [item.action for item in plan.slots]
@@ -225,16 +232,13 @@ def test_expired_transition_budget_allows_a_future_profitable_cycle() -> None:
     assert Action.BATTERY in actions
 
 
-def test_transition_budget_yields_to_grid_when_battery_mode_would_lose_money() -> None:
-    """Transition limits cannot retain a self-discharging battery above reserve."""
+def test_battery_mode_yields_to_grid_when_discharge_is_not_profitable() -> None:
     plan = optimize(
         slots([1.0, 1.0], load_w=800),
         now=BASE - timedelta(seconds=1),
         soc=30,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
         current_action=Action.BATTERY,
-        mode_lock_remaining_minutes=15,
-        transitions_used=4,
     )
 
     assert [item.action for item in plan.slots] == [Action.GRID, Action.GRID]

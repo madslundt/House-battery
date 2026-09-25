@@ -20,7 +20,6 @@ settings = PlannerSettings(
     charge_power_w=1200.0, discharge_power_w=800.0,
     round_trip_efficiency=0.85, degradation_cost_dkk_per_kwh=0.35,
     minimum_profit_dkk_per_kwh=0.75, switching_penalty_dkk=0.05,
-    minimum_mode_minutes=30, maximum_transitions=4,
 )
 
 def build_horizon(days):
@@ -46,7 +45,7 @@ slots = build_horizon(DAYS)
 eff = TERMINAL_OVERRIDE if TERMINAL_OVERRIDE else P._terminal_price(slots)
 print(f"  (effective terminal used: {eff:.3f})")
 plan = optimize(slots, now=now, soc=SOC, settings=settings,
-                current_action=Action.GRID, mode_lock_remaining_minutes=0, transition_times=[])
+                current_action=Action.GRID)
 
 print(f"=== DAYS={DAYS} ({len(plan.slots)} slots) SOC={SOC} LOAD_W={LOAD_W} (0.25 kWh/15min) ===")
 print(f"terminal_price={plan.terminal_price_dkk_per_kwh:.4f} cost={plan.expected_cost_dkk:.2f} savings={plan.expected_savings_dkk:.2f} terminal_value={plan.terminal_value_dkk:.2f} realized={plan.realized_savings_dkk:.2f} thr={plan.battery_throughput_kwh:.3f}")

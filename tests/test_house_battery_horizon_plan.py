@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from homeassistant.core import HomeAssistant
 
-from house_battery.const import CONF_PRICE_ENTITIES
+from house_battery.const import CONF_LOAD_POWER, CONF_PRICE_ENTITIES
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.dailyplan import (
     DailyPlan,
@@ -120,8 +120,6 @@ def planner_settings() -> PlannerSettings:
         degradation_cost_dkk_per_kwh=0.35,
         minimum_profit_dkk_per_kwh=0.75,
         switching_penalty_dkk=0.05,
-        minimum_mode_minutes=30,
-        maximum_transitions=4,
         energy_step_wh=25,
     )
 
@@ -154,13 +152,16 @@ class _Entry:
 def _coordinator_with_prices(
     hass: HomeAssistant, start: datetime, prices: list[float], hours: int
 ) -> Fbp1200Coordinator:
-    entry = _Entry({CONF_PRICE_ENTITIES: ["sensor.price"]})
+    entry = _Entry(
+        {CONF_PRICE_ENTITIES: ["sensor.price"], CONF_LOAD_POWER: "sensor.load"}
+    )
     coordinator = Fbp1200Coordinator(hass, entry)
     hass.states.async_set(
         "sensor.price",
         "1.0",
         {"prices": hourly_prices(start, hours, prices)},
     )
+    hass.states.async_set("sensor.load", "110")
     return coordinator
 
 
@@ -353,10 +354,14 @@ def test_all_future_intervals_replaced_from_now() -> None:
     assert result.slots[1].action is Action.CHARGE
     assert result.slots[1].start == datetime(2026, 9, 20, 8, 0, tzinfo=UTC)
     assert result.slots[1].end == cutoff
-    # The future replaces the remainder of the old CHARGE block from ``now``.
+    # The future replaces the remainder of the straddling CHARGE block.  Its
+    # re-optimised tail stops at the persisted interval end (10:00); the tail is
+    # the optimiser's own price intervals, clipped so nothing crosses 10:00.
     assert [(s.start, s.end, s.action) for s in result.slots[2:]] == [
         (cutoff, datetime(2026, 9, 20, 9, 0, tzinfo=UTC), Action.BATTERY),
         (datetime(2026, 9, 20, 9, 0, tzinfo=UTC),
+         datetime(2026, 9, 20, 10, 0, tzinfo=UTC), Action.GRID),
+        (datetime(2026, 9, 20, 10, 0, tzinfo=UTC),
          datetime(2026, 9, 20, 12, 0, tzinfo=UTC), Action.GRID),
     ]
 
@@ -875,7 +880,12 @@ def test_variable_interval_durations_are_preserved_after_clipping() -> None:
     # The clipped 1h45m BATTERY head keeps its arbitrary duration.
     head = result.slots[0]
     assert (head.end - head.start).total_seconds() == 90 * 60
-    assert (result.slots[1].end - result.slots[1].start).total_seconds() == 95 * 60
+    # The straddling BATTERY interval is re-anchored at the cutoff; its
+    # re-optimised grid tail (15 min) and the following future interval (80 min)
+    # follow.  The arbitrary durations survive -- they are not snapped to
+    # 15-minute multiples (80 is not a multiple).
+    assert (result.slots[1].end - result.slots[1].start).total_seconds() == 15 * 60
+    assert (result.slots[2].end - result.slots[2].start).total_seconds() == 80 * 60
     assert head.action is Action.BATTERY
 
 

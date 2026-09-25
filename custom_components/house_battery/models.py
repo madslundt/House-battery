@@ -57,9 +57,7 @@ class PlannerSettings:
     degradation_cost_dkk_per_kwh: float
     minimum_profit_dkk_per_kwh: float
     switching_penalty_dkk: float
-    minimum_mode_minutes: int
-    maximum_transitions: int
-    energy_step_wh: float = 25.0
+    energy_step_wh: float = 5.0
 
     def validate(self) -> None:
         if self.capacity_wh <= 0 or self.energy_step_wh <= 0:
@@ -72,8 +70,6 @@ class PlannerSettings:
             raise ValueError("round_trip_efficiency must be in (0, 1]")
         if min(self.degradation_cost_dkk_per_kwh, self.minimum_profit_dkk_per_kwh) < 0:
             raise ValueError("Economic thresholds cannot be negative")
-        if self.minimum_mode_minutes < 0 or self.maximum_transitions < 0:
-            raise ValueError("Mode constraints cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)

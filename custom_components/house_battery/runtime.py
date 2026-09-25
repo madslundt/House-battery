@@ -64,58 +64,12 @@ class RuntimeState:
         return self.forecast_accuracy_for("legacy")
 
     def transitions_used(self, now: datetime) -> int:
-        """Prune and count the rolling 24-hour transition budget."""
+        """Prune and count recent action changes for diagnostics."""
         cutoff = now - timedelta(hours=24)
         self.transitions = [
             value for value in self.transitions if _is_recent_timestamp(value, cutoff)
         ]
         return len(self.transitions)
-
-    def active_transition_times(self, now: datetime) -> tuple[datetime, ...]:
-        """Return valid transitions that still consume the rolling budget."""
-        self.transitions_used(now)
-        return tuple(
-            timestamp
-            for value in self.transitions
-            if (timestamp := _parse_timestamp(value)) is not None
-        )
-
-    def collapse_rapid_transition_burst(
-        self, now: datetime, *, maximum_transitions: int
-    ) -> bool:
-        """Recover transition counters inflated by pre-idempotency direct writes."""
-        self.transitions_used(now)
-        parsed = [(value, _parse_timestamp(value)) for value in self.transitions]
-        parsed = [(value, timestamp) for value, timestamp in parsed if timestamp]
-        if len(parsed) < maximum_transitions:
-            return False
-        latest = max(timestamp for _, timestamp in parsed)
-        window = timedelta(minutes=self.settings["minimum_mode_minutes"])
-        burst = [
-            (value, timestamp)
-            for value, timestamp in parsed
-            if latest - timestamp <= window
-        ]
-        if len(burst) < maximum_transitions:
-            return False
-        burst_values = {value for value, _ in burst}
-        first_value, _ = min(burst, key=lambda item: item[1])
-        self.transitions = [
-            value for value in self.transitions if value not in burst_values
-        ] + [first_value]
-        return True
-
-    def mode_lock_remaining(self, now: datetime) -> int:
-        """Return the remaining anti-chatter mode lock duration."""
-        if not self.last_action_at:
-            return 0
-        try:
-            elapsed = (
-                now - datetime.fromisoformat(self.last_action_at)
-            ).total_seconds()
-        except ValueError:
-            return 0
-        return max(0, round(self.settings["minimum_mode_minutes"] - elapsed / 60))
 
     def as_dict(self) -> dict[str, Any]:
         return {

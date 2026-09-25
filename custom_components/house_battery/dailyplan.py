@@ -11,6 +11,10 @@ keeping a small, timezone-aware, persisted timeline that
 * never rewrites the already-published past (intervals before the replan
   ``cutoff`` are immutable),
 * replaces only the future portion on every replan, and
+* stores exactly one slot per price interval.  The current in-progress price
+  interval is re-anchored as a single slot (its executed head frozen, its tail
+  re-optimised) rather than chopped at the 1-minute ``cutoff`` on every replan,
+  so repeated replans never accumulate per-minute history fragments.
 * stays invariant-clean (sorted, non-overlapping, non-duplicate, non-zero
   duration, ``start < end``, bounded to ``[day_start, horizon_end]``). The
   timeline is also normalised to a single local timezone offset so its
@@ -116,53 +120,168 @@ def _prorate_head(
     )
 
 
-def _history_before(
-    slots: tuple[PlannedSlot, ...],
+def _merge_slots(a: PlannedSlot, b: PlannedSlot) -> PlannedSlot:
+    """Join two touching, same-action slots into one (used to keep the current
+    price interval as a single slot instead of a frozen head plus a mutable tail).
+
+    The merged slot's extensive quantities (energy, grid import, battery
+    throughput, cost) are summed and the SOC curve endpoints are carried across
+    the join, so the combined interval stays economically consistent.  The
+    caller only merges when ``a.action == b.action`` and ``a.end == b.start``.
+    """
+    return PlannedSlot(
+        start=a.start,
+        end=b.end,
+        action=a.action,
+        price=a.price,
+        expected_load_wh=a.expected_load_wh + b.expected_load_wh,
+        grid_import_wh=a.grid_import_wh + b.grid_import_wh,
+        battery_charge_wh=a.battery_charge_wh + b.battery_charge_wh,
+        battery_discharge_wh=a.battery_discharge_wh + b.battery_discharge_wh,
+        soc_start=a.soc_start,
+        soc_end=b.soc_end,
+        interval_cost_dkk=a.interval_cost_dkk + b.interval_cost_dkk,
+        baseline_cost_dkk=a.baseline_cost_dkk + b.baseline_cost_dkk,
+        reason=a.reason,
+        price_source=a.price_source,
+        price_uncertainty_dkk_per_kwh=a.price_uncertainty_dkk_per_kwh,
+    )
+
+
+def _history_locked_at_price_boundaries(
+    existing_slots: tuple[PlannedSlot, ...],
+    future_slots: tuple[PlannedSlot, ...],
     cutoff: datetime,
     day_start: datetime,
     horizon_end: datetime,
     tz: timezone,
-) -> list[PlannedSlot]:
-    """Keep the published past, truncating any interval that straddles ``cutoff``.
+) -> tuple[list[PlannedSlot], datetime]:
+    """Keep the immutable past and freeze the current price interval as one slot.
 
-    Intervals ending at or before ``cutoff`` are kept whole.  Intervals starting
-    at or after ``cutoff`` are dropped (they belong to the mutable future).  An
-    interval that spans ``cutoff`` is truncated to ``[start, cutoff)`` and every
-    extensive quantity is prorated to the shortened head so the immutable past
-    stays consistent with its reduced duration.  The timeline never overlaps or
-    duplicates across the replan point, everything is bounded to
-    ``[day_start, horizon_end]`` and normalised to a local offset.
+    The *current in-progress price interval* is the existing slot that straddles
+    ``cutoff``.  Everything before it is immutable history, kept whole.  The
+    current interval itself is re-anchored as a single slot ``[start, end]``: its
+    executed head ``[start, cutoff)`` is frozen (prated from the interval's whole
+    value) and its tail ``[cutoff, end)`` is re-optimised from the optimizer.  The
+    two halves are merged back into one slot whenever they share the (flat-price)
+    action, so a price interval is always stored as exactly one slot regardless of
+    how many minutes have elapsed inside it.  Freezing the executed head as a
+    single anchored slot rather than chopping the interval at ``cutoff`` every
+    minute is what stops repeated 1-minute replans from accumulating one history
+    fragment per minute per price interval.
+
+    Returns ``(kept_history, interval_end)`` where ``interval_end`` is the end of
+    the current price interval (so the future reconciler can start from there
+    instead of from ``cutoff``, keeping the current interval out of the future
+    output).  ``interval_end`` equals ``cutoff`` when there is no straddling
+    interval.
     """
+    straddling = next(
+        (s for s in existing_slots if s.start < cutoff < s.end), None
+    )
     kept: list[PlannedSlot] = []
-    for slot in slots:
+    for slot in existing_slots:
         if slot.end <= cutoff:
             clipped = _clip_to_window(slot, day_start, horizon_end, tz)
             if clipped is not None:
                 kept.append(clipped)
-        elif slot.start >= cutoff:
-            continue
-        else:
-            clipped = _prorate_head(slot, cutoff, day_start, horizon_end, tz)
-            if clipped is not None:
-                kept.append(clipped)
-    return kept
+    if straddling is None:
+        kept.sort(key=lambda s: s.start)
+        return kept, cutoff
+
+    frozen = _prorate_head(straddling, cutoff, day_start, horizon_end, tz)
+    reopt_pieces = _reopt_current_interval(future_slots, cutoff, straddling.end)
+    if not reopt_pieces:
+        reopt_pieces = [straddling]
+    if frozen and frozen.action == reopt_pieces[0].action:
+        # The executed head and the re-optimised tail share the action, so the
+        # current price interval is stored as one slot.
+        kept.append(_merge_slots(frozen, reopt_pieces[0]))
+        kept.extend(reopt_pieces[1:])
+    elif frozen:
+        kept.append(frozen)
+        kept.extend(reopt_pieces)
+    else:
+        kept.extend(reopt_pieces)
+    kept.sort(key=lambda s: s.start)
+    return kept, straddling.end
 
 
-def _future_clipped(
-    slots: tuple[PlannedSlot, ...],
+def _reopt_current_interval(
+    future_slots: tuple[PlannedSlot, ...],
     cutoff: datetime,
+    interval_end: datetime,
+) -> list[PlannedSlot]:
+    """Return the optimizer's re-optimised tail ``[cutoff, interval_end)``.
+
+    The optimizer starts its future at ``now == cutoff``, so its slots cover the
+    current interval's tail.  Every slot overlapping ``[cutoff, interval_end)``
+    is taken (the first clipped forward to ``cutoff``, the last clipped back to
+    ``interval_end``) and touching same-action pieces are joined, so a single
+    re-optimised price interval collapses to one slot while a tail that spans
+    several optimizer actions keeps them distinct.  Returns ``[]`` when the
+    optimiser produced nothing overlapping the tail.
+    """
+    tail: list[PlannedSlot] = []
+    for slot in future_slots:
+        if slot.end <= cutoff:
+            continue
+        if slot.start < cutoff:
+            slot = replace(slot, start=cutoff)
+        if slot.end <= interval_end:
+            tail.append(slot)
+        else:
+            # The optimizer's current interval is wider than the persisted one
+            # (e.g. after a price horizon change); shrink the tail to the
+            # persisted ``interval_end`` and prate its extensive quantities to the
+            # shortened duration so the re-anchored interval stays consistent.
+            total = (slot.end - slot.start).total_seconds()
+            retained = (interval_end - slot.start).total_seconds()
+            fraction = retained / total if total > 0 else 0.0
+            tail.append(
+                replace(
+                    slot,
+                    end=interval_end,
+                    expected_load_wh=slot.expected_load_wh * fraction,
+                    grid_import_wh=slot.grid_import_wh * fraction,
+                    battery_charge_wh=slot.battery_charge_wh * fraction,
+                    battery_discharge_wh=slot.battery_discharge_wh * fraction,
+                    interval_cost_dkk=slot.interval_cost_dkk * fraction,
+                    baseline_cost_dkk=slot.baseline_cost_dkk * fraction,
+                )
+            )
+            break
+    # Join touching same-action pieces so the current interval's tail does not
+    # fragment into one slot per optimizer slice on each replan.
+    joined: list[PlannedSlot] = []
+    for piece in tail:
+        if joined and joined[-1].action == piece.action:
+            joined[-1] = _merge_slots(joined[-1], piece)
+        else:
+            joined.append(piece)
+    return joined
+
+
+def _future_from_price_boundary(
+    future_slots: tuple[PlannedSlot, ...],
+    interval_end: datetime,
     day_start: datetime,
     horizon_end: datetime,
     tz: timezone,
 ) -> list[PlannedSlot]:
-    """Keep only the optimizer's future intervals, clipped to the horizon."""
+    """Keep the optimizer's intervals that start at or after the current interval.
+
+    The current in-progress price interval is already represented as a single
+    re-anchored slot in the history, so its tail (which the optimizer shares with
+    the following interval) is dropped here and only the intervals *after* the
+    current interval are kept.  Each is clipped to the horizon.
+    """
     clipped: list[PlannedSlot] = []
-    for slot in slots:
-        # The optimizer starts at ``now``; anything at/after ``cutoff`` is the
-        # mutable future.  Intervals before the cutoff are impossible here and
-        # are ignored defensively.
-        if slot.start < cutoff:
+    for slot in future_slots:
+        if slot.end <= interval_end:
             continue
+        if slot.start < interval_end:
+            slot = replace(slot, start=interval_end)
         kept = _clip_to_window(slot, day_start, horizon_end, tz)
         if kept is not None:
             clipped.append(kept)
@@ -224,9 +343,12 @@ def reconcile_daily_plan(
     today = day_start.date().isoformat()
     if existing is None or existing.date != today:
         history: list[PlannedSlot] = []
+        interval_end = cutoff
     else:
-        history = _history_before(existing.slots, cutoff, day_start, horizon_end, tz)
-    future = _future_clipped(future_slots, cutoff, day_start, horizon_end, tz)
+        history, interval_end = _history_locked_at_price_boundaries(
+            existing.slots, future_slots, cutoff, day_start, horizon_end, tz
+        )
+    future = _future_from_price_boundary(future_slots, interval_end, day_start, horizon_end, tz)
     normalized = _normalize(history + future)
     return DailyPlan(date=today, slots=tuple(normalized), created_at=cutoff)
 

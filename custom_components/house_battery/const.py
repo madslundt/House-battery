@@ -93,7 +93,10 @@ DEFAULT_SETTINGS: dict[str, float] = {
     "reserve_soc": 20.0,
     "target_soc": 90.0,
     "opportunistic_target_soc": 100.0,
-    "charge_power_w": 1200.0,
+    # 800 W is the highest local charge setpoint verified on this installation.
+    # The device supports higher setpoints, but planning should use a proven
+    # power rate unless the user raises this setting explicitly.
+    "charge_power_w": 800.0,
     "discharge_power_w": 800.0,
     "round_trip_efficiency": 85.0,
     "degradation_cost_dkk_per_kwh": 0.35,
@@ -101,8 +104,6 @@ DEFAULT_SETTINGS: dict[str, float] = {
     "extra_storage_spread_dkk_per_kwh": 2.0,
     "extra_storage_cheap_window_minutes": 30.0,
     "switching_penalty_dkk": 0.05,
-    "minimum_mode_minutes": 30.0,
-    "maximum_transitions_per_day": 4.0,
     "cycle_life": 6000.0,
     "forecast_uncertainty_dkk_per_kwh": 0.25,
 }
@@ -113,7 +114,7 @@ SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
     "reserve_soc": (5.0, 80.0, 1.0, "%"),
     "target_soc": (20.0, 100.0, 1.0, "%"),
     "opportunistic_target_soc": (20.0, 100.0, 1.0, "%"),
-    "charge_power_w": (100.0, 1200.0, 50.0, "W"),
+    "charge_power_w": (100.0, 800.0, 50.0, "W"),
     "discharge_power_w": (100.0, 800.0, 50.0, "W"),
     "round_trip_efficiency": (50.0, 100.0, 1.0, "%"),
     "degradation_cost_dkk_per_kwh": (0.0, 5.0, 0.01, "DKK/kWh"),
@@ -121,8 +122,6 @@ SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
     "extra_storage_spread_dkk_per_kwh": (0.0, 20.0, 0.05, "DKK/kWh"),
     "extra_storage_cheap_window_minutes": (15.0, 240.0, 15.0, "min"),
     "switching_penalty_dkk": (0.0, 5.0, 0.01, "DKK"),
-    "minimum_mode_minutes": (15.0, 120.0, 15.0, "min"),
-    "maximum_transitions_per_day": (1.0, 12.0, 1.0, None),
     "cycle_life": (500.0, 15000.0, 100.0, "cycles"),
     "forecast_uncertainty_dkk_per_kwh": (0.0, 10.0, 0.01, "DKK/kWh"),
 }

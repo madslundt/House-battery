@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, tzinfo
-from math import sqrt
+from math import isfinite, sqrt
 from statistics import median
 from typing import Any
 
@@ -74,6 +74,7 @@ class LoadLearner:
     recent_w: deque[float] = field(default_factory=lambda: deque(maxlen=8))
     observations: int = 0
     absolute_error_sum_w: float = 0.0
+    error_observations: int = 0
     time_zone: tzinfo = field(default=UTC, repr=False, compare=False)
     bucket_timezone: str | None = None
 
@@ -99,8 +100,8 @@ class LoadLearner:
         return f"{local.weekday()}:{local.hour * 4 + local.minute // 15}"
 
     def predict_w(
-        self, when: datetime, fallback_w: float = 0.0, now: datetime | None = None
-    ) -> float:
+        self, when: datetime, fallback_w: float | None = None, now: datetime | None = None
+    ) -> float | None:
         """Predict load watts at ``when``.
 
         ``now`` is optional: when supplied the blend between recent and
@@ -117,10 +118,12 @@ class LoadLearner:
         if now is not None:
             hours_ahead = max(0.0, (when - now).total_seconds() / 3600)
         bucket = self.buckets.get(self.key(when))
-        recent = (
+        recent: float | None = (
             sum(self.recent_w) / len(self.recent_w)
             if self.recent_w
             else max(0.0, fallback_w)
+            if fallback_w is not None and isfinite(fallback_w)
+            else None
         )
         if bucket is None or bucket.count < MIN_HISTORY_WEIGHT_COUNT:
             # Not enough history yet: track recent usage (or the fallback).
@@ -137,12 +140,18 @@ class LoadLearner:
         history_weight = NEAR_HISTORY_WEIGHT + (
             distance_weight - NEAR_HISTORY_WEIGHT
         ) * evidence_factor
+        if recent is None:
+            return bucket.mean_w
         return recent * (1 - history_weight) + bucket.mean_w * history_weight
 
-    def observe(self, when: datetime, watts: float) -> None:
+    def observe(self, when: datetime, watts: float | None) -> None:
+        if watts is None or not isfinite(watts):
+            return
         watts = max(0.0, watts)
-        prediction = self.predict_w(when, watts)
-        self.absolute_error_sum_w += abs(watts - prediction)
+        prediction = self.predict_w(when)
+        if prediction is not None:
+            self.absolute_error_sum_w += abs(watts - prediction)
+            self.error_observations += 1
         bucket = self.buckets.setdefault(self.key(when), LoadBucket())
         bucket.observe(watts)
         self.recent_w.append(watts)
@@ -160,7 +169,9 @@ class LoadLearner:
     @property
     def mean_absolute_error_w(self) -> float | None:
         return (
-            self.absolute_error_sum_w / self.observations if self.observations else None
+            self.absolute_error_sum_w / self.error_observations
+            if self.error_observations
+            else None
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -169,6 +180,7 @@ class LoadLearner:
             "recent_w": list(self.recent_w),
             "observations": self.observations,
             "absolute_error_sum_w": self.absolute_error_sum_w,
+            "error_observations": self.error_observations,
             "bucket_timezone": self.bucket_timezone,
         }
 
@@ -184,6 +196,7 @@ class LoadLearner:
         learner.recent_w.extend(float(value) for value in data.get("recent_w", []))
         learner.observations = int(data.get("observations", 0))
         learner.absolute_error_sum_w = float(data.get("absolute_error_sum_w", 0))
+        learner.error_observations = int(data.get("error_observations", 0))
         learner.bucket_timezone = str(data.get("bucket_timezone", "UTC"))
         return learner
 

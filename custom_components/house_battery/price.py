@@ -116,3 +116,18 @@ def extract_rows(attributes: dict[str, Any]) -> list[Any]:
         if isinstance(value, list):
             rows.extend(value)
     return rows
+
+
+def is_forecast_data(attributes: dict[str, Any]) -> bool:
+    """Interpret the provider's ``forecast_data`` flag without string traps."""
+    value = attributes.get("forecast_data")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return isinstance(value, str) and value.strip().casefold() in {
+        "true",
+        "yes",
+        "on",
+        "1",
+    }
