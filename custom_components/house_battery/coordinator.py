@@ -222,13 +222,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _load_power(self, default: float | None = None) -> float | None:
         """Return only a configured or explicitly confirmed connected-load value.
 
-        For a direct-local entry this is the FOSSiBOT smart-load total,
-        ``TotalSmartLoadElectricalPower``. It is never derived from the device's
-        reported discharge, which would wrongly assume the battery supplies the
-        whole load.
+        For a direct-local entry this is the complete per-storage off-grid
+        total (``OffGridLoadPower`` summed across every ``Storage_list`` unit).
+        It is the load behind the battery, which stays present in every mode.
+        It is never the AI smart-load total (which can read 0 W) nor the
+        device's reported discharge, which would wrongly assume the battery
+        supplies the whole load. A partial frame fails closed to None.
         """
         if self.is_direct_local and self._local_snapshot is not None:
-            value = self._local_snapshot.load_power_w
+            value = self._local_snapshot.off_grid_load_total_w
             if isinstance(value, (int, float)) and math.isfinite(value):
                 return float(value)
             return None
@@ -240,9 +242,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         if self._local_snapshot is None:
             return "connected load cannot be read without local telemetry"
-        value = self._local_snapshot.load_power_w
-        if not isinstance(value, (int, float)) or not math.isfinite(value):
-            return "connected load is unavailable"
+        if self._local_snapshot.off_grid_load_total_w is None:
+            return "complete battery-served off-grid load is unavailable"
         return None
 
     def _direct_soc_control_problems_from_snapshot(self) -> list[str]:
@@ -268,15 +269,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         This is the single adapter boundary between FBP1200 raw telemetry and
         every downstream layer. For a direct-local entry the connected load is
-        the smart-load total and the grid flow is the meter; for a legacy
-        (HA-entity) entry the configured load and grid entities are used. Battery
-        flow is always inferred from the balance, never read from the device.
+        the complete per-storage off-grid total and the grid flow is the signed
+        meter; for a legacy (HA-entity) entry the configured load and grid
+        entities are used. Battery flow is always inferred from the balance,
+        never read from the device.
         """
         now = datetime.now(UTC)
         if self.is_direct_local and self._local_snapshot is not None:
             return derive_power_flow(
                 self._local_snapshot.soc,
-                self._local_snapshot.load_power_w,
+                self._local_snapshot.off_grid_load_total_w,
                 self._local_snapshot.grid_power_w,
                 timestamp=now,
             )
@@ -286,6 +288,35 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._float(CONF_GRID_IMPORT_POWER),
             timestamp=now,
         )
+
+    def _classify_power_source(
+        self, flow: PowerFlowSnapshot | None
+    ) -> str | None:
+        """Classify where the load's power is actually coming from.
+
+        The ``power_source`` sensor is a read-only indicator of physical reality.
+        For a legacy (HA-entity) entry the canonical load-vs-grid balance is the
+        correct source. For a direct-local entry there is no CT meter, so the grid
+        meter always reads 0 and the derived load-minus-grid balance cannot tell
+        whether the grid or the battery serves the load (it would label every
+        loaded grid-tied moment as ``battery``). The raw reported charge/discharge
+        power reliably indicate physical direction for this device, so classify
+        from those instead. ``off`` means idle with no connected load; ``None``
+        means the sample is unavailable.
+        """
+        if self.is_direct_local and self._local_snapshot is not None:
+            threshold = FLOW_UI_ACTIVE_THRESHOLD_W
+            charge = float(self._local_snapshot.raw_reported_charge_power_w or 0)
+            output = float(self._local_snapshot.raw_reported_output_power_w or 0)
+            load = float(self._local_snapshot.off_grid_load_total_w or 0)
+            if charge > threshold:
+                return "charging"
+            if output > threshold:
+                return "battery"
+            if load > threshold:
+                return "grid"
+            return "off"
+        return flow.classify_power_source() if flow else None
 
     def _grid_available(self) -> bool | None:
         """Read physical grid availability; never infer it from grid import power."""
@@ -465,11 +496,20 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             known_slots=known_slots,
         )
         result: list[PriceSlot] = []
+        # A missing/invalid connected load must fail closed, never fall back to
+        # 0 W. Falling back to 0 would let the planner treat the battery as able
+        # to serve an unquantified load and silently build a confident plan from
+        # a phantom zero load; the caller already marks direct telemetry with a
+        # missing off-grid total as DEGRADED. When a valid load is present it is
+        # used immediately so the learner bootstraps without waiting for history.
+        current_load = self._load_power()
         for slot in slots:
             if slot.end <= now:
                 continue
             load_w = self.runtime.load_learner.predict_w(
-                slot.start, self._load_power(0) or 0, now=now
+                slot.start,
+                current_load if current_load is not None else 0.0,
+                now=now,
             )
             scheduled_wh = self._scheduled_load_wh(slot.start, slot.end)
             # Known prices go to the optimizer with their full value.
@@ -865,7 +905,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_power_w": flow.battery_net_power_w if flow else 0.0,
             "battery_charge_power_w": flow.battery_charge_power_w if flow else 0.0,
             "battery_output_power_w": flow.battery_output_power_w if flow else 0.0,
-            "power_source": flow.classify_power_source() if flow else None,
+            "power_source": self._classify_power_source(flow),
             "export_detected": export_detected,
             "export_safety_fault": export_safety_fault,
             "export_power_w": export_w,

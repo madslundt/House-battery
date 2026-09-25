@@ -45,7 +45,7 @@ CONF_COMMISSIONED = "commissioned"
 # smart-load total. This versioned identifier intentionally invalidates any
 # load profile learned from the previous off-grid-load source, so the learner
 # is reset on load.
-DIRECT_LOAD_SOURCE = "direct:smart_load_total:v2"
+DIRECT_LOAD_SOURCE = "direct:off_grid_total:v3"
 
 # A direct local connection is the default setup path. The entity keys above
 # remain supported for entries created before direct local support existed.

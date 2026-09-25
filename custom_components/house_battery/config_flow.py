@@ -109,7 +109,10 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
     """Fields still supplied by Home Assistant, not by the battery TCP API."""
     defaults = _with_forecast_defaults(defaults)
     fields: dict[Any, Any] = {
-        _required(CONF_GRID_IMPORT_POWER, defaults): _entity("sensor"),
+        # Signed grid flow is the TCP meter (MeterTotalActivePower), read from
+        # the battery directly, so no HA grid-import entity is required. An
+        # optional HA sensor may be supplied only as an independent cross-check.
+        _optional(CONF_GRID_IMPORT_POWER, defaults): _entity("sensor"),
         _required(CONF_GRID_AVAILABLE, defaults): _entity(["sensor", "binary_sensor"]),
         _required(CONF_PRICE_ENTITIES, defaults): selector.EntitySelector(
             selector.EntitySelectorConfig(

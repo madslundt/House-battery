@@ -171,6 +171,71 @@ def test_direct_load_uses_only_complete_off_grid_total() -> None:
     asyncio.run(scenario())
 
 
+def _direct_local_coordinator() -> Fbp1200Coordinator:
+    # HomeAssistant() needs a running event loop.
+    async def build() -> Fbp1200Coordinator:
+        from homeassistant.core import HomeAssistant
+
+        coordinator = Fbp1200Coordinator(
+            HomeAssistant("/tmp"), Entry({"host": "192.168.30.90"})
+        )
+        # A truthy local client makes the entry "direct-local" (no HA meter entities).
+        coordinator.local_client = SimpleNamespace()
+        coordinator._local_controls = {}
+        return coordinator
+
+    return asyncio.run(build())
+
+
+def _snapshot(charge, discharge, off_grid_load) -> FbpLocalSnapshot:
+    return FbpLocalSnapshot(
+        50,
+        off_grid_load,
+        0,
+        charge,
+        discharge,
+        {
+            "SSumInfoList": [
+                {"TotalChargePower": charge, "TotalBatteryOutputPower": discharge}
+            ],
+            "Storage_list": [{"OffGridLoadPower": off_grid_load}],
+        },
+    )
+
+
+def test_direct_power_source_uses_raw_charge_discharge_when_no_meter() -> None:
+    """Without a CT meter the load-vs-grid balance is meaningless, so the power
+    source must be classified from the reliable raw charge/discharge fields."""
+    coord = _direct_local_coordinator()
+
+    # Grid charges the battery.
+    coord._local_snapshot = _snapshot(charge=197, discharge=0, off_grid_load=0)
+    assert coord._classify_power_source(None) == "charging"
+
+    # Islanded discharge serves the load.
+    coord._local_snapshot = _snapshot(charge=0, discharge=150, off_grid_load=0)
+    assert coord._classify_power_source(None) == "battery"
+
+    # Grid-tied idle: neither charge nor discharge, but the grid serves the load.
+    coord._local_snapshot = _snapshot(charge=0, discharge=0, off_grid_load=107)
+    assert coord._classify_power_source(None) == "grid"
+
+    # Idle with no connected load.
+    coord._local_snapshot = _snapshot(charge=0, discharge=0, off_grid_load=0)
+    assert coord._classify_power_source(None) == "off"
+
+
+def test_legacy_power_source_still_uses_flow_balance() -> None:
+    from house_battery.models import derive_power_flow
+
+    coord = _direct_local_coordinator()
+    coord.local_client = None  # legacy, HA-entity metered entry.
+    # Grid serves the load exactly, so the battery net flow is idle.
+    flow = derive_power_flow(50, 107, 107)  # 107 W grid import, 107 W load
+    assert flow is not None
+    assert coord._classify_power_source(flow) == "grid"
+
+
 def test_direct_setup_requires_only_grid_and_price_sources() -> None:
     direct_sources = {
         CONF_GRID_IMPORT_POWER: "sensor.watts_live_effekt",

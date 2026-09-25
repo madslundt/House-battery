@@ -50,7 +50,14 @@ class FbpLocalSnapshot:
 
     Two values are first-class inputs to the canonical power-flow model:
 
-    * ``load_power_w`` — the connected-load consumption (``TotalSmartLoadElectricalPower``).
+    * ``load_power_w`` — the connected load the battery must serve, taken from
+      the complete per-storage off-grid total (``OffGridLoadPower`` in every
+      ``Storage_list`` unit). It is the load behind the battery and therefore
+      stays present in every mode (grid/battery/charge); a frame missing any
+      unit's off-grid reading fails closed to ``None`` instead of understating
+      the load. This deliberately replaces the AI smart-load total
+      (``TotalSmartLoadElectricalPower``), which can legitimately read 0 W when
+      the managed load is idle and so must never be the planning input.
     * ``grid_power_w`` — the signed grid-meter flow (``MeterTotalActivePower``).
 
     ``charge_power_w`` / ``discharge_power_w`` are the raw device-reported
@@ -80,32 +87,27 @@ class FbpLocalSnapshot:
 
     @property
     def load_diagnostics(self) -> dict[str, Any]:
-        """Expose distinct local load readings without choosing one as truth.
+        """Expose every distinct local load reading for transparency.
 
-        The grid meter, smart-load total, and backup-load total represent
-        different electrical scopes.  They are intentionally kept separate
-        until the installed battery's response can identify the correct input
-        for the optimizer's connected-load model.
+        The meter total, smart-load total and backup/off-grid total represent
+        different electrical scopes. Only the complete per-storage off-grid
+        total (``off_grid_load_power_total_w``) is the optimizer's
+        connected-load input (see :attr:`load_power_w`); the others are kept
+        here as diagnostics so the correct source can be verified.
         """
         summary = _first_mapping(self.raw.get("SSumInfoList"))
-        units = _storage_entries(self.raw)
-        off_grid_per_unit = [
-            _number(unit, "OffGridLoadPower") if unit is not None else None
-            for unit in units
-        ]
-        # A partial frame must never be presented as a complete stack total.
-        off_grid_total = (
-            sum(value for value in off_grid_per_unit if value is not None)
-            if off_grid_per_unit and all(value is not None for value in off_grid_per_unit)
-            else None
-        )
         return {
             "meter_total_active_power_w": _number(summary, "MeterTotalActivePower"),
             "smart_load_power_w": _number(summary, "TotalSmartLoadElectricalPower"),
             "backup_load_power_w": _number(summary, "TotalBackUpPower"),
-            "off_grid_load_power_per_unit_w": off_grid_per_unit,
-            "off_grid_load_power_total_w": off_grid_total,
+            "off_grid_load_power_per_unit_w": _off_grid_per_unit(self.raw),
+            "off_grid_load_power_total_w": _off_grid_total(self.raw),
         }
+
+    @property
+    def off_grid_load_total_w(self) -> float | None:
+        """Complete per-storage off-grid total, or None when a unit is missing."""
+        return _off_grid_total(self.raw)
 
 
 class FbpTelemetryValidator:
@@ -344,7 +346,7 @@ def decode_energy_parameter(response: dict[str, Any]) -> FbpLocalSnapshot:
     )
     return FbpLocalSnapshot(
         soc,
-        _number(summary, "TotalSmartLoadElectricalPower"),
+        _off_grid_total(response),
         _number(summary, "MeterTotalActivePower"),
         max(0, charge),
         max(0, discharge),
@@ -386,6 +388,29 @@ def operating_mode_from_controls(controls: dict[str, str]) -> str | None:
     if controls.get(REG_AI_SMART_DISCHARGE) == "1":
         return "Self-Gen/Zero Export"
     return None
+
+
+def _off_grid_per_unit(response: dict[str, Any]) -> list[float | None]:
+    """Per-storage off-grid load in Storage_list order; None per missing unit."""
+    units = _storage_entries(response)
+    return [
+        _number(unit, "OffGridLoadPower") if unit is not None else None
+        for unit in units
+    ]
+
+
+def _off_grid_total(response: dict[str, Any]) -> float | None:
+    """Sum of every per-storage off-grid reading; None for a partial frame.
+
+    The connected load is the load behind the battery, so it is the complete
+    per-storage off-grid total. A partial frame (any unit without the reading)
+    must never be reported as a total: returning None makes the caller fail
+    closed rather than understate the load.
+    """
+    per_unit = _off_grid_per_unit(response)
+    if not per_unit or not all(value is not None for value in per_unit):
+        return None
+    return sum(value for value in per_unit if value is not None)
 
 
 def _first_mapping(value: Any) -> dict[str, Any]:

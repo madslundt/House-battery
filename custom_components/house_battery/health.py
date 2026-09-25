@@ -46,10 +46,12 @@ def get_health_problems(
 
     required = _REQUIRED
     if config.get("host"):
-        # Battery SOC, charge/discharge power, and operating mode come from
-        # the built-in TCP adapter. Its direct telemetry also lets the
-        # coordinator derive load from a grid-import meter.
-        required = (CONF_GRID_IMPORT_POWER, CONF_GRID_AVAILABLE)
+        # Battery SOC, connected load (the complete off-grid total), signed
+        # grid flow (MeterTotalActivePower) and operating mode all come from
+        # the built-in TCP adapter. Only physical grid availability still
+        # needs an HA source, and it is a binary template, so it must not be
+        # treated as a continuously-refreshing meter.
+        required = (CONF_GRID_AVAILABLE,)
     problems = [
         f"{key} unavailable"
         for key in required
@@ -58,10 +60,11 @@ def get_health_problems(
     grid = state(CONF_GRID_AVAILABLE)
     if parse_grid_available(grid.state if grid else None) is None:
         problems.append("grid availability is unknown")
-    # A direct-local entry continuously receives the grid-import measurement,
-    # but grid availability is often a binary template that only reports when
-    # the physical grid changes. Requiring repeated `on` reports incorrectly
-    # disables an otherwise healthy direct battery after five minutes.
+    # The direct TCP adapter's signed grid flow is validated by the telemetry
+    # validator on every frame, so HA freshness only matters for a grid meter
+    # the user supplied as an optional cross-check. Grid availability is a
+    # binary template that only reports on change, so requiring repeated `on`
+    # reports would disable a healthy direct battery after five minutes.
     freshness_keys = (
         (CONF_GRID_IMPORT_POWER,) if config.get("host") else _PHYSICAL
     )
