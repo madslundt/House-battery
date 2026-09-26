@@ -446,7 +446,10 @@ def test_self_consumption_command_is_verified_and_limited_to_known_registers(
     values = client.command["SetControlInfo"]
     assert client.command["Set"] == "Energycontrolparameters"
     assert set(values) == {"3000", "3020", "3021", "3022", "3030", "3003"}
-    assert values["3021"] == "0"
+    # Self-consumption requires both native AI flags.  The FBP1200 accepts and
+    # reads back schedule mode 3 with only AI discharge enabled, but remains
+    # physically idle under load in that state.
+    assert values["3021"] == "1"
     assert values["3022"] == "1"
 
 

@@ -295,17 +295,17 @@ class FbpLocalTcpClient:
         """Return to the device's local self-consumption / zero-export mode.
 
         This is the small, allowlisted AI restore sequence used by compatible
-        compatible devices. The common write path retries only after a successful
-        read-back proves the first absolute register update did not apply.
+        devices. Both native AI flags are required: the FBP1200 accepts and
+        reads back schedule mode 3 with only AI discharge enabled, but remains
+        physically idle under load in that state. The common write path retries
+        only after a successful read-back proves the first absolute register
+        update did not apply.
         """
         await self._write_and_verify(
             {
                 REG_EMS_ENABLE: "1",
                 REG_SCHEDULE_MODE: "3",
-                # The PS240's exact app-written AI-charge behaviour is not yet
-                # captured. Preserve the commissioned local policy until a
-                # hardware fixture proves that changing this flag is correct.
-                REG_AI_SMART_CHARGE: "0",
+                REG_AI_SMART_CHARGE: "1",
                 REG_AI_SMART_DISCHARGE: "1",
                 REG_CUSTOM_MODE: "0",
                 REG_CONTROL_TIME_1: "0,00:00,00:00,0,0,0,0,0,0,100,10",
