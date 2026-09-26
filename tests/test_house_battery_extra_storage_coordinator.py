@@ -6,6 +6,7 @@ import asyncio
 import sys
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -14,9 +15,11 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 import homeassistant.util.dt as dt_util
 import house_battery.coordinator as coordinator_module
+from house_battery.dailyplan import DailyPlan
 from house_battery.const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
+    CONF_COMMISSIONED,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
     CONF_LOAD_POWER,
@@ -188,6 +191,139 @@ class _StaticStore:
 
     async def save(self, state: RuntimeState) -> None:
         self.state = state
+
+
+def test_coordinator_executes_published_action_until_price_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local = ZoneInfo("Europe/Copenhagen")
+    fixed_now = NOW
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001 - stdlib signature
+            if tz is None:
+                return fixed_now.replace(tzinfo=None)
+            return fixed_now.astimezone(tz)
+
+    day_start = datetime(2026, 9, 21, tzinfo=local)
+    day_end = day_start + timedelta(days=1)
+    interval_start = NOW - timedelta(minutes=5)
+    interval_end = NOW + timedelta(minutes=10)
+
+    def planned_slot(start: datetime, end: datetime, action: Action) -> PlannedSlot:
+        return PlannedSlot(
+            start=start,
+            end=end,
+            action=action,
+            price=2.0,
+            expected_load_wh=100,
+            grid_import_wh=100 if action is Action.GRID else 0,
+            battery_charge_wh=0,
+            battery_discharge_wh=50 if action is Action.BATTERY else 0,
+            soc_start=65,
+            soc_end=64 if action is Action.BATTERY else 65,
+            interval_cost_dkk=0.1,
+            baseline_cost_dkk=0.2,
+            reason=f"{action.value} plan",
+        )
+
+    published = DailyPlan(
+        date="2026-09-21",
+        slots=(
+            planned_slot(day_start, interval_start, Action.GRID),
+            planned_slot(interval_start, interval_end, Action.BATTERY),
+            planned_slot(interval_end, day_end, Action.BATTERY),
+        ),
+    )
+    fresh_plan = _make_plan(
+        (
+            planned_slot(NOW, interval_end, Action.GRID),
+            planned_slot(interval_end, day_end, Action.GRID),
+        )
+    )
+
+    async def scenario() -> tuple[dict[str, object], list[Action]]:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        hass.config.time_zone = "Europe/Copenhagen"
+        entry = _Entry(
+            {
+                CONF_SOC: "sensor.soc",
+                CONF_LOAD_POWER: "sensor.load",
+                CONF_GRID_IMPORT_POWER: "sensor.grid_import",
+                CONF_GRID_AVAILABLE: "binary_sensor.grid",
+                CONF_OPERATING_MODE: "select.mode",
+                CONF_PRICE_ENTITIES: ["sensor.price"],
+                CONF_COMMISSIONED: True,
+            }
+        )
+        coordinator = Fbp1200Coordinator(hass, entry)
+        coordinator.store = _StaticStore(coordinator.runtime)
+        coordinator.runtime.execution_enabled = True
+        coordinator.runtime.daily_plan = published
+        coordinator._startup_guard_passed = True
+        hass.states.async_set("sensor.soc", "65")
+        hass.states.async_set("sensor.load", "100")
+        hass.states.async_set("sensor.grid_import", "100")
+        hass.states.async_set("binary_sensor.grid", "on")
+        hass.states.async_set("select.mode", "Idle")
+        hass.states.async_set(
+            "sensor.price",
+            "2.0",
+            {
+                "prices": [
+                    {
+                        "start": NOW.isoformat(),
+                        "end": interval_end.isoformat(),
+                        "price": 2.0,
+                    },
+                    {
+                        "start": interval_end.isoformat(),
+                        "end": day_end.astimezone(UTC).isoformat(),
+                        "price": 2.0,
+                    },
+                ]
+            },
+        )
+
+        async def no_observation(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            return None
+
+        coordinator.evidence.async_observe = no_observation
+        coordinator._optimize_with_storage_policy = lambda *args, **kwargs: (
+            SimpleNamespace(
+                plan=fresh_plan,
+                settings=coordinator._settings(),
+                active=False,
+                reason="normal plan",
+                incremental_savings_dkk=0.0,
+            )
+        )
+        commanded: list[Action] = []
+
+        async def capture_command(
+            action: Action, now: datetime, **kwargs
+        ) -> tuple[bool, str]:  # noqa: ANN003
+            commanded.append(action)
+            return True, "command captured"
+
+        coordinator.actuator.async_command = capture_command
+        return await coordinator._async_update_data(), commanded
+
+    monkeypatch.setattr(dt_util, "DEFAULT_TIME_ZONE", local)
+    monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
+    monkeypatch.setattr(
+        coordinator_module, "get_health_problems", lambda *a, **k: []
+    )
+    data, commanded = asyncio.run(scenario())
+
+    assert data["system_state"] == "ACTIVE"
+    assert data["plan"]["slots"][0]["action"] == "grid"
+    assert data["executable_slot"]["action"] == "battery"
+    assert data["reason"].startswith("Published battery action remains in force")
+    assert commanded == [Action.BATTERY]
 
 
 def test_plan_view_spans_whole_local_day_at_utc_midnight(

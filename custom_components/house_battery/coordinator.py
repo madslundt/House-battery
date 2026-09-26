@@ -760,6 +760,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         reason = "Waiting for valid local telemetry and price intervals"
         command_result = "no command"
         effective_settings: PlannerSettings | None = None
+        executable_slot: dict[str, Any] | None = None
+        executable_action: Action | None = None
         opportunistic_active = False
         opportunistic_reason = "No valid plan is available"
         opportunistic_incremental_savings = 0.0
@@ -857,6 +859,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     day_start=day_start,
                     horizon_end=horizon_end,
                 )
+                published_slot = self.runtime.daily_plan.slot_at(now)
+                if published_slot is not None:
+                    executable_slot = published_slot.as_dict()
+                    executable_action = published_slot.action
                 self._daily_plan_dirty = True
                 commissioned = bool(self.config.get(CONF_COMMISSIONED, False))
                 state = (
@@ -865,6 +871,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else "SHADOW"
                 )
                 reason = self.plan.reason
+                if (
+                    published_slot is not None
+                    and published_slot.action is not self.plan.current_action
+                ):
+                    reason = (
+                        f"Published {published_slot.action.value} action remains in "
+                        f"force until {published_slot.end.isoformat()}; "
+                        f"latest optimizer recommendation: {self.plan.reason}"
+                    )
                 if not self._startup_guard_passed:
                     self._startup_guard_passed = True
                     command_result = (
@@ -875,10 +890,14 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # regardless of the optimizer plan, so each physical function
                     # can be verified in isolation. `auto` follows the plan.
                     override_action = self._override_action()
+                    # The daily-plan reconciler holds the published action
+                    # through the current tariff boundary. Follow that same
+                    # slot so the timeline, execution diagnostic, and command
+                    # do not disagree during an economic replan.
                     requested_action = (
                         override_action
                         if override_action is not None
-                        else self.plan.current_action
+                        else executable_action or self.plan.current_action
                     )
                     # Direct-local units have no CT/grid-flow signal, so cap a
                     # manual discharge slot below the fresh connected-load
@@ -899,7 +918,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 {
                     "timestamp": now.isoformat(),
                     "state": state,
-                    "action": self.plan.current_action.value
+                    "action": (executable_action or self.plan.current_action).value
                     if self.plan and self.plan.slots
                     else Action.SAFE.value,
                     "reason": reason,
@@ -1079,6 +1098,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.plan.created_at.isoformat() if self.plan else None
             ),
             "plan": (self.plan.today_dict(local_now) if self.plan else None),
+            # The reconciled slot is both the currently published action and the
+            # one automatic control follows through the current price boundary.
+            "executable_slot": executable_slot,
             # Persisted 00:00 -> 24:00 daily timeline (immutable past + fresh
             # future).  Shown even during bootstrap/degraded/restart so the
             # dashboard never loses the current day's plan.

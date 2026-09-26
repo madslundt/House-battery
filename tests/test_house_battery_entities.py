@@ -208,6 +208,45 @@ def test_current_plan_slot_exposes_auditable_planner_inputs() -> None:
     assert FbpPlanExecutionSensor.native_value.fget(execution_sensor) == "matching"
 
 
+def test_current_plan_slot_uses_published_action_when_optimizer_disagrees() -> None:
+    optimizer_slot = {
+        "start": "2026-09-22T10:00:00+00:00",
+        "end": "2026-09-22T10:15:00+00:00",
+        "action": "grid",
+        "expected_load_wh": 100,
+        "grid_import_wh": 100,
+        "battery_charge_wh": 0,
+        "battery_discharge_wh": 0,
+    }
+    published_slot = {
+        **optimizer_slot,
+        "action": "battery",
+        "grid_import_wh": 0,
+        "battery_discharge_wh": 50,
+        "reason": "Published action remains in force through the tariff boundary",
+    }
+    data = {
+        "plan": {"slots": [optimizer_slot]},
+        "executable_slot": published_slot,
+        "battery_charge_power_w": 0,
+        "battery_output_power_w": 0,
+    }
+    coordinator = SimpleNamespace(data=data)
+    slot_sensor = SimpleNamespace(coordinator=coordinator)
+    execution_sensor = SimpleNamespace(coordinator=coordinator)
+
+    assert FbpCurrentPlanSlotSensor.native_value.fget(slot_sensor) == "battery"
+    attributes = FbpCurrentPlanSlotSensor.extra_state_attributes.fget(slot_sensor)
+    assert attributes["action"] == "battery"
+    assert attributes["reason"] == published_slot["reason"]
+    assert (
+        FbpPlanExecutionSensor.extra_state_attributes.fget(execution_sensor)[
+            "planned_action"
+        ]
+        == "battery"
+    )
+
+
 def test_sensor_setup_removes_redundant_current_decision_entity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

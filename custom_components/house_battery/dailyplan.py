@@ -456,6 +456,18 @@ class DailyPlan:
     slots: tuple[PlannedSlot, ...] = ()
     created_at: datetime | None = None
 
+    def slot_at(self, instant: datetime) -> PlannedSlot | None:
+        """Return the published action covering ``instant``, if any.
+
+        This is the executable action for the in-progress price interval. It can
+        intentionally differ from a freshly optimized recommendation until the
+        interval boundary, so control and current-plan diagnostics must use this
+        slot rather than the un-reconciled optimizer output.
+        """
+        return next(
+            (slot for slot in self.slots if slot.start <= instant < slot.end), None
+        )
+
     def view_dict(
         self,
         *,

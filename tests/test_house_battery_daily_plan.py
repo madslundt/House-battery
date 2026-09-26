@@ -493,6 +493,36 @@ def test_alternating_replans_cannot_shorten_a_15_minute_price_block() -> None:
         )
 
 
+def test_current_slot_keeps_published_action_until_price_boundary() -> None:
+    """Execution uses the reconciled action, even when a replan disagrees."""
+    day_start, day_end = _day_bounds()
+    interval_start = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    interval_end = interval_start + timedelta(minutes=15)
+    cutoff = interval_start + timedelta(minutes=10)
+    daily = DailyPlan(
+        date="2026-09-20",
+        slots=(
+            slot(day_start, interval_start, Action.GRID),
+            slot(interval_start, interval_end, Action.BATTERY),
+            slot(interval_end, day_end, Action.BATTERY),
+        ),
+    )
+
+    replanned = reconcile_daily_plan(
+        daily,
+        (
+            slot(cutoff, interval_end, Action.GRID),
+            slot(interval_end, day_end, Action.GRID),
+        ),
+        cutoff=cutoff,
+        day_start=day_start,
+        horizon_end=day_end,
+    )
+
+    assert replanned.slot_at(cutoff).action is Action.BATTERY
+    assert replanned.slot_at(interval_end).action is Action.GRID
+
+
 # --------------------------------------------------------------------------- #
 # #12 — Persistence + restart, and #Midnight
 # --------------------------------------------------------------------------- #

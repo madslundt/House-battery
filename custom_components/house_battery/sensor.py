@@ -490,7 +490,10 @@ class FbpPlanSensor(Fbp1200Entity, SensorEntity):
 
 
 def _current_plan_slot(data: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the executable current slot, if the planner has one."""
+    """Return the reconciled slot that control follows, when available."""
+    executable_slot = data.get("executable_slot")
+    if isinstance(executable_slot, dict):
+        return executable_slot
     plan = data.get("plan")
     if not isinstance(plan, dict):
         return None
