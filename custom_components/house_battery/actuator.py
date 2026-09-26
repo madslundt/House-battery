@@ -186,6 +186,10 @@ class LocalControlAdapter:
         runtime = self._runtime()
         requested_action = action
         isolation_confirmed = True
+        if action is not Action.BATTERY:
+            # Restore the grid path before leaving Battery mode, so the FBP can
+            # hand the load back to Grid or begin charging from the mains.
+            await self.async_set_grid_isolation(True)
         minimum = round(self._minimum_soc_for(action))
         maximum = round(
             target_soc if target_soc is not None else runtime.settings["target_soc"]
@@ -252,11 +256,6 @@ class LocalControlAdapter:
             runtime.transitions.append(now.isoformat())
         await self._save()
         result = "local TCP command acknowledged; SOC limits read back"
-        if action is not Action.BATTERY:
-            # The battery command is already in a non-exporting mode before
-            # reconnecting the grid input. A plug failure does not block charge,
-            # grid, or safe control.
-            await self.async_set_grid_isolation(True)
         if requested_action is Action.BATTERY and not isolation_confirmed:
             result = (
                 "grid isolation plug unavailable or not confirmed off; battery "

@@ -1278,6 +1278,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         controls = await self.local_client.async_read_controls()
         minimum = round(_control_number(controls, "3023") or 0)
         maximum = round(_control_number(controls, "3024") or 100)
+        if mode != MODE_BATTERY:
+            # Restore the grid path before leaving Battery mode.
+            await self.actuator.async_set_grid_isolation(True)
         if mode == MODE_BATTERY:
             await self.local_client.async_set_self_consumption()
             if not await self.actuator.async_set_grid_isolation(False):
@@ -1304,10 +1307,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ValueError(f"Unsupported local operating mode: {mode}")
         self._local_controls = controls
         self._set_commanded_local_mode(mode)
-        if mode != MODE_BATTERY:
-            # The battery mode has already been stopped/changed before the
-            # grid input is reconnected.
-            await self.actuator.async_set_grid_isolation(True)
         await self.async_request_refresh()
 
     async def async_set_override_action(self, mode: str) -> None:

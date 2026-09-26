@@ -466,8 +466,8 @@ def test_configured_grid_isolation_switch_brackets_battery_mode() -> None:
     assert timeline == [
         ("tcp", "Discharge"),
         ("service", "turn_off"),
-        ("tcp", "Idle"),
         ("service", "turn_on"),
+        ("tcp", "Idle"),
     ]
     assert [(domain, service) for domain, service, _ in services.calls] == [
         ("switch", "turn_off"),

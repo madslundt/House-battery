@@ -108,10 +108,10 @@ against the load and grid rather than taken from the inverter's raw registers.
 When a grid input smart plug is configured, automatic and manual Battery mode
 first command the FBP1200 into battery mode, then turn the plug off and wait for
 `off` state confirmation. If it is unavailable or does not confirm `off`, the
-integration immediately commands Grid/Idle and keeps operating. For every
-other mode, the battery mode command is sent before the integration attempts
-to turn the plug on. Plug service errors are logged and do not disable the
-rest of the integration. Without a configured plug, behavior is unchanged.
+integration immediately commands Grid/Idle and keeps operating. When leaving
+Battery mode, it turns the plug on before commanding Charge or Grid/Idle. Plug
+service errors are logged and do not disable the rest of the integration.
+Without a configured plug, behavior is unchanged.
 
 ## Commissioning checklist
 

@@ -47,7 +47,7 @@
     "step": {
       "init": {
         "title": "Battery bindings and commissioning",
-        "description": "Commissioned permits the Active control switch to issue local battery commands. With an optional grid input smart plug, Battery mode is commanded first and the plug is then turned off; if it cannot be confirmed off, the integration immediately commands Grid/Idle. Other modes are commanded before the plug is turned on. Verify each mode, SOC limit, and physical power response before enabling it.",
+        "description": "Commissioned permits the Active control switch to issue local battery commands. With an optional grid input smart plug, Battery mode is commanded first and the plug is then turned off; if it cannot be confirmed off, the integration immediately commands Grid/Idle. When leaving Battery mode, the plug is turned on before the next battery mode is commanded. Verify each mode, SOC limit, and physical power response before enabling it.",
         "data": {
           "soc_entity": "Battery state of charge",
           "load_power_entity": "Connected/house load power",
