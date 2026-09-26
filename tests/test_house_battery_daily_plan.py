@@ -694,6 +694,48 @@ def test_daily_plan_view_always_covers_the_complete_day() -> None:
     ).isoformat()
 
 
+def test_entity_keeps_morning_and_replans_to_end_of_known_next_day_prices() -> None:
+    """Midday replans retain morning history and refresh only the known future."""
+    day_start = datetime(2026, 9, 26, 0, 0, tzinfo=PLUS2)
+    cutoff = day_start + timedelta(hours=10)
+    day_two_start = day_start + timedelta(days=1)
+    horizon_end = day_two_start + timedelta(hours=6)
+    morning = (
+        slot(day_start, day_start + timedelta(hours=6), Action.GRID),
+        slot(day_start + timedelta(hours=6), day_start + timedelta(hours=8), Action.BATTERY),
+        slot(day_start + timedelta(hours=8), cutoff, Action.GRID),
+    )
+    persisted = DailyPlan(date=day_start.date().isoformat(), slots=morning)
+    updated_future = (
+        slot(cutoff, day_start + timedelta(hours=14), Action.BATTERY),
+        slot(day_start + timedelta(hours=14), day_start + timedelta(hours=15), Action.CHARGE),
+        slot(day_start + timedelta(hours=15), day_two_start, Action.GRID),
+        slot(day_two_start, horizon_end, Action.BATTERY),
+    )
+
+    updated = reconcile_daily_plan(
+        persisted,
+        updated_future,
+        cutoff=cutoff,
+        day_start=day_start,
+        horizon_end=horizon_end,
+    )
+    entity_blocks = daily_plan_blocks({"daily_plan": updated.view_dict()})
+
+    assert entity_blocks[0]["start"] == day_start.isoformat()
+    assert entity_blocks[-1]["end"] == horizon_end.isoformat()
+    assert updated.slots[: len(morning)] == morning
+    assert any(
+        datetime.fromisoformat(block["start"]).date() == day_two_start.date()
+        for block in entity_blocks
+    )
+    cursor = datetime.fromisoformat(entity_blocks[0]["start"])
+    for block in entity_blocks:
+        assert datetime.fromisoformat(block["start"]) == cursor
+        cursor = datetime.fromisoformat(block["end"])
+    assert cursor == horizon_end
+
+
 # --------------------------------------------------------------------------- #
 # Timezone normalisation + multi-day horizon (regression fixes)
 #
