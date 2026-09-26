@@ -2,13 +2,12 @@
 
 There are two distinct controls here:
 
-* The native **Battery Operating Mode** select on the FBP1200 device
-  (``Charge / Idle / Self-Gen/Zero Export``) is configured separately through
-  the integration options (``CONF_OPERATING_MODE``) and is owned by the device
-  integration.  This entity is the physical actuator.
+* A configured native **Battery Operating Mode** select is owned by the device
+  integration. Direct-local FBP1200 entries instead write verified TCP control
+  slots directly.
 * This **Operation mode** select is the integration's own policy control with
   ``auto / charge / battery / grid``.  ``auto`` follows the optimizer plan; a
-  forced mode commands the native Battery Operating Mode every refresh.
+  forced mode commands the physical actuator every refresh.
 """
 
 from __future__ import annotations

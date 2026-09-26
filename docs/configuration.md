@@ -93,11 +93,13 @@ The adapter uses exactly these proven local options:
 | --- | --- |
 | `charge` | `Charge` |
 | `grid` | `Idle` |
-| `battery` | `Self-Gen/Zero Export` (vendor label) |
-| `safe` | `Self-Gen/Zero Export` (vendor label) |
+| `battery` | Native `Self-Gen/Zero Export`, or a load-capped `Discharge` slot on direct-local FBP1200 entries |
+| `safe` | Native safe mode, or `Idle` on direct-local FBP1200 entries |
 
 **Operating mode** shows the last command acknowledged by the battery's local
-interface. The vendor app can change the mode separately. The physical
+interface. The vendor app can change the mode separately. Direct-local
+discharge fails closed to 0 W without a complete connected-load reading and is
+capped below the current load with a 50 W margin. The physical
 confirmation of what actually happened is the **grid meter** (zero export) and
 the derived **Battery output power** / **Power source**, which are reconciled
 against the load and grid rather than taken from the inverter's raw registers.

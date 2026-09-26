@@ -70,10 +70,9 @@ class FbpGridAvailableBinarySensor(Fbp1200Entity, BinarySensorEntity):
 class FbpExportDetectedBinarySensor(Fbp1200Entity, BinarySensorEntity):
     """Flag any real grid export as measured by the meter.
 
-    Zero export is enforced by the Self-Gen/Zero Export firmware mode, but this
-    sensor is the independent detector: it confirms the guarantee holds. It is
-    ``on" whenever the meter reports export above the noise floor, regardless of
-    whether the optimizer currently writes to the inverter."""
+    It is ``on`` whenever a configured meter reports export above the noise
+    floor, regardless of whether the optimizer currently writes to the
+    inverter. Direct-local devices without a CT meter report ``None``."""
 
     _attr_name = "Export detected"
     _attr_device_class = BinarySensorDeviceClass.POWER
@@ -90,7 +89,7 @@ class FbpExportDetectedBinarySensor(Fbp1200Entity, BinarySensorEntity):
     def extra_state_attributes(self) -> dict[str, object]:
         return {
             "power_w": self.coordinator.data.get("export_power_w"),
-            "note": "Any grid export is a fault; zero export is a firmware guarantee of the Self-Gen mode.",
+            "note": "Any measured grid export is a fault; unavailable means this entry has no trustworthy grid meter.",
         }
 
 

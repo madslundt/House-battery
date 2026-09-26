@@ -33,7 +33,7 @@ async def async_get_config_entry_diagnostics(
     coordinator: Fbp1200Coordinator = entry.runtime_data
     return async_redact_data(
         {
-            "integration": {"version": "1.5.4", "title": entry.title},
+            "integration": {"version": "1.5.6", "title": entry.title},
             "configuration": coordinator.config,
             "export": coordinator.export_data(),
         },

@@ -360,9 +360,7 @@ def test_direct_tcp_command_uses_allowlisted_client_and_updates_commanded_mode()
 
 def test_direct_battery_reports_the_custom_slot_not_the_native_label() -> None:
     """The reported commanded mode must match what the local adapter actually
-    writes.  On the direct TCP path BATTERY is written to the native
-    "Self-Gen/Zero Export" option (zero export is a firmware guarantee), not a
-    fixed-power "Discharge" slot."""
+    writes: a load-capped fixed-power Discharge slot."""
 
     class DirectClient:
         def __init__(self) -> None:
@@ -375,9 +373,6 @@ def test_direct_battery_reports_the_custom_slot_not_the_native_label() -> None:
             self, mode: str, power: int, *, min_soc: int, max_soc: int
         ) -> None:
             self.calls.append(("mode", mode, power, min_soc, max_soc))
-
-        async def async_set_self_consumption(self) -> None:
-            self.calls.append(("self_consumption",))
 
     state = runtime()
     direct = DirectClient()
@@ -396,20 +391,18 @@ def test_direct_battery_reports_the_custom_slot_not_the_native_label() -> None:
     )
 
     success, _result = asyncio.run(
-        adapter.async_command(Action.BATTERY, datetime.now(UTC), target_soc=90)
+        adapter.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=150
+        )
     )
 
     assert success
-    # No power setpoint, no load clamp: zero export is a firmware guarantee of
-    # the Self-Gen/Zero Export mode.
-    assert direct.calls == [("limits", 20, 90), ("self_consumption",)]
-    assert modes == ["Self-Gen/Zero Export"]
+    assert direct.calls == [("limits", 20, 90), ("mode", "Discharge", 100, 20, 90)]
+    assert modes == ["Discharge"]
 
 
-def test_direct_battery_is_written_to_self_consumption_even_when_over_capacity() -> None:
-    """The inverter caps fixed-power charge slots at 1200 W, but BATTERY is no
-    longer a fixed-power slot at all: even an absurdly large configured
-    discharge power must still write Self-Gen/Zero Export, never Discharge."""
+def test_direct_battery_discharge_is_capped_by_device_and_load() -> None:
+    """A manual discharge never exceeds the device or current-load ceiling."""
 
     class DirectClient:
         def __init__(self) -> None:
@@ -422,9 +415,6 @@ def test_direct_battery_is_written_to_self_consumption_even_when_over_capacity()
             self, mode: str, power: int, *, min_soc: int, max_soc: int
         ) -> None:
             self.calls.append(("mode", mode, power, min_soc, max_soc))
-
-        async def async_set_self_consumption(self) -> None:
-            self.calls.append(("self_consumption",))
 
     state = runtime()
     state.settings["discharge_power_w"] = 5000
@@ -442,12 +432,13 @@ def test_direct_battery_is_written_to_self_consumption_even_when_over_capacity()
     )
 
     success, _result = asyncio.run(
-        control.async_command(Action.BATTERY, datetime.now(UTC), target_soc=90)
+        control.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=2000
+        )
     )
 
     assert success
-    assert direct.calls == [("self_consumption",)]
-    assert all(call[0] != "mode" for call in direct.calls)
+    assert direct.calls == [("mode", "Discharge", 1200, 20, 90)]
 
 
 def test_battery_command_raises_the_native_minimum_to_the_arbitrage_reserve() -> None:
@@ -465,9 +456,6 @@ def test_battery_command_raises_the_native_minimum_to_the_arbitrage_reserve() ->
         ) -> None:
             self.calls.append(("mode", mode, power, min_soc, max_soc))
 
-        async def async_set_self_consumption(self) -> None:
-            self.calls.append(("self_consumption",))
-
     state = runtime()
     state.settings["reserve_soc"] = 20
     direct = DirectClient()
@@ -484,11 +472,13 @@ def test_battery_command_raises_the_native_minimum_to_the_arbitrage_reserve() ->
     )
 
     success, _result = asyncio.run(
-        control.async_command(Action.BATTERY, datetime.now(UTC), target_soc=90)
+        control.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=150
+        )
     )
 
     assert success
-    assert direct.calls == [("limits", 20, 90), ("self_consumption",)]
+    assert direct.calls == [("limits", 20, 90), ("mode", "Discharge", 100, 20, 90)]
 
 
 def test_direct_battery_discharge_clamps_to_the_device_setpoint_ceiling() -> None:
@@ -519,6 +509,49 @@ def test_direct_battery_discharge_clamps_to_the_device_setpoint_ceiling() -> Non
         save,
         lambda: direct,
     )
+
+    success, _result = asyncio.run(
+        control.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=1600
+        )
+    )
+
+    assert success
+    assert direct.calls == [("Discharge", 1200)]
+
+
+def test_direct_battery_fails_closed_without_load_telemetry() -> None:
+    class DirectClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def async_set_limits(self, minimum: int, maximum: int) -> None:
+            del minimum, maximum
+
+        async def async_set_mode(self, mode, power, *, min_soc, max_soc) -> None:
+            self.calls.append((mode, power))
+
+    state = runtime()
+    direct = DirectClient()
+
+    async def save() -> None:
+        return None
+
+    control = LocalControlAdapter(
+        FakeHass(FakeStates({}), FakeServices(FakeStates({}))),
+        config,
+        lambda: state,
+        save,
+        lambda: direct,
+    )
+
+    success, _result = asyncio.run(
+        control.async_command(Action.BATTERY, datetime.now(UTC), target_soc=90)
+    )
+
+    assert success
+    assert direct.calls == [("Idle", 0)]
+
 
 def test_failed_grid_exit_keeps_the_native_reserve_protected() -> None:
     """A failed Idle command must not expose a prior Self-Gen reserve."""

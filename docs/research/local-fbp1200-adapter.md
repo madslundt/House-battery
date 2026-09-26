@@ -143,3 +143,16 @@ Use MortUK's project for the proven AECC control shape and upstream
 copy its overnight-price strategy. The House-battery optimizer remains the
 sole economic planner; the new adapter is only a deterministic local device
 provider.
+
+## Physical control verification (2026-09-26)
+
+The physical FBP1200 was tested with the Home Assistant config entry
+temporarily disabled to release its single TCP session. Baseline telemetry
+showed 149 W connected load, 0 W reported battery output and Self-Gen controls
+(`3020=3`, `3021=1`, `3022=1`, `3030=0`). Writing a 100 W custom Discharge slot
+produced three consecutive non-zero output samples (316 W, 304 W and 333 W).
+Restoring the complete baseline register set returned reported output to 0 W.
+This verifies that custom Discharge starts physical output on this unit while
+native Self-Gen remains idle without a CT signal. Raw output power remains
+diagnostic-only and is not treated as a calibrated measure of delivered AC
+power.

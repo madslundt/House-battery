@@ -103,26 +103,26 @@ supplies when load exceeds grid import. The raw device charge/output powers are
 kept as diagnostics only (`battery_charge_power_w` / `battery_output_power_w`
 downstream of the device) and are exposed for inspection, never for control.
 
-### Zero export is enforced at the meter, not by clamping a setpoint
+### Zero export enforcement
 
-The old approach clamped the commanded discharge at the measured load minus a
-safety margin and hoped the residual stayed non-positive. The current approach
-makes zero export a firmware guarantee and verifies it at the meter:
+The control method depends on the available hardware feedback:
 
-- **Self-Gen / Zero Export is the only battery action.** When automatic control
-  is on and the plan wants to move the battery, the actuator calls the
-  inverter's native `Self-Gen/Zero Export` mode. That mode is a hardware
-  guarantee that no energy is pushed to the grid; it is not a load-dependent
-  setpoint that can drift above the load and export.
-- **The meter independently verifies the guarantee.** The coordinator
+- **Native integrations use Self-Gen / Zero Export.** When a trustworthy native
+  meter is available, the inverter owns the real-time zero-export loop.
+- **Direct-local FBP1200 entries use a bounded manual slot.** This device has no
+  CT/grid-meter signal and its Self-Gen mode remains idle. The actuator caps
+  Discharge below the fresh connected-load reading by 50 W and writes Idle/0 W
+  when that reading is missing or invalid.
+- **A configured meter independently verifies the result.** The coordinator
   decomposes the grid-meter reading into import and export. Any export above a
   small noise floor lights an `Export detected` binary sensor; export above a
   slightly higher safety floor while automatic control is enabled latches an
   `Export safety fault` that **disables all inverter writes** until the operator
   resets execution. This is fail-closed: an export can never continue through
   the next planning cycle.
-- **The planner still keeps a head of safety.** Because zero export is a
-  firmware guarantee, the planner no longer has to reserve a load-dip margin to
+- **The planner still keeps a head of safety.** The planner does not schedule
+  more discharge than forecast load, while the actuator independently uses the
+  current measured load and a safety margin to
   avoid exporting; it can value stored energy on its genuine opportunity cost.
 - **Accounting and telemetry report grid export as a first-class quantity** so
   any export stays immediately visible rather than being silently clamped away.

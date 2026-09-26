@@ -808,15 +808,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if override_action is not None
                         else self.plan.current_action
                     )
-                    # Zero export is enforced by the self-consumption mode
-                    # (a firmware guarantee) and by the meter-based export
-                    # safety layer in this same refresh; no load clamp is
-                    # applied at the command boundary.
+                    # Direct-local units have no CT/grid-flow signal, so cap a
+                    # manual discharge slot below the fresh connected-load
+                    # reading. Missing load telemetry fails closed to 0 W.
                     command_result = (
                         await self.actuator.async_command(
                             requested_action,
                             now,
                             target_soc=effective_settings.target_soc,
+                            load_w=self._load_power(),
                         )
                     )[1]
 

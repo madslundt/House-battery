@@ -4,15 +4,14 @@ The single hard requirement for this integration is that the battery must never
 export to the grid. This is enforced in every layer (see `docs/architecture.md`)
 and must be verified physically after install, not only trusted from the code.
 
-## The three layers that guarantee zero export
+## The three protection layers
 
-1. **Self-Gen / Zero Export is the only battery action.** When automatic control
-   is on and the plan wants to move the battery, the actuator writes the
-   inverter's native `Self-Gen/Zero Export` mode. That mode is a hardware
-   guarantee that no energy reaches the grid; it is not a load-dependent
-   setpoint that can drift above the load and export. This is the layer that
-   actually stops export.
-2. **The grid meter independently verifies the guarantee.** The coordinator
+1. **Discharge is bounded at the actuator.** Native integrations use their
+   zero-export mode. A direct-local FBP1200 has no CT input, so its native
+   Self-Gen mode remains idle; that path writes a manual Discharge slot capped
+   at the fresh connected-load reading minus 50 W. Missing or invalid load
+   telemetry produces an Idle/0 W command.
+2. **A configured grid meter independently verifies the result.** The coordinator
    decomposes the signed grid-meter reading into import and export. Any export
    above a small noise floor lights an `Export detected` sensor; export above a
    slightly higher safety floor while automatic control is enabled **latches an
@@ -23,10 +22,8 @@ and must be verified physically after install, not only trusted from the code.
    export shows up on the **Grid export power** sensor and in the ledger, so a
    violation is visible rather than clamped away silently.
 
-Because zero export is a firmware guarantee, the planner no longer has to reserve
-a load-dip margin to avoid exporting and can value stored energy on its genuine
-opportunity cost. Discharge economics are a secondary concern; none of it can
-create export on its own — that is guaranteed by layers 1 and 2.
+The planner also caps modeled discharge at expected load. The direct-local
+actuator's second, real-time cap is deliberately independent of that forecast.
 
 ## Before energizing automatic control
 
@@ -34,13 +31,14 @@ create export on its own — that is guaranteed by layers 1 and 2.
       true. The planner refuses to plan, and automatic control latches to Safe,
       when grid is unavailable.
 - [ ] **The grid meter is configured** (`Grid import power` / `Grid export
-      power`, or a single signed grid entity). Without a grid meter the derived
-      power-flow model is incomplete and automatic control cannot safely run.
+      power`, or a single signed grid entity) for native integrations. A
+      direct-local FBP1200 has no trustworthy CT value, so verify it with an
+      external meter and understand that HA cannot latch on detected export.
 - [ ] **Native SOC controls read back** (minimum / maximum) with valid, sane
       bounds. Automatic control stays off until they are commissioned.
 - [ ] **`Absolute emergency SOC` ≤ `Reserve SOC` ≤ `Opportunistic target SOC`**
       and all sit inside the native bounds. The reserve is raised to the
-      inverter's native minimum in Self-Gen, so a failed mode command cannot
+      inverter's native minimum during discharge, so a failed mode command cannot
       expose stored reserve.
 - [ ] **Connected load power** is configured (the `Load power` entity). The
       derived battery flow and the `Power source` sensor depend on it.
@@ -50,7 +48,8 @@ create export on its own — that is guaranteed by layers 1 and 2.
 
 Do this while someone can watch the inverter's grid meter or a plug meter.
 
-1. Confirm the battery action is **Self-Gen / Zero Export**.
+1. Confirm the battery action is **Self-Gen / Zero Export** for a native
+   integration or **Discharge** for a direct-local FBP1200.
 2. Put a *small* constant load on the circuit the battery serves (a lamp or a
    space heater on a metered socket). This is the condition that used to export
    under the old load-clamped approach.
@@ -62,11 +61,11 @@ Do this while someone can watch the inverter's grid meter or a plug meter.
    - **Battery output power** is close to the load (within converter loss),
      confirming the derived flow agrees with the meter.
 4. Now **raise the load above the battery's discharge power**. Grid import rises
-   by the shortfall and there is still no export — the Self-Gen mode simply lets
-   the grid make up the difference.
+   by the shortfall.
 5. **Reduce the load again to near zero.** The grid meter must not run
-   backwards: the firmware holds zero export regardless of how small the load
-   becomes. `Export detected` stays `off` throughout.
+   backwards. `Export detected` stays `off` throughout. Direct-local entries
+   without a grid meter must be checked with an external meter during initial
+   commissioning because the integration cannot observe export itself.
 
 If any step shows positive grid export power, stop: the grid meter is mis-wired
 or mis-signed, or the load measurement is wrong, and the derived flow cannot be
