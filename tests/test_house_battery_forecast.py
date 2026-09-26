@@ -158,22 +158,22 @@ def test_stromligning_current_tomorrow_and_forecast_entities_extend_the_plan() -
 
         slots = coordinator._price_slots(now.astimezone(UTC))
 
-        # Known prices drive planning; forecasts are indicators only.
-        assert len(slots) == 110
-        assert all(slot.source == "known" for slot in slots)
-        assert coordinator._forecast_status == "used_as_indicator"
-        assert coordinator._forecast_used_slot_count == 0
+        # Known prices remain authoritative and the enabled forecast extends
+        # them contiguously with an uncertainty buffer.
+        assert len(slots) > 110
+        assert all(slot.source == "known" for slot in slots[:110])
+        assert all(slot.source == "forecast" for slot in slots[110:])
+        assert coordinator._forecast_status == "used"
+        assert coordinator._forecast_used_slot_count == len(slots) - 110
         # Extreme price indicator detects the 6.62 spike vs ~2.9 baseline.
         assert coordinator._extreme_price_is_extreme is True
         assert coordinator._extreme_price_ratio > 2.0
         assert slots[69].price == 1.297170
         assert slots[91].price == 6.619447
-        assert all(slot.hours == 0.25 for slot in slots)
+        assert all(slot.hours == 0.25 for slot in slots[:110])
+        assert all(slot.hours == 1.0 for slot in slots[110:])
 
-        # The optimizer receives only known-price slots; extreme-price
-        # detection runs independently on the forecast data.
-        # We verify the data pipeline, not the full optimisation logic
-        # (which is covered by planner tests).
+        # Known slots are never overwritten by the extension.
         assert slots[0].source == "known"
         assert slots[69].price == 1.297170  # cheap window
         assert slots[91].price == 6.619447  # expensive spike
@@ -457,10 +457,10 @@ def test_overlapping_forecasts_keep_independent_accuracy_histories() -> None:
     assert restored.forecast_accuracy_for("sensor.forecast_b").samples == 1
 
 
-def test_forecasts_are_indicators_only_and_all_sources_score_independently() -> (
+def test_first_contiguous_forecast_extends_plan_and_all_sources_score_independently() -> (
     None
 ):
-    """Forecasts never drive planning; they only feed the extreme-price indicator."""
+    """Configured source order selects planning; all sources retain evidence."""
 
     async def scenario() -> None:
         now = datetime.now(UTC).replace(second=0, microsecond=0)
@@ -510,12 +510,12 @@ def test_forecasts_are_indicators_only_and_all_sources_score_independently() -> 
 
         slots = coordinator._price_slots(now)
 
-        # Only known prices for planning; forecasts are indicators only.
-        assert [slot.price for slot in slots] == [1.0]
-        assert coordinator._forecast_planning_source is None
-        assert coordinator._forecast_sources["sensor.forecast_a"]["status"] == "used_as_indicator"
+        assert [slot.price for slot in slots] == [1.0, 1.20]
+        assert coordinator._forecast_planning_source == "sensor.forecast_a"
+        assert coordinator._forecast_used_slot_count == 1
+        assert coordinator._forecast_sources["sensor.forecast_a"]["status"] == "used"
         assert (
-            coordinator._forecast_sources["sensor.forecast_b"]["status"] == "used_as_indicator"
+            coordinator._forecast_sources["sensor.forecast_b"]["status"] == "available"
         )
 
         # When the actual price is published, both previously overlapping

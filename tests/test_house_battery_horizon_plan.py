@@ -336,8 +336,8 @@ def test_all_future_intervals_replaced_from_now() -> None:
                  datetime(2026, 9, 20, 10, 0, tzinfo=UTC), Action.CHARGE),
         ),
     )
-    # The old 08:00->10:00 CHARGE straddles the cutoff, so it is prated to
-    # 08:00->08:30 and the fresh future takes over from ``now``.
+    # The old 08:00->10:00 CHARGE straddles the cutoff. A different economic
+    # action may take over only when that tariff interval ends.
     future = (
         slot(cutoff, datetime(2026, 9, 20, 9, 0, tzinfo=UTC), Action.BATTERY),
         slot(datetime(2026, 9, 20, 9, 0, tzinfo=UTC),
@@ -350,17 +350,12 @@ def test_all_future_intervals_replaced_from_now() -> None:
     # The immutable morning GRID survives.
     assert result.slots[0].action is Action.GRID
     assert result.slots[0].end == datetime(2026, 9, 20, 8, 0, tzinfo=UTC)
-    # The 08:00->10:00 CHARGE straddles the cutoff, so it is prated to 08:00->08:30.
+    # The complete 08:00->10:00 CHARGE interval stays published.
     assert result.slots[1].action is Action.CHARGE
     assert result.slots[1].start == datetime(2026, 9, 20, 8, 0, tzinfo=UTC)
-    assert result.slots[1].end == cutoff
-    # The future replaces the remainder of the straddling CHARGE block.  Its
-    # re-optimised tail stops at the persisted interval end (10:00); the tail is
-    # the optimiser's own price intervals, clipped so nothing crosses 10:00.
+    assert result.slots[1].end == datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    # The fresh GRID plan begins at the next tariff boundary.
     assert [(s.start, s.end, s.action) for s in result.slots[2:]] == [
-        (cutoff, datetime(2026, 9, 20, 9, 0, tzinfo=UTC), Action.BATTERY),
-        (datetime(2026, 9, 20, 9, 0, tzinfo=UTC),
-         datetime(2026, 9, 20, 10, 0, tzinfo=UTC), Action.GRID),
         (datetime(2026, 9, 20, 10, 0, tzinfo=UTC),
          datetime(2026, 9, 20, 12, 0, tzinfo=UTC), Action.GRID),
     ]
@@ -371,9 +366,8 @@ def test_all_future_intervals_replaced_from_now() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_interval_crossing_cutoff_is_prorated_and_interpolated() -> None:
-    """A truncated interval keeps its start but prorates every extensive
-    quantity and interpolates its end SOC to the shortened duration."""
+def test_interval_crossing_cutoff_is_retained_when_action_changes() -> None:
+    """A new economic action waits for the published tariff boundary."""
     existing = DailyPlan(
         date="2026-09-20",
         slots=(
@@ -404,22 +398,19 @@ def test_interval_crossing_cutoff_is_prorated_and_interpolated() -> None:
     assert_invariants(result)
     head = result.slots[0]
     assert head.start == datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
-    assert head.end == cutoff
-    # Fraction retained = 1h / 2h = 0.5, applied to every extensive quantity.
-    assert head.expected_load_wh == pytest.approx(100.0)
-    assert head.grid_import_wh == pytest.approx(25.0)
-    assert head.battery_discharge_wh == pytest.approx(50.0)
-    assert head.interval_cost_dkk == pytest.approx(2.0)
-    assert head.baseline_cost_dkk == pytest.approx(3.0)
-    # SOC interpolated linearly: 90 + (80 - 90) * 0.5 = 85, start unchanged.
+    assert head.end == datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
+    assert head.expected_load_wh == pytest.approx(200.0)
+    assert head.grid_import_wh == pytest.approx(50.0)
+    assert head.battery_discharge_wh == pytest.approx(100.0)
+    assert head.interval_cost_dkk == pytest.approx(4.0)
+    assert head.baseline_cost_dkk == pytest.approx(6.0)
     assert head.soc_start == pytest.approx(90.0)
-    assert head.soc_end == pytest.approx(85.0)
-    # Action and justification are unchanged by the truncation.
+    assert head.soc_end == pytest.approx(80.0)
     assert head.action is Action.BATTERY
     assert head.reason == "Battery clears the economic margin"
 
 
-def test_charge_interval_soc_interpolates_upward() -> None:
+def test_charge_interval_soc_stays_whole_until_its_boundary() -> None:
     existing = DailyPlan(
         date="2026-09-20",
         slots=(
@@ -443,11 +434,12 @@ def test_charge_interval_soc_interpolates_upward() -> None:
     )
     head = result.slots[0]
     assert head.soc_start == pytest.approx(40.0)
-    assert head.soc_end == pytest.approx(50.0)  # 40 + (60-40)*0.5
+    assert head.soc_end == pytest.approx(60.0)
+    assert head.end == datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
 
 
-def test_straddling_interval_proration_preserves_contiguity() -> None:
-    """The truncated head and the fresh future join exactly at the cutoff."""
+def test_straddling_interval_preserves_contiguity_at_price_boundary() -> None:
+    """The published interval and fresh future join at the tariff boundary."""
     existing = DailyPlan(
         date="2026-09-20",
         slots=(slot(datetime(2026, 9, 20, 12, 0, tzinfo=UTC),
@@ -464,7 +456,7 @@ def test_straddling_interval_proration_preserves_contiguity() -> None:
     )
     assert_invariants(result)
     head, future = result.slots[0], result.slots[1]
-    assert head.end == future.start == cutoff
+    assert head.end == future.start == datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
     assert_contiguous(result, result.slots[0].start, future_end)
 
 
@@ -877,15 +869,12 @@ def test_variable_interval_durations_are_preserved_after_clipping() -> None:
         existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     assert_invariants(result)
-    # The clipped 1h45m BATTERY head keeps its arbitrary duration.
+    # The 1h45m BATTERY tariff interval remains whole.
     head = result.slots[0]
-    assert (head.end - head.start).total_seconds() == 90 * 60
-    # The straddling BATTERY interval is re-anchored at the cutoff; its
-    # re-optimised grid tail (15 min) and the following future interval (80 min)
-    # follow.  The arbitrary durations survive -- they are not snapped to
-    # 15-minute multiples (80 is not a multiple).
-    assert (result.slots[1].end - result.slots[1].start).total_seconds() == 15 * 60
-    assert (result.slots[2].end - result.slots[2].start).total_seconds() == 80 * 60
+    assert (head.end - head.start).total_seconds() == 105 * 60
+    # The future begins at that source tariff boundary and preserves the
+    # remaining arbitrary 80-minute duration.
+    assert (result.slots[1].end - result.slots[1].start).total_seconds() == 80 * 60
     assert head.action is Action.BATTERY
 
 

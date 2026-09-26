@@ -134,13 +134,15 @@ is reconciled against the meter, never copied from the device.
 
 See `docs/commissioning.md` for how to verify the invariant on the physical unit.
 
-### Extra-storage policy
+### Opportunistic full-charge policy
 
 The policy is an explainable adjustment around—not a bypass of—the planner. It
-can raise the effective target from normal maximum SOC to extra-storage SOC
-only if the raw known spread and loss/wear-adjusted margin both meet the user
-settings. The planner then applies the same constraints and cost model to the
-higher ceiling.
+builds normal-target and higher-target candidates with the same constraints
+and cost model. The higher target wins only when the user has opted in, known
+prices support both the extra charge and later discharge, the energy returns
+below the normal target within the known horizon, and realized savings improve
+after losses, wear, switching, and the required profit hurdle. Terminal value
+and forecast-only opportunities cannot activate it.
 
 ## Accounting and degradation
 

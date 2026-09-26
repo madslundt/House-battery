@@ -24,7 +24,10 @@ from house_battery.sensor import (
     FbpPlannedLoadPowerSensor,
     daily_plan_blocks,
 )
-from house_battery.switch import FbpExternalForecastSwitch
+from house_battery.switch import (
+    FbpExternalForecastSwitch,
+    FbpOpportunisticChargingSwitch,
+)
 
 
 def test_native_soc_numbers_read_the_coordinator_control_keys() -> None:
@@ -55,6 +58,29 @@ def test_external_forecast_switch_accepts_multi_source_configuration() -> None:
         "sensor.tariff_forecast"
     ]
     assert FbpExternalForecastSwitch.available.fget(switch)
+
+
+def test_opportunistic_full_charge_switch_reports_policy_state() -> None:
+    coordinator = SimpleNamespace(
+        runtime=SimpleNamespace(
+            opportunistic_charging_enabled=True,
+            settings={"target_soc": 90.0, "opportunistic_target_soc": 100.0},
+        ),
+        data={
+            "extra_storage_active": True,
+            "effective_target_soc": 100.0,
+            "opportunistic_incremental_savings_dkk": 0.79,
+            "extra_storage_reason": "Known-price cycle is profitable",
+        },
+    )
+    switch = SimpleNamespace(coordinator=coordinator)
+
+    assert FbpOpportunisticChargingSwitch.is_on.fget(switch)
+    attributes = FbpOpportunisticChargingSwitch.extra_state_attributes.fget(switch)
+    assert attributes["active"] is True
+    assert attributes["normal_target_soc"] == 90.0
+    assert attributes["opportunistic_target_soc"] == 100.0
+    assert attributes["effective_target_soc"] == 100.0
 
 
 def test_local_load_diagnostics_exposes_scopes_without_selecting_one() -> None:

@@ -210,11 +210,7 @@ def test_predicted_soc_is_not_treated_as_authoritative() -> None:
 # --------------------------------------------------------------------------- #
 
 def test_replan_inside_an_existing_interval_reanchors_as_one_slot() -> None:
-    """The straddling interval is re-anchored at the 1-minute cutoff and stays a
-    single slot: its executed head is frozen (prated from the interval value)
-    and its tail is re-optimised.  This is what stops 1-minute replans from
-    accumulating one history fragment per price interval (the horizon_slots bug).
-    """
+    """A published tariff interval cannot change action at a replan cutoff."""
     existing = DailyPlan(
         date="2026-09-20",
         slots=(
@@ -231,20 +227,15 @@ def test_replan_inside_an_existing_interval_reanchors_as_one_slot() -> None:
         existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     assert_invariants(result)
-    # The straddling BATTERY head is frozen at the cutoff; the re-optimised tail
-    # and the following price interval follow.  Nothing before 13:30 changes.
+    # The whole published BATTERY interval remains immutable until its price
+    # boundary. The optimizer's GRID action begins only at 14:00.
     assert [(s.start.time(), s.end.time(), s.action) for s in result.slots] == [
         (datetime(2026, 9, 20, 12, 0).time(),
-         datetime(2026, 9, 20, 13, 30).time(), Action.BATTERY),
-        (datetime(2026, 9, 20, 13, 30).time(),
-         datetime(2026, 9, 20, 14, 0).time(), Action.GRID),
+         datetime(2026, 9, 20, 14, 0).time(), Action.BATTERY),
         (datetime(2026, 9, 20, 14, 0).time(),
          datetime(2026, 9, 20, 15, 0).time(), Action.GRID),
     ]
-    # The frozen head carried 90 of the 120-minute BATTERY head (0.75 fraction).
-    assert result.slots[0].expected_load_wh == pytest.approx(75.0)
-    assert result.slots[0].interval_cost_dkk == pytest.approx(0.75)
-    # The frozen head never exceeds the re-optimised tail, and there is no gap.
+    assert result.slots[0] == existing.slots[0]
     assert result.slots[1].start == result.slots[0].end
 
 
@@ -303,9 +294,10 @@ def test_history_before_the_cutoff_is_never_rewritten() -> None:
     assert result.slots[0].action is Action.GRID
     assert result.slots[0].start == datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
     assert result.slots[1].start == datetime(2026, 9, 20, 6, 0, tzinfo=UTC)
-    # The 12:00 -> 14:00 CHARGE interval is truncated to 13:05, not rewritten.
+    # The in-progress CHARGE price interval remains whole; a different economic
+    # action may begin only at its tariff boundary.
     assert result.slots[2].action is Action.CHARGE
-    assert result.slots[2].end == cutoff
+    assert result.slots[2].end == datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- #
@@ -463,6 +455,44 @@ def test_replans_keep_the_current_price_interval_to_one_slot() -> None:
     assert current[0].end == interval_end
 
 
+def test_alternating_replans_cannot_shorten_a_15_minute_price_block() -> None:
+    """A new recommendation may take effect only at the tariff boundary."""
+    day_start, day_end = _day_bounds()
+    interval_start = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    interval_end = interval_start + timedelta(minutes=15)
+    daily = DailyPlan(
+        date="2026-09-20",
+        slots=(
+            slot(day_start, interval_start, Action.GRID),
+            slot(interval_start, interval_end, Action.BATTERY),
+            slot(interval_end, day_end, Action.GRID),
+        ),
+    )
+
+    for minute in range(1, 15):
+        cutoff = interval_start + timedelta(minutes=minute)
+        proposed = Action.CHARGE if minute % 2 else Action.GRID
+        daily = reconcile_daily_plan(
+            daily,
+            (
+                slot(cutoff, interval_end, proposed),
+                slot(interval_end, day_end, Action.GRID),
+            ),
+            cutoff=cutoff,
+            day_start=day_start,
+            horizon_end=day_end,
+        )
+        active = next(
+            item for item in daily.slots if item.start == interval_start
+        )
+        assert active.action is Action.BATTERY
+        assert active.end == interval_end
+        assert active.end - active.start == timedelta(minutes=15)
+        assert not any(
+            interval_start < item.start < interval_end for item in daily.slots
+        )
+
+
 # --------------------------------------------------------------------------- #
 # #12 — Persistence + restart, and #Midnight
 # --------------------------------------------------------------------------- #
@@ -560,17 +590,16 @@ def test_variable_price_interval_durations_are_preserved() -> None:
         existing, future, cutoff=cutoff, day_start=day_start, horizon_end=day_end
     )
     assert_invariants(result)
-    # The arbitrary 1h45m BATTERY interval is re-anchored at the cutoff; its
-    # grid tail (re-optimised) and the following price interval follow.  The
-    # straddling interval's start (10:00) is the immutable, non-15-min boundary.
+    # The arbitrary 1h45m BATTERY tariff interval remains whole through its
+    # boundary; the GRID replan begins at 11:45.
     assert result.slots[0].start == datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    assert result.slots[0].end == datetime(2026, 9, 20, 11, 45, tzinfo=UTC)
     assert result.slots[0].action is Action.BATTERY
-    # No interval duration was snapped to a 15-minute multiple: the re-optimised
-    # future spans 80 minutes (11:45 -> 13:05), an arbitrary value.
-    assert (result.slots[2].end - result.slots[2].start).total_seconds() == 80 * 60
-    # The timeline stays contiguous across the (now re-anchored) cutoff.
+    # No duration is hardcoded: the re-optimised future still spans the source
+    # tariff's arbitrary 80 minutes (11:45 -> 13:05).
+    assert (result.slots[1].end - result.slots[1].start).total_seconds() == 80 * 60
+    # The timeline stays contiguous at the price boundary.
     assert result.slots[1].start == result.slots[0].end
-    assert result.slots[2].start == result.slots[1].end
 
 
 # --------------------------------------------------------------------------- #

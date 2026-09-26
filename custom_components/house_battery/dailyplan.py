@@ -12,9 +12,10 @@ keeping a small, timezone-aware, persisted timeline that
   ``cutoff`` are immutable),
 * replaces only the future portion on every replan, and
 * stores exactly one slot per price interval.  The current in-progress price
-  interval is re-anchored as a single slot (its executed head frozen, its tail
-  re-optimised) rather than chopped at the 1-minute ``cutoff`` on every replan,
-  so repeated replans never accumulate per-minute history fragments.
+  interval keeps its published action through the tariff boundary; a
+  same-action replan may refresh its projected tail, but a different economic
+  action waits for the next price interval.  Repeated replans therefore never
+  create sub-price-interval operating blocks or per-minute history fragments.
 * stays invariant-clean (sorted, non-overlapping, non-duplicate, non-zero
   duration, ``start < end``, bounded to ``[day_start, horizon_end]``). The
   timeline is also normalised to a single local timezone offset so its
@@ -159,16 +160,13 @@ def _history_locked_at_price_boundaries(
     """Keep the immutable past and freeze the current price interval as one slot.
 
     The *current in-progress price interval* is the existing slot that straddles
-    ``cutoff``.  Everything before it is immutable history, kept whole.  The
-    current interval itself is re-anchored as a single slot ``[start, end]``: its
-    executed head ``[start, cutoff)`` is frozen (prated from the interval's whole
-    value) and its tail ``[cutoff, end)`` is re-optimised from the optimizer.  The
-    two halves are merged back into one slot whenever they share the (flat-price)
-    action, so a price interval is always stored as exactly one slot regardless of
-    how many minutes have elapsed inside it.  Freezing the executed head as a
-    single anchored slot rather than chopping the interval at ``cutoff`` every
-    minute is what stops repeated 1-minute replans from accumulating one history
-    fragment per minute per price interval.
+    ``cutoff``. Everything before it is immutable history, kept whole. The
+    current interval is also immutable as an operating block: an economic
+    replan may update it only when the proposed action matches the published
+    action. If the proposed action differs, the existing interval is retained
+    through its tariff boundary and the new action starts with the next price
+    slot. This guarantees that economic blocks are never shorter than one
+    electricity-price interval.
 
     Returns ``(kept_history, interval_end)`` where ``interval_end`` is the end of
     the current price interval (so the future reconciler can start from there
@@ -193,7 +191,14 @@ def _history_locked_at_price_boundaries(
     reopt_pieces = _reopt_current_interval(future_slots, cutoff, straddling.end)
     if not reopt_pieces:
         reopt_pieces = [straddling]
-    if frozen and frozen.action == reopt_pieces[0].action:
+    if frozen and frozen.action != reopt_pieces[0].action:
+        # The published action owns the complete tariff interval. Retaining the
+        # original slot also preserves its internally consistent cost, energy
+        # and SOC curve; the disagreeing replan begins at ``straddling.end``.
+        current = _clip_to_window(straddling, day_start, horizon_end, tz)
+        if current is not None:
+            kept.append(current)
+    elif frozen and frozen.action == reopt_pieces[0].action:
         # The executed head and the re-optimised tail share the action, so the
         # current price interval is stored as one slot.
         kept.append(_merge_slots(frozen, reopt_pieces[0]))

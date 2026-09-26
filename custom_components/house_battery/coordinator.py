@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -73,9 +74,11 @@ from .models import (
 )
 from .planner import optimize
 from .policy import (
+    OpportunisticPlanDecision,
     action_from_operating_mode,
     apply_storage_policy,
     parse_grid_available,
+    select_opportunistic_plan,
 )
 from .price import extract_rows, is_forecast_data, normalize_price_rows
 from .runtime import RuntimeState, RuntimeStore
@@ -429,14 +432,23 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             for source, forecast_slots in available_forecasts
         }
-        # Use known prices only for planning — forecasts are indicators only.
-        # The price feed provides confirmed data up to ~36 hours ahead;
-        # forecast slots carry uncertainty buffers that make the optimizer
-        # unnecessarily conservative for the very spikes we want to react to.
         slots = known_slots
         self._forecast_planning_source = None
         self._forecast_used_slot_count = 0
         if self.runtime.forecast_enabled:
+            # The opt-in forecast switch extends, but never replaces or bridges,
+            # known prices. Sources are tried in configured order and every
+            # forecast slot carries its uncertainty buffer into the optimizer.
+            for source in sources:
+                extended = extensions.get(source, known_slots)
+                forecast_count = sum(
+                    slot.source == "forecast" for slot in extended
+                )
+                if forecast_count:
+                    slots = extended
+                    self._forecast_planning_source = source
+                    self._forecast_used_slot_count = forecast_count
+                    break
             # Detect extreme price movements using available forecasts.
             # Only flag when future prices deviate sharply from the recent
             # known-price baseline (default 2× the average).
@@ -460,8 +472,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if not self.runtime.forecast_enabled:
                 details["status"] = "disabled"
+            elif source == self._forecast_planning_source:
+                details["status"] = "used"
             elif extension_slots:
-                details["status"] = "used_as_indicator"
+                details["status"] = "available"
             else:
                 details["status"] = "no_contiguous_extension"
 
@@ -489,7 +503,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Build the coarse forecast-only guideline.  All available forecast
         # sources are merged so the guideline reflects the whole forecast
         # horizon; contiguity gaps between sources are handled inside the
-        # builder.  It never feeds the optimizer (``slots``/``known_slots``).
+        # builder. This is explanatory guidance; when forecast planning is
+        # enabled, the selected contiguous extension also feeds the optimizer
+        # separately through ``slots`` with its uncertainty buffer intact.
         all_forecast_slots: list[PriceSlot] = []
         for _, forecast_slots in available_forecasts:
             all_forecast_slots.extend(forecast_slots)
@@ -519,10 +535,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # reading or sufficient learned profile, withhold the plan.
                 return []
             scheduled_wh = self._scheduled_load_wh(slot.start, slot.end)
-            # Known prices go to the optimizer with their full value.
-            # Forecast slots are excluded from the planning horizon
-            # because they carry uncertainty buffers that suppress
-            # otherwise profitable arbitrage on extreme price spikes.
+            # Known prices keep their full value. Forecast slots retain the
+            # configured uncertainty so charging is priced conservatively high
+            # and discharging conservatively low.
             result.append(
                 PriceSlot(
                     slot.start,
@@ -574,6 +589,53 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             degradation_cost_dkk_per_kwh=values["degradation_cost_dkk_per_kwh"],
             minimum_profit_dkk_per_kwh=values["minimum_profit_dkk_per_kwh"],
             switching_penalty_dkk=values["switching_penalty_dkk"],
+        )
+
+    def _optimize_with_storage_policy(
+        self,
+        slots: list[PriceSlot],
+        *,
+        now: datetime,
+        soc: float,
+        settings: PlannerSettings,
+        current_action: Action,
+    ) -> OpportunisticPlanDecision:
+        """Compare the normal plan with an opt-in higher-target candidate."""
+        normal_plan = optimize(
+            slots,
+            now=now,
+            soc=soc,
+            settings=settings,
+            current_action=current_action,
+        )
+        opportunistic_settings = replace(
+            settings,
+            target_soc=self.runtime.settings["opportunistic_target_soc"],
+        )
+        if (
+            not self.runtime.opportunistic_charging_enabled
+            or opportunistic_settings.target_soc <= settings.target_soc
+        ):
+            return select_opportunistic_plan(
+                normal_plan,
+                normal_plan,
+                settings,
+                opportunistic_settings,
+                enabled=self.runtime.opportunistic_charging_enabled,
+            )
+        opportunistic_plan = optimize(
+            slots,
+            now=now,
+            soc=soc,
+            settings=opportunistic_settings,
+            current_action=current_action,
+        )
+        return select_opportunistic_plan(
+            normal_plan,
+            opportunistic_plan,
+            settings,
+            opportunistic_settings,
+            enabled=True,
         )
 
     def _observed_action(self) -> Action:
@@ -698,6 +760,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         reason = "Waiting for valid local telemetry and price intervals"
         command_result = "no command"
         effective_settings: PlannerSettings | None = None
+        opportunistic_active = False
+        opportunistic_reason = "No valid plan is available"
+        opportunistic_incremental_savings = 0.0
         startup_waiting = (
             self._startup_control_gate_reason is not None
             and not local_tcp_recovering
@@ -737,14 +802,21 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 settings = self._settings()
                 settings = apply_storage_policy(settings)
-                self.plan = optimize(
+                current_action = action if action is not Action.SAFE else Action.GRID
+                storage_decision = self._optimize_with_storage_policy(
                     slots,
                     now=now,
                     soc=soc,
                     settings=settings,
-                    current_action=action if action is not Action.SAFE else Action.GRID,
+                    current_action=current_action,
                 )
-                effective_settings = settings
+                self.plan = storage_decision.plan
+                effective_settings = storage_decision.settings
+                opportunistic_active = storage_decision.active
+                opportunistic_reason = storage_decision.reason
+                opportunistic_incremental_savings = (
+                    storage_decision.incremental_savings_dkk
+                )
             except ValueError as exc:
                 self.plan = None
                 problems.append(str(exc))
@@ -996,6 +1068,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "effective_target_soc": effective_settings.target_soc
             if effective_settings
             else None,
+            "opportunistic_charging_enabled": (
+                self.runtime.opportunistic_charging_enabled
+            ),
+            "opportunistic_incremental_savings_dkk": round(
+                opportunistic_incremental_savings, 4
+            ),
+            # Retain the existing storage-policy sensor contract while exposing
+            # the safer opt-in implementation behind it.
+            "extra_storage_active": opportunistic_active,
+            "extra_storage_reason": opportunistic_reason,
             "plan_created_at": (
                 self.plan.created_at.isoformat() if self.plan else None
             ),
@@ -1114,6 +1196,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Configure at least one external price forecast entity first"
             )
         self.runtime.forecast_enabled = enabled
+        await self.store.save(self.runtime)
+        await self.async_request_refresh()
+
+    async def async_set_opportunistic_charging_enabled(self, enabled: bool) -> None:
+        """Opt in to a higher target only when a known profitable cycle exists."""
+        self.runtime.opportunistic_charging_enabled = enabled
         await self.store.save(self.runtime)
         await self.async_request_refresh()
 

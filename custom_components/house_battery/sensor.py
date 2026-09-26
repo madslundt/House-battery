@@ -681,7 +681,9 @@ class FbpStoragePolicySensor(Fbp1200Entity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         keys = (
+            "opportunistic_charging_enabled",
             "effective_target_soc",
+            "opportunistic_incremental_savings_dkk",
             "price_spread_dkk_per_kwh",
             "effective_margin_dkk_per_kwh",
             "extra_storage_known_slot_count",

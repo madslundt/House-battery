@@ -89,7 +89,7 @@ The invariant is always:
 
 ```text
 0 ≤ absolute emergency SOC ≤ arbitrage reserve SOC
-  < maximum charge SOC ≤ extra-storage charge SOC ≤ 100
+  < maximum charge SOC ≤ opportunistic charge SOC ≤ 100
 ```
 
 ## Development

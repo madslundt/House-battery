@@ -21,15 +21,14 @@ It therefore does not cycle the battery merely because the next interval is a
 little more expensive. The normal economic floor is **Arbitrage reserve SOC**;
 **Absolute emergency SOC** is the lower native limit preserved for an outage.
 
-Extra storage is permitted only when the full known price spread clears the
-configured **Extra-storage price spread**, the effective margin after losses
-and degradation clears **Minimum required profit**, and the higher target
-beats the normal-target plan on expected cost. The energy added above the
-normal target must be bought during the lowest known-price window, and that
-window's cumulative duration must not exceed **Extra-storage cheap-window
-maximum duration** (30 minutes by default). Forecast intervals never qualify
-for extra storage. The planner still has to find a useful charge interval
-before it stores more energy.
+When **Allow opportunistic full charge** is enabled, the coordinator compares
+the normal-target plan with a second plan using **Opportunistic charge SOC**
+(100% by default). The higher target is selected only when known prices support
+a complete extra charge/discharge cycle, the added energy is scheduled back
+below the normal target before known prices end, and realized plan savings
+improve after round-trip losses, degradation, switching cost, and **Minimum
+required profit**. A forecast-only opportunity or terminal value assigned to
+unused stored energy cannot activate the higher target.
 
 ## External price forecasts
 
@@ -87,7 +86,7 @@ horizon exactly.
 | Tuesday | 0.25 at 03:00, 2.60 at 18:00 | Charge overnight and discharge into the evening peak if load needs it. |
 | Wednesday | 0.80–1.30, brief 1.55 peak | Preserve energy; the single peak is normally not worth a cycle. |
 | Thursday | Known prices end at 14:00; forecast shows 0.35 then 2.40 | Use forecast only after 14:00 and only after the uncertainty buffer. |
-| Friday | 0.10 overnight, 3.00 at 17:00 | Extra-storage policy may allow the higher target if its own threshold passes. |
+| Friday | 0.10 overnight, 3.00 at 17:00 | The opt-in higher target may activate if known load uses the extra energy profitably. |
 | Saturday | Negative midday price, low evening load | Charge only if capacity/headroom and later demand make it useful. |
 | Sunday | Flat 0.95–1.20 | Prefer no cycle; retain reserve for resilience. |
 

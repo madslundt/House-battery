@@ -122,8 +122,8 @@ def test_known_price_regression_uses_load_wear_and_profit_hurdle() -> None:
         assert delivered_wh <= slot.expected_load_wh + settings.energy_step_wh
 
 
-def test_forecast_highs_and_lows_are_guidance_not_optimizer_prices() -> None:
-    """Forecasts may signal regimes, but only confirmed prices enter a plan."""
+def test_enabled_forecast_extends_optimizer_with_uncertainty() -> None:
+    """An enabled contiguous forecast changes the executable optimized horizon."""
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     known_rows = [
         {
@@ -161,7 +161,7 @@ def test_forecast_highs_and_lows_are_guidance_not_optimizer_prices() -> None:
         coordinator = Fbp1200Coordinator(hass, entry)
         coordinator.runtime.forecast_enabled = True
         hass.states.async_set("sensor.known", "2.0", {"prices": known_rows})
-        hass.states.async_set("sensor.load", "110")
+        hass.states.async_set("sensor.load", "300")
         if include_forecast:
             hass.states.async_set(
                 "sensor.forecast",
@@ -172,7 +172,7 @@ def test_forecast_highs_and_lows_are_guidance_not_optimizer_prices() -> None:
         optimized = optimize(
             price_slots,
             now=now,
-            soc=70,
+            soc=20,
             settings=_settings(),
             current_action=Action.GRID,
         )
@@ -181,12 +181,23 @@ def test_forecast_highs_and_lows_are_guidance_not_optimizer_prices() -> None:
     known_slots, plan_without_forecast, _ = asyncio.run(make_plan(False))
     forecast_slots, plan_with_forecast, guidance = asyncio.run(make_plan(True))
 
-    assert [(slot.start, slot.end, slot.price, slot.source) for slot in forecast_slots] == [
-        (slot.start, slot.end, slot.price, slot.source) for slot in known_slots
-    ]
-    assert all(slot.source == "known" for slot in forecast_slots)
-    assert plan_with_forecast.slots == plan_without_forecast.slots
-    assert plan_with_forecast.expected_cost_dkk == plan_without_forecast.expected_cost_dkk
+    assert forecast_slots[: len(known_slots)] == known_slots
+    assert [slot.source for slot in forecast_slots[len(known_slots) :]] == [
+        "forecast"
+    ] * 4
+    assert all(
+        slot.uncertainty_dkk_per_kwh == pytest.approx(0.25)
+        for slot in forecast_slots[len(known_slots) :]
+    )
+    assert len(plan_with_forecast.slots) == len(plan_without_forecast.slots) + 4
+    assert any(
+        slot.action is Action.CHARGE and slot.price_source == "forecast"
+        for slot in plan_with_forecast.slots
+    )
+    assert any(
+        slot.action is Action.BATTERY and slot.price_source == "forecast"
+        for slot in plan_with_forecast.slots
+    )
     assert guidance is not None
     assert {block.recommendation for block in guidance.blocks} == {
         Action.CHARGE,

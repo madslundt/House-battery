@@ -16,7 +16,11 @@ async def async_setup_entry(
 ) -> None:
     coordinator: Fbp1200Coordinator = entry.runtime_data
     async_add_entities(
-        [FbpAutomaticControlSwitch(coordinator), FbpExternalForecastSwitch(coordinator)]
+        [
+            FbpAutomaticControlSwitch(coordinator),
+            FbpExternalForecastSwitch(coordinator),
+            FbpOpportunisticChargingSwitch(coordinator),
+        ]
     )
 
 
@@ -89,3 +93,39 @@ class FbpExternalForecastSwitch(Fbp1200Entity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: object) -> None:
         await self.coordinator.async_set_forecast_enabled(False)
+
+
+class FbpOpportunisticChargingSwitch(Fbp1200Entity, SwitchEntity):
+    """Allow a higher charge target only for a proven profitable cycle."""
+
+    _attr_name = "Allow opportunistic full charge"
+    _attr_icon = "mdi:battery-charging-100"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "opportunistic_full_charge")
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.runtime.opportunistic_charging_enabled
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        return {
+            "active": self.coordinator.data.get("extra_storage_active", False),
+            "normal_target_soc": self.coordinator.runtime.settings["target_soc"],
+            "opportunistic_target_soc": self.coordinator.runtime.settings[
+                "opportunistic_target_soc"
+            ],
+            "effective_target_soc": self.coordinator.data.get("effective_target_soc"),
+            "incremental_savings_dkk": self.coordinator.data.get(
+                "opportunistic_incremental_savings_dkk"
+            ),
+            "reason": self.coordinator.data.get("extra_storage_reason"),
+        }
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        await self.coordinator.async_set_opportunistic_charging_enabled(True)
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        await self.coordinator.async_set_opportunistic_charging_enabled(False)

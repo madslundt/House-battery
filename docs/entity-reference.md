@@ -17,6 +17,7 @@ entity picker; names below are the stable, user-facing names.
 | **Export safety fault** | `on` while automatic control is enabled and a configured meter reports export. It latches and disables all inverter writes until you disable then re-enable control. | Meter-based fail-closed protection is available only when a grid meter is configured. |
 | **Automatic control** | Explicit permission for House Battery to issue local mode/limit writes. | Leave off during setup. It cannot turn on until the entry is commissioned and native SOC controls pass validation. |
 | **Use external price forecast** | Enables valid, fresh forecast intervals after the end of known prices. | Leave it off while measuring forecast quality. Its `status` attribute explains `used`, `stale`, `invalid`, `empty`, or another non-use result; none of these affects known-price planning. |
+| **Allow opportunistic full charge** | Permits the optimizer to compare the normal target with the optional higher target. | Enable it only if occasional 100% charging is acceptable. Its attributes show whether the higher target is currently active, the incremental savings, and the reason. |
 | **Force safe mode** | Button that turns automatic control off and requests the configured safe local mode. | Use immediately if real battery behavior disagrees with the plan. |
 
 Example: if **Current decision** says `battery` while **Battery activity** is
@@ -36,18 +37,18 @@ the local provider, and the mode read-back before re-enabling automatic control.
 | **Power source** | Where the load is served from right now: `charging` (battery charging), `battery` (battery serving load), `grid` (battery idle while load is present), or `off` (no measured load). Legacy entries use the load/grid balance; direct-local entries use reported battery direction. |
 | **Native minimum/maximum SOC** | Allowlisted battery hardware SOC registers. | They are read back after changes and used as the direct control limits. |
 | **Current electricity price** | Price for the current known price interval. |
-| **Expected plan savings** | Forecast saving across the current known horizon versus buying expected load from grid. It is a forecast, not cash earned. |
+| **Expected plan savings** | Forecast saving across the current planning horizon (known prices plus any enabled, valid extension) versus buying expected load from grid. It is a forecast, not cash earned. |
 | **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Direct-local FBP1200 entries without a CT meter cannot record balanced grid/battery savings. Compare matching tariff periods, not one unusual day. |
 | **Known price spread** | Highest minus lowest price in the known future horizon. |
-| **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before extra storage is allowed. |
-| **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary extra-storage ceiling. |
-| **Extra storage policy** | `normal` or `active`, with its target, spread, effective margin, and explanation in attributes. It becomes active only when the higher target beats a normal-target plan and the added energy can be bought in a short, lowest-priced known-price window. |
+| **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before battery cycling is worthwhile. |
+| **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary opportunistic ceiling. |
+| **Extra storage policy** | `normal` or `active`, with the effective target and explanation in attributes. It becomes active only when the opt-in higher-target plan completes an additional profitable cycle using known prices and returns below the normal target within that horizon. |
 
 Example: with prices of 0.20 and 4.00 DKK/kWh, 85% efficiency, and 0.35
 DKK/kWh degradation cost, effective margin is about 3.41 DKK/kWh. If the
-required profit is 0.75 and extra-storage threshold is 2.00, **Extra storage
-policy** can become `active`. With 1.90 and 2.25 prices, it remains `normal`;
-cycling is not worth it.
+required profit is 0.75, **Extra storage policy** can become `active` when the
+known expensive window has enough forecast load to use the extra energy. With
+1.90 and 2.25 prices, it remains `normal`; cycling is not worth it.
 
 ## Battery use and learning
 
@@ -91,7 +92,7 @@ All values are persistent inputs. This ordering is enforced:
 
 ```text
 absolute emergency SOC ≤ arbitrage reserve SOC
-  < maximum charge SOC ≤ extra-storage charge SOC ≤ 100
+  < maximum charge SOC ≤ opportunistic charge SOC ≤ 100
 ```
 
 | Number | What changing it does | Realistic change |
@@ -100,13 +101,11 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **Absolute emergency SOC** | Native lower hardware floor written during automatic commands. | Raise 10→20% if outage reserve is more valuable than arbitrage. |
 | **Arbitrage reserve SOC** | Planner's no-discharge floor. | Raise 20→35% before a storm; the optimizer keeps more backup but has less energy to sell against peak prices. |
 | **Maximum charge SOC** | Normal charge ceiling. | Lower 90→80% to reduce high-SOC dwell time; it may skip otherwise profitable evening coverage. |
-| **Extra-storage charge SOC** | Higher ceiling reserved for demonstrated savings from a short, unusually cheap known-price window. | Keep 100% for rare peaks, or set 90% to disable extra storage without changing normal operation. |
+| **Opportunistic charge SOC** | Opt-in higher ceiling reserved for a complete profitable known-price cycle. | Keep 100% to allow full charges; use **Allow opportunistic full charge** to enable or disable the policy. |
 | **Maximum charge/discharge power** | Planner and native command power cap. | Lower discharge 800→500 W if the load path or battery behaves better at a lower sustained output. |
 | **Fallback round-trip efficiency** | Used before measured efficiency is ready. | Set 80% rather than 85% to make early plans more conservative. |
 | **Battery degradation cost** | Wear cost charged to each discharged kWh. | Raise 0.35→0.60 DKK/kWh if avoiding wear matters more than short-term savings. |
 | **Minimum required profit** | Extra margin required for discharge. | Raise 0.75→1.25 DKK/kWh to reject marginal cycles. |
-| **Extra-storage price spread** | Raw price difference required before higher SOC is permitted. | Raise 2.00→3.00 DKK/kWh if full charges are too frequent. |
-| **Extra-storage cheap-window maximum duration** | Longest cumulative duration at the lowest known charging price that may qualify for extra storage. Forecast prices never qualify. | Keep 30 min for rare dips; lower 30→15 min to reserve extra SOC for only the briefest opportunities. |
 | **Mode switching penalty** | Cost assigned to every mode change. | Raise 0.05→0.20 DKK to reduce chattering around similar prices. |
 | **Minimum mode duration** | How long a chosen mode stays locked. | Raise 30→60 min if the local controller needs more settling time. |
 | **Maximum daily mode transitions** | Daily switching budget. | Lower 4→2 for a quieter, more conservative system. |

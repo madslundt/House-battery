@@ -46,7 +46,7 @@ def settings(**changes: float) -> PlannerSettings:
 def test_large_spread_charges_then_uses_battery() -> None:
     plan = optimize(
         slots([0.2] * 8 + [1.5] * 4 + [4.0] * 8),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=20,
         settings=settings(),
     )
@@ -59,7 +59,7 @@ def test_large_spread_charges_then_uses_battery() -> None:
 def test_small_spread_is_not_worth_battery_wear() -> None:
     plan = optimize(
         slots([1.00] * 8 + [1.25] * 8),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=60,
         settings=settings(),
     )
@@ -70,7 +70,7 @@ def test_small_spread_is_not_worth_battery_wear() -> None:
 def test_higher_wear_and_profit_hurdle_do_not_increase_battery_use() -> None:
     prices = slots([0.2] * 8 + [2.0] * 8)
     common = {
-        "now": BASE - timedelta(seconds=1),
+        "now": BASE,
         "soc": 60,
         "current_action": Action.GRID,
     }
@@ -92,7 +92,7 @@ def test_higher_wear_and_profit_hurdle_do_not_increase_battery_use() -> None:
 def test_reserve_is_never_crossed() -> None:
     plan = optimize(
         slots([5.0] * 24, load_w=800),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=30,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
     )
@@ -102,11 +102,46 @@ def test_reserve_is_never_crossed() -> None:
 def test_target_is_never_crossed() -> None:
     plan = optimize(
         slots([-0.5] * 16, load_w=100),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=85,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
     )
     assert max(slot.soc_end for slot in plan.slots) <= 90
+
+
+def test_starting_above_target_does_not_allow_later_recharge_above_target() -> None:
+    """Observed excess energy may remain, but it must not raise the charge ceiling."""
+    price_slots = [
+        PriceSlot(
+            BASE + timedelta(hours=index),
+            BASE + timedelta(hours=index + 1),
+            price,
+            expected_load_wh=load_wh,
+        )
+        for index, (price, load_wh) in enumerate(
+            [(5.0, 150.0), (0.1, 0.0), (5.0, 150.0)]
+        )
+    ]
+    plan = optimize(
+        price_slots,
+        now=BASE,
+        soc=100,
+        settings=settings(
+            capacity_wh=200,
+            reserve_soc=0,
+            target_soc=75,
+            charge_power_w=400,
+            discharge_power_w=400,
+            round_trip_efficiency=0.81,
+            degradation_cost_dkk_per_kwh=0,
+            minimum_profit_dkk_per_kwh=0,
+            switching_penalty_dkk=0,
+            energy_step_wh=25,
+        ),
+    )
+
+    charge_slot = next(slot for slot in plan.slots if slot.action is Action.CHARGE)
+    assert charge_slot.soc_end <= 75
 
 
 def test_gap_truncates_horizon_instead_of_inventing_prices() -> None:
@@ -117,14 +152,48 @@ def test_gap_truncates_horizon_instead_of_inventing_prices() -> None:
         1.2,
         125,
     )
-    plan = optimize(data, now=BASE - timedelta(seconds=1), soc=50, settings=settings())
+    plan = optimize(data, now=BASE, soc=50, settings=settings())
     assert len(plan.slots) == 2
+
+
+def test_gap_covering_now_returns_no_executable_plan() -> None:
+    future = slots([0.2, 4.0])
+    future = [
+        PriceSlot(
+            item.start + timedelta(minutes=15),
+            item.end + timedelta(minutes=15),
+            item.price,
+            item.expected_load_wh,
+        )
+        for item in future
+    ]
+
+    plan = optimize(future, now=BASE, soc=50, settings=settings())
+
+    assert not plan.slots
+    assert plan.current_action is Action.SAFE
+    assert "current price interval" in plan.reason
+
+
+def test_invalid_current_interval_cannot_promote_a_future_action() -> None:
+    data = slots([1.0, 4.0])
+    data[0] = PriceSlot(
+        data[0].start,
+        data[0].end,
+        float("nan"),
+        data[0].expected_load_wh,
+    )
+
+    plan = optimize(data, now=BASE, soc=50, settings=settings())
+
+    assert not plan.slots
+    assert plan.current_action is Action.SAFE
 
 
 def test_optimizer_can_switch_modes_on_adjacent_intervals() -> None:
     plan = optimize(
         slots([5] + [0.1] * 8 + [5] * 4),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=50,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
         current_action=Action.GRID,
@@ -136,7 +205,7 @@ def test_optimizer_can_switch_modes_on_adjacent_intervals() -> None:
 def test_charge_at_target_does_not_change_grid_import() -> None:
     plan = optimize(
         slots([0.1, 0.1]),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=90,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
     )
@@ -148,7 +217,7 @@ def test_charge_at_target_does_not_change_grid_import() -> None:
 def test_battery_at_reserve_does_not_discharge() -> None:
     plan = optimize(
         slots([5.0, 5.0]),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=20,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
     )
@@ -160,7 +229,7 @@ def test_battery_at_reserve_does_not_discharge() -> None:
 def test_battery_action_is_costed_against_future_opportunity() -> None:
     plan = optimize(
         slots([2.0, 2.0]),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=60,
         settings=settings(),
         current_action=Action.BATTERY,
@@ -188,7 +257,7 @@ def test_existing_stored_energy_discharges_on_opportunity_not_cheapest_floor() -
     """
     plan = optimize(
         slots([1.4, 1.0, 1.0, 1.0]),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=60,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
     )
@@ -197,7 +266,7 @@ def test_existing_stored_energy_discharges_on_opportunity_not_cheapest_floor() -
 
     plan_margin = optimize(
         slots([1.4, 1.0, 1.0, 1.0]),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=60,
         settings=settings(minimum_profit_dkk_per_kwh=0.75, switching_penalty_dkk=0),
     )
@@ -207,7 +276,7 @@ def test_existing_stored_energy_discharges_on_opportunity_not_cheapest_floor() -
 def test_optimizer_can_use_multiple_transitions_for_spread() -> None:
     plan = optimize(
         slots([0.1] * 8 + [5.0] * 8),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=50,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
         current_action=Action.GRID,
@@ -221,7 +290,7 @@ def test_long_horizon_can_use_a_future_profitable_cycle() -> None:
     now = BASE
     plan = optimize(
         slots([1.0] * 96 + [0.1] * 8 + [5.0] * 8),
-        now=now - timedelta(seconds=1),
+        now=now,
         soc=50,
         settings=settings(),
         current_action=Action.GRID,
@@ -235,7 +304,7 @@ def test_long_horizon_can_use_a_future_profitable_cycle() -> None:
 def test_battery_mode_yields_to_grid_when_discharge_is_not_profitable() -> None:
     plan = optimize(
         slots([1.0, 1.0], load_w=800),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=30,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
         current_action=Action.BATTERY,
@@ -258,8 +327,27 @@ def test_current_partial_interval_is_planned_from_now() -> None:
     assert plan.slots[0].expected_load_wh == pytest.approx(500 / 6)
 
 
+def test_current_partial_price_interval_keeps_the_observed_action() -> None:
+    """Economic replans must not switch modes inside one tariff interval."""
+    plan = optimize(
+        slots([5.0, 5.0, 0.1]),
+        now=BASE + timedelta(minutes=5),
+        soc=60,
+        settings=settings(
+            minimum_profit_dkk_per_kwh=0,
+            switching_penalty_dkk=0,
+        ),
+        current_action=Action.GRID,
+    )
+
+    assert plan.slots[0].start == BASE + timedelta(minutes=5)
+    assert plan.slots[0].end == BASE + timedelta(minutes=15)
+    assert plan.slots[0].action is Action.GRID
+    assert Action.BATTERY in [item.action for item in plan.slots[1:]]
+
+
 def test_planner_is_reproducible() -> None:
-    arguments = {"now": BASE - timedelta(seconds=1), "soc": 20, "settings": settings()}
+    arguments = {"now": BASE, "soc": 20, "settings": settings()}
     first = optimize(slots([0.2] * 8 + [4.0] * 8), **arguments)
     second = optimize(slots([0.2] * 8 + [4.0] * 8), **arguments)
     assert first == second
@@ -274,7 +362,7 @@ def test_no_wasteful_discharge_at_target_soc() -> None:
     """
     plan = optimize(
         slots([5.0] * 8, load_w=200),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=90,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
     )
@@ -289,7 +377,7 @@ def test_battery_at_target_holds_and_uses_grid() -> None:
 
     plan = optimize(
         slots([5.0] * 4, load_w=200),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=90,
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
     )
@@ -311,7 +399,7 @@ def test_savings_without_battery_movement_is_terminal_only() -> None:
     """
     plan = optimize(
         slots([1.00] * 8 + [1.25] * 8),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=60,
         settings=settings(),
     )
@@ -338,7 +426,7 @@ def test_no_banking_through_horizon_end_evening_peak() -> None:
     """
     plan = optimize(
         slots([2.00] * 8 + [0.90] * 4 + [2.00] * 8 + [3.60] * 4, load_w=100),
-        now=BASE - timedelta(seconds=1),
+        now=BASE,
         soc=49,
         settings=settings(),
     )

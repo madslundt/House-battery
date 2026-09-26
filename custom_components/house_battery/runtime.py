@@ -31,6 +31,7 @@ class RuntimeState:
     last_action_at: str | None = None
     transitions: list[str] = field(default_factory=list)
     forecast_enabled: bool = False
+    opportunistic_charging_enabled: bool = False
     # Manual operating override. `auto` follows the optimizer plan; a forced
     # mode (charge/battery/grid) commands that action every refresh so the
     # physical functions can be verified independently of the price plan.
@@ -86,6 +87,7 @@ class RuntimeState:
             "last_action_at": self.last_action_at,
             "transitions": self.transitions[-100:],
             "forecast_enabled": self.forecast_enabled,
+            "opportunistic_charging_enabled": self.opportunistic_charging_enabled,
             "forecast_accuracies": {
                 source: accuracy.as_dict()
                 for source, accuracy in self.forecast_accuracies.items()
@@ -166,6 +168,9 @@ class RuntimeState:
             last_action_at=data.get("last_action_at"),
             transitions=list(data.get("transitions", []))[-100:],
             forecast_enabled=bool(data.get("forecast_enabled", False)),
+            opportunistic_charging_enabled=bool(
+                data.get("opportunistic_charging_enabled", False)
+            ),
             override_action=str(data.get("override_action", "auto") or "auto"),
             forecast_accuracies=accuracies,
             daily_plan=DailyPlan.from_dict(data.get("daily_plan", {})),

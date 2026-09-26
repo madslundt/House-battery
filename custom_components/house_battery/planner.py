@@ -148,7 +148,16 @@ def _slot_transition(
 
     new_energy_wh = energy_wh + charged_wh - discharged_wh
     new_step = round(new_energy_wh / settings.energy_step_wh)
-    new_step = min(maximum_step, max(minimum_step, new_step))
+    # An observed battery may legitimately start above the configured charge
+    # target. Preserve that real energy while holding, but do not turn the
+    # observed SOC into a higher charge ceiling for the rest of the horizon.
+    # Once discharged, CHARGE may restore energy only up to ``maximum_step``.
+    state_ceiling = (
+        maximum_step
+        if action is Action.CHARGE
+        else max(maximum_step, state.energy_step)
+    )
+    new_step = min(state_ceiling, max(minimum_step, new_step))
     actual_delta_wh = (new_step - state.energy_step) * settings.energy_step_wh
     # An operating-mode label must correspond to real battery movement. At the
     # reserve/target boundary the requested mode can otherwise do nothing;
@@ -206,7 +215,20 @@ def optimize(
 ) -> Plan:
     """Return the least-cost executable plan across every known price slot."""
     settings.validate()
-    valid = _future_slots(slots, now)
+    source_slots = tuple(slots)
+    first_slot_is_partial = any(slot.start < now < slot.end for slot in source_slots)
+    valid = _future_slots(source_slots, now)
+    if valid and valid[0].start > now:
+        return Plan(
+            now,
+            (),
+            0,
+            0,
+            0,
+            0,
+            0,
+            "No valid current price interval; future prices cannot be promoted to now",
+        )
     if not valid:
         return Plan(
             now, (), 0, 0, 0, 0, 0, "No complete contiguous future price intervals"
@@ -230,13 +252,12 @@ def optimize(
     # a phantom discharge that disagrees with the inverter's real power.
     initial_step = round(settings.capacity_wh * soc / 100 / step_wh)
     initial_step = max(0, initial_step)
-    maximum_step = max(
-        int(settings.capacity_wh * settings.target_soc / 100 // step_wh),
-        initial_step,
+    maximum_step = int(
+        settings.capacity_wh * settings.target_soc / 100 // step_wh
     )
     initial = _State(initial_step, current_action)
     layers: list[dict[_State, _Node]] = [{initial: _Node(0.0, 0.0, None, None)}]
-    for slot in valid:
+    for slot_index, slot in enumerate(valid):
         previous_layer = layers[-1]
         layer: dict[_State, _Node] = {}
         for state in sorted(
@@ -247,7 +268,25 @@ def optimize(
             ),
         ):
             node = previous_layer[state]
-            for action in _allowed_actions():
+            actions = _allowed_actions()
+            if slot_index == 0 and first_slot_is_partial:
+                # The electricity price is constant for the whole source slot.
+                # Keep the already-observed physical action until that tariff
+                # boundary instead of allowing every minute-level refresh to
+                # create a new economic block. If the action can no longer move
+                # energy (BATTERY at reserve or CHARGE at the ceiling), fall
+                # back to the normal candidates so physical limits still win.
+                continuing = _slot_transition(
+                    state,
+                    state.action,
+                    slot,
+                    settings,
+                    minimum_step,
+                    maximum_step,
+                )
+                if continuing is not None:
+                    actions = (state.action,)
+            for action in actions:
                 result = _slot_transition(
                     state,
                     action,

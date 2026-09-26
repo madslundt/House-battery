@@ -47,6 +47,14 @@ def test_runtime_persists_the_daily_plan_across_a_restart() -> None:
     assert runtime.as_dict()["daily_plan"]["date"] == "2026-09-20"
 
 
+def test_runtime_persists_opportunistic_charging_opt_in() -> None:
+    runtime = RuntimeState(opportunistic_charging_enabled=True)
+
+    restored = RuntimeState.from_dict(runtime.as_dict())
+
+    assert restored.opportunistic_charging_enabled
+
+
 def test_recent_action_changes_remain_diagnostics_only() -> None:
     first = datetime(2026, 9, 21, 16, tzinfo=UTC)
     runtime = RuntimeState(

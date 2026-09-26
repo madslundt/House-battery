@@ -18,6 +18,10 @@ SETTING_NAMES = {
     "absolute_min_soc": ("Absolute emergency SOC", "mdi:battery-alert"),
     "reserve_soc": ("Arbitrage reserve SOC", "mdi:battery-lock"),
     "target_soc": ("Maximum charge SOC", "mdi:battery-charging-90"),
+    "opportunistic_target_soc": (
+        "Opportunistic charge SOC",
+        "mdi:battery-charging-100",
+    ),
     "charge_power_w": ("Charge-mode total power budget", "mdi:battery-charging"),
     "discharge_power_w": ("Maximum discharge power", "mdi:battery-arrow-down"),
     "round_trip_efficiency": ("Fallback round-trip efficiency", "mdi:percent-circle"),
@@ -84,10 +88,12 @@ class FbpSettingNumber(Fbp1200Entity, NumberEntity):
             <= candidate["absolute_min_soc"]
             <= candidate["reserve_soc"]
             < candidate["target_soc"]
+            <= candidate["opportunistic_target_soc"]
             <= 100
         ):
             raise ValueError(
-                "Absolute emergency SOC ≤ arbitrage reserve < maximum charge SOC is required"
+                "Absolute emergency SOC ≤ arbitrage reserve < maximum charge SOC "
+                "≤ opportunistic charge SOC is required"
             )
         await self.coordinator.async_set_setting(self.key, value)
 

@@ -1,9 +1,4 @@
-"""Tests for the simplified coordinator (extra-storage removed).
-
-Extra-storage target and spread knobs were removed (2025-09) because they
-created wasteful discharge→recharge cycles.  The coordinator now uses a
-single plan with target_soc as the hard charge ceiling.
-"""
+"""Coordinator tests for normal and opportunistic charge planning."""
 
 from __future__ import annotations
 
@@ -30,7 +25,7 @@ from house_battery.const import (
     CONF_SOC,
 )
 from house_battery.coordinator import Fbp1200Coordinator
-from house_battery.models import Action, Plan, PlannedSlot
+from house_battery.models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 from house_battery.runtime import RuntimeState
 
 
@@ -48,6 +43,46 @@ def _make_plan(slots) -> Plan:
         terminal_price_dkk_per_kwh=1.0,
         reason="test",
     )
+
+
+def test_coordinator_selects_full_charge_only_when_opted_in_and_profitable() -> None:
+    start = datetime(2026, 9, 26, tzinfo=UTC)
+    prices = [0.2] * 8 + [5.0] * 12
+    slots = [
+        PriceSlot(
+            start=start + timedelta(minutes=15 * index),
+            end=start + timedelta(minutes=15 * (index + 1)),
+            price=price,
+            expected_load_wh=25 if index < 8 else 200,
+        )
+        for index, price in enumerate(prices)
+    ]
+    settings = PlannerSettings(
+        capacity_wh=1958,
+        reserve_soc=20,
+        target_soc=90,
+        charge_power_w=1200,
+        discharge_power_w=800,
+        round_trip_efficiency=0.85,
+        degradation_cost_dkk_per_kwh=0.35,
+        minimum_profit_dkk_per_kwh=0.75,
+        switching_penalty_dkk=0.05,
+    )
+    runtime = RuntimeState(opportunistic_charging_enabled=True)
+    coordinator = type("Coordinator", (), {"runtime": runtime})()
+
+    decision = Fbp1200Coordinator._optimize_with_storage_policy(
+        coordinator,
+        slots,
+        now=start,
+        soc=20,
+        settings=settings,
+        current_action=Action.GRID,
+    )
+
+    assert decision.active
+    assert decision.settings.target_soc == 100
+    assert max(slot.soc_end for slot in decision.plan.slots) > 99
 
 
 def test_plan_today_dict_filters_out_tomorrow() -> None:

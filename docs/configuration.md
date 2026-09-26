@@ -133,7 +133,7 @@ The following number entities must satisfy:
 
 ```text
 absolute emergency SOC ≤ arbitrage reserve SOC
-  < maximum charge SOC ≤ extra-storage charge SOC
+  < maximum charge SOC ≤ opportunistic charge SOC
 ```
 
 - **Absolute emergency SOC**: device-level lower SOC value written through the
@@ -142,8 +142,9 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 - **Arbitrage reserve SOC**: planning floor. The optimizer never schedules a
   battery discharge below this value.
 - **Maximum charge SOC**: normal planning and hardware ceiling.
-- **Extra-storage charge SOC**: a temporary higher ceiling that may be used
-  only when the extra-storage policy is economically justified.
+- **Opportunistic charge SOC**: the opt-in higher ceiling. It is used only when
+  **Allow opportunistic full charge** is enabled and a complete additional
+  known-price cycle improves realized plan savings.
 
 Changing a number updates the persistent plan setting and triggers replanning.
 It does not make a previously unsafe device configuration safe; that must be
