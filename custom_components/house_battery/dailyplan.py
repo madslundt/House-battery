@@ -315,6 +315,25 @@ def _normalize(intervals: list[PlannedSlot]) -> list[PlannedSlot]:
     return result
 
 
+def _has_future_overlap(
+    slots: tuple[PlannedSlot, ...], cutoff: datetime
+) -> bool:
+    """Return whether the persisted timeline has overlapping future slots.
+
+    Old persisted plans may predate the current reconciliation invariants.  A
+    future overlap means the saved schedule is no longer a trustworthy source
+    for deciding what history to retain, so the caller should rebuild it from a
+    fresh optimizer result.
+    """
+    ordered = sorted(
+        (slot for slot in slots if slot.start < slot.end), key=lambda slot: slot.start
+    )
+    return any(
+        previous.end > current.start and previous.end > cutoff
+        for previous, current in zip(ordered, ordered[1:])
+    )
+
+
 def reconcile_daily_plan(
     existing: "DailyPlan | None",
     future_slots: tuple[PlannedSlot, ...],
@@ -341,14 +360,22 @@ def reconcile_daily_plan(
 
     tz = day_start.tzinfo or timezone.utc
     today = day_start.date().isoformat()
-    if existing is None or existing.date != today:
+    if (
+        existing is None
+        or existing.date != today
+        or _has_future_overlap(existing.slots, cutoff)
+    ):
+        # A corrupted future schedule must not be clipped and carried forward:
+        # discard it and publish the fresh optimizer result as a new timeline.
         history: list[PlannedSlot] = []
         interval_end = cutoff
     else:
         history, interval_end = _history_locked_at_price_boundaries(
             existing.slots, future_slots, cutoff, day_start, horizon_end, tz
         )
-    future = _future_from_price_boundary(future_slots, interval_end, day_start, horizon_end, tz)
+    future = _future_from_price_boundary(
+        future_slots, interval_end, day_start, horizon_end, tz
+    )
     normalized = _normalize(history + future)
     return DailyPlan(date=today, slots=tuple(normalized), created_at=cutoff)
 
