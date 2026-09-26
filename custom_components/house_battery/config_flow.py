@@ -18,6 +18,7 @@ from .const import (
     CONF_DISCHARGE_POWER_CONTROL,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
+    CONF_GRID_ISOLATION_SWITCH,
     CONF_GRID_IMPORT_POWER,
     CONF_LOAD_POWER,
     CONF_MAX_SOC_CONTROL,
@@ -87,6 +88,7 @@ def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
         _optional(CONF_ONLINE, defaults): _entity(["sensor", "binary_sensor"]),
         _optional(CONF_CHARGE_POWER_CONTROL, defaults): _entity("number"),
         _optional(CONF_DISCHARGE_POWER_CONTROL, defaults): _entity("number"),
+        _optional(CONF_GRID_ISOLATION_SWITCH, defaults): _entity("switch"),
     }
     if options:
         # The native SOC limits are mandatory before a user can complete the
@@ -122,6 +124,7 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
         _optional(CONF_PRICE_FORECAST_ENTITIES, defaults): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="sensor", multiple=True)
         ),
+        _optional(CONF_GRID_ISOLATION_SWITCH, defaults): _entity("switch"),
     }
     if options:
         fields[

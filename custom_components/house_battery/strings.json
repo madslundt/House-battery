@@ -22,6 +22,7 @@
           "online_entity": "Battery online entity (optional)",
           "charge_power_control_entity": "Charge power control (optional)",
           "discharge_power_control_entity": "Discharge power control (optional)",
+          "grid_isolation_switch_entity": "Grid input smart plug (optional)",
           "minimum_soc_control_entity": "Discharge limit control (required before commissioning)",
           "maximum_soc_control_entity": "Charge limit control (required before commissioning)"
         }
@@ -33,7 +34,8 @@
           "grid_import_power_entity": "Grid import power",
           "grid_available_entity": "Grid available / on-grid state",
           "price_entities": "Known electricity-price entities",
-          "price_forecast_entities": "External price forecast entities (optional, ordered)"
+          "price_forecast_entities": "External price forecast entities (optional, ordered)",
+          "grid_isolation_switch_entity": "Grid input smart plug (optional; off in Battery mode, on in other modes)"
         }
       }
     },
@@ -45,7 +47,7 @@
     "step": {
       "init": {
         "title": "Battery bindings and commissioning",
-        "description": "Commissioned permits the Active control switch to issue local battery commands. Verify each mode, SOC limit, and physical power response before enabling it.",
+        "description": "Commissioned permits the Active control switch to issue local battery commands. With an optional grid input smart plug, Battery mode is commanded first and the plug is then turned off; if it cannot be confirmed off, the integration immediately commands Grid/Idle. Other modes are commanded before the plug is turned on. Verify each mode, SOC limit, and physical power response before enabling it.",
         "data": {
           "soc_entity": "Battery state of charge",
           "load_power_entity": "Connected/house load power",
@@ -60,6 +62,7 @@
           "online_entity": "Battery online entity (optional)",
           "charge_power_control_entity": "Charge power control (optional)",
           "discharge_power_control_entity": "Discharge power control (optional)",
+          "grid_isolation_switch_entity": "Grid input smart plug (optional; off in Battery mode, on in other modes)",
           "minimum_soc_control_entity": "Discharge limit control (required for automatic control)",
           "maximum_soc_control_entity": "Charge limit control (required for automatic control)",
           "commissioned": "I verified local control, read-back, limits, wiring, and legal export settings"

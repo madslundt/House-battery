@@ -35,6 +35,7 @@ CONF_CHARGE_POWER_CONTROL = "charge_power_control_entity"
 CONF_DISCHARGE_POWER_CONTROL = "discharge_power_control_entity"
 CONF_MIN_SOC_CONTROL = "minimum_soc_control_entity"
 CONF_MAX_SOC_CONTROL = "maximum_soc_control_entity"
+CONF_GRID_ISOLATION_SWITCH = "grid_isolation_switch_entity"
 CONF_PRICE_ENTITIES = "price_entities"
 # `CONF_PRICE_FORECAST_ENTITY` remains readable for entries created before
 # forecast comparisons supported more than one source.

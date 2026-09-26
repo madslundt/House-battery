@@ -23,6 +23,7 @@ those known rows.
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
 | External price forecast entities | optional ordered `sensor` list | Same row format; each is scored independently; the first usable source that can safely extend the horizon is used for planning. |
+| Grid input smart plug | optional `switch` | Select the switch controlling power to the FBP1200's grid connection. It is turned off before Battery mode and turned on after Charge, Grid, or Safe mode. |
 
 Fault state and online state are optional.
 Battery SOC, the **Operating mode** selector, and the native
@@ -103,6 +104,14 @@ capped below the current load with a 50 W margin. The physical
 confirmation of what actually happened is the **grid meter** (zero export) and
 the derived **Battery output power** / **Power source**, which are reconciled
 against the load and grid rather than taken from the inverter's raw registers.
+
+When a grid input smart plug is configured, automatic and manual Battery mode
+first command the FBP1200 into battery mode, then turn the plug off and wait for
+`off` state confirmation. If it is unavailable or does not confirm `off`, the
+integration immediately commands Grid/Idle and keeps operating. For every
+other mode, the battery mode command is sent before the integration attempts
+to turn the plug on. Plug service errors are logged and do not disable the
+rest of the integration. Without a configured plug, behavior is unchanged.
 
 ## Commissioning checklist
 

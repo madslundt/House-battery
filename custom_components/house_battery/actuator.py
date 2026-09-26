@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from .const import (
     CONF_CHARGE_POWER_CONTROL,
     CONF_DISCHARGE_POWER_CONTROL,
+    CONF_GRID_ISOLATION_SWITCH,
     CONF_MAX_SOC_CONTROL,
     CONF_MIN_SOC_CONTROL,
     CONF_OPERATING_MODE,
@@ -131,6 +132,46 @@ class LocalControlAdapter:
         self._direct_client = direct_client
         self._direct_mode_changed = direct_mode_changed
 
+    async def async_set_grid_isolation(self, enabled: bool) -> bool:
+        """Best-effort control of the optional grid input smart plug.
+
+        A configured plug is confirmed through state read-back. A missing or
+        failing plug never raises into the main battery control path; callers
+        can inhibit battery discharge when isolation cannot be confirmed.
+        """
+        entity_id = self._config().get(CONF_GRID_ISOLATION_SWITCH)
+        if not entity_id:
+            return True
+        desired = "on" if enabled else "off"
+        current = self._hass.states.get(entity_id)
+        if current is not None and current.state == desired:
+            return True
+        try:
+            await self._hass.services.async_call(
+                "switch",
+                "turn_on" if enabled else "turn_off",
+                {"entity_id": entity_id},
+                blocking=True,
+            )
+            await self._hass.async_block_till_done()
+        except Exception as exc:
+            _LOGGER.warning(
+                "Could not turn %s grid isolation plug %s: %s",
+                desired,
+                entity_id,
+                exc,
+            )
+        state = self._hass.states.get(entity_id)
+        if state is not None and state.state == desired:
+            return True
+        _LOGGER.warning(
+            "Grid isolation plug %s did not confirm state %s; current state is %s",
+            entity_id,
+            desired,
+            state.state if state is not None else "unavailable",
+        )
+        return False
+
     async def _async_direct_command(
         self,
         action: Action,
@@ -143,6 +184,8 @@ class LocalControlAdapter:
         if client is None:
             return None
         runtime = self._runtime()
+        requested_action = action
+        isolation_confirmed = True
         minimum = round(self._minimum_soc_for(action))
         maximum = round(
             target_soc if target_soc is not None else runtime.settings["target_soc"]
@@ -185,6 +228,17 @@ class LocalControlAdapter:
                     min_soc=minimum,
                     max_soc=maximum,
                 )
+            if action is Action.BATTERY:
+                # Engage battery mode first so its dedicated off-grid AC output
+                # can take the load, then isolate the grid connection.
+                isolation_confirmed = await self.async_set_grid_isolation(False)
+                if not isolation_confirmed:
+                    # If the plug fails after the mode change, immediately
+                    # restore Grid/Idle to limit the time battery output can
+                    # reach the grid.
+                    direct_command_mode = "Idle"
+                    action = Action.GRID
+                    await client.async_set_grid_idle(minimum, maximum)
         except Exception as exc:
             _LOGGER.exception("Local TCP mode command failed")
             runtime.execution_enabled = False
@@ -198,6 +252,16 @@ class LocalControlAdapter:
             runtime.transitions.append(now.isoformat())
         await self._save()
         result = "local TCP command acknowledged; SOC limits read back"
+        if action is not Action.BATTERY:
+            # The battery command is already in a non-exporting mode before
+            # reconnecting the grid input. A plug failure does not block charge,
+            # grid, or safe control.
+            await self.async_set_grid_isolation(True)
+        if requested_action is Action.BATTERY and not isolation_confirmed:
+            result = (
+                "grid isolation plug unavailable or not confirmed off; battery "
+                "discharge inhibited and grid/idle mode commanded"
+            )
         return True, result
 
     async def _set_number(

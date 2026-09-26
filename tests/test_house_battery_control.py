@@ -9,8 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import voluptuous as vol
-
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from house_battery.actuator import LocalControlAdapter
@@ -21,6 +19,7 @@ from house_battery.const import (
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
     CONF_GRID_AVAILABLE,
+    CONF_GRID_ISOLATION_SWITCH,
     CONF_GRID_IMPORT_POWER,
     CONF_LOAD_POWER,
     CONF_MAX_SOC_CONTROL,
@@ -52,11 +51,13 @@ class FakeServices:
         self.states = states
         self.apply_updates = apply_updates
         self.calls: list[tuple[str, str, dict[str, object]]] = []
+        self.timeline: list[tuple[str, str]] = []
 
     async def async_call(
         self, domain: str, service: str, data: dict[str, object], **kwargs: object
     ) -> None:
         self.calls.append((domain, service, data))
+        self.timeline.append(("service", service))
         if not self.apply_updates:
             return
         state = self.states.get(str(data["entity_id"]))
@@ -66,6 +67,8 @@ class FakeServices:
             state.state = str(data["value"])
         elif domain == "select":
             state.state = str(data["option"])
+        elif domain == "switch":
+            state.state = "on" if service == "turn_on" else "off"
 
 
 class FakeHass:
@@ -142,7 +145,9 @@ def test_options_require_native_soc_controls_before_commissioning() -> None:
     assert _schema({}, options=True)(options) == options
     incomplete = dict(options)
     incomplete.pop(CONF_MAX_SOC_CONTROL)
-    with pytest.raises(vol.Invalid):
+    # Home Assistant replaces voluptuous' exception class with probatio's
+    # equivalent after imports, so assert the stable validation message.
+    with pytest.raises(Exception, match="required key not provided"):
         _schema({}, options=True)(incomplete)
 
 
@@ -244,6 +249,11 @@ def test_direct_setup_requires_only_grid_and_price_sources() -> None:
     }
 
     assert _direct_schema({})(direct_sources) == direct_sources
+    with_isolation = {
+        **direct_sources,
+        CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input",
+    }
+    assert _direct_schema({})(with_isolation) == with_isolation
 
 
 def runtime() -> RuntimeState:
@@ -399,6 +409,119 @@ def test_direct_battery_reports_the_custom_slot_not_the_native_label() -> None:
     assert success
     assert direct.calls == [("limits", 20, 90), ("mode", "Discharge", 100, 20, 90)]
     assert modes == ["Discharge"]
+
+
+def test_configured_grid_isolation_switch_brackets_battery_mode() -> None:
+    class DirectClient:
+        def __init__(self, timeline: list[tuple[str, str]]) -> None:
+            self.calls: list[tuple[object, ...]] = []
+            self.timeline = timeline
+
+        async def async_set_limits(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("limits", minimum, maximum))
+
+        async def async_set_grid_idle(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("grid_idle", minimum, maximum))
+            self.timeline.append(("tcp", "Idle"))
+
+        async def async_set_mode(
+            self, mode: str, power: int, *, min_soc: int, max_soc: int
+        ) -> None:
+            self.calls.append(("mode", mode, power, min_soc, max_soc))
+            self.timeline.append(("tcp", mode))
+
+    states = FakeStates(
+        {"switch.fbp_grid_input": SimpleNamespace(state="on", attributes={})}
+    )
+    services = FakeServices(states)
+    timeline = services.timeline
+    hass = FakeHass(states, services)
+    direct = DirectClient(timeline)
+    state = runtime()
+
+    async def save() -> None:
+        return None
+
+    configured = {**config(), CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input"}
+    control = LocalControlAdapter(
+        hass, lambda: configured, lambda: state, save, lambda: direct
+    )
+
+    async def scenario() -> None:
+        success, _ = await control.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=150
+        )
+        assert success
+        assert states.get("switch.fbp_grid_input").state == "off"
+        assert direct.calls[-1][0:3] == ("mode", "Discharge", 100)
+
+        success, _ = await control.async_command(
+            Action.GRID, datetime.now(UTC), target_soc=90
+        )
+        assert success
+        assert direct.calls[-1][0] == "grid_idle"
+        assert states.get("switch.fbp_grid_input").state == "on"
+
+    asyncio.run(scenario())
+    assert timeline == [
+        ("tcp", "Discharge"),
+        ("service", "turn_off"),
+        ("tcp", "Idle"),
+        ("service", "turn_on"),
+    ]
+    assert [(domain, service) for domain, service, _ in services.calls] == [
+        ("switch", "turn_off"),
+        ("switch", "turn_on"),
+    ]
+
+
+def test_unavailable_grid_isolation_inhibits_battery_discharge_without_crashing() -> None:
+    class DirectClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def async_set_limits(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("limits", minimum, maximum))
+
+        async def async_set_grid_idle(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("grid_idle", minimum, maximum))
+
+        async def async_set_mode(
+            self, mode: str, power: int, *, min_soc: int, max_soc: int
+        ) -> None:
+            self.calls.append(("mode", mode, power, min_soc, max_soc))
+
+    states = FakeStates(
+        {"switch.fbp_grid_input": SimpleNamespace(state="unavailable", attributes={})}
+    )
+    services = FakeServices(states, apply_updates=False)
+    direct = DirectClient()
+    state = runtime()
+    state.execution_enabled = True
+
+    async def save() -> None:
+        return None
+
+    configured = {**config(), CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input"}
+    control = LocalControlAdapter(
+        FakeHass(states, services), lambda: configured, lambda: state, save,
+        lambda: direct,
+    )
+
+    success, result = asyncio.run(
+        control.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=150
+        )
+    )
+
+    assert success
+    assert "discharge inhibited" in result
+    assert direct.calls == [
+        ("limits", 20, 90),
+        ("mode", "Discharge", 100, 20, 90),
+        ("grid_idle", 20, 90),
+    ]
+    assert state.execution_enabled
 
 
 def test_direct_battery_discharge_is_capped_by_device_and_load() -> None:
