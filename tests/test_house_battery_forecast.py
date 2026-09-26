@@ -226,6 +226,46 @@ def test_price_entity_flagged_forecast_is_not_treated_as_known() -> None:
         assert all(slot.source == "known" for slot in slots)
         # The flagged entity is routed through the forecast path instead.
         assert coordinator._forecast_source == "sensor.stromligning_prices_tomorrow_vat"
+        assert coordinator._forecast_plan is not None
+        assert coordinator._forecast_slot_count == len(forecast)
+
+    asyncio.run(scenario())
+
+
+def test_coordinator_passes_current_and_historical_load_into_price_slots() -> None:
+    """Live usage anchors nearby slots; matching historical usage informs later ones."""
+
+    async def scenario() -> None:
+        now = datetime(2026, 9, 21, 10, 0, tzinfo=UTC)
+        rows = _stromligning_prices(
+            now, intervals=19, cadence=timedelta(hours=1), default_price=2.0
+        )
+        hass = HomeAssistant("/tmp")
+        coordinator = Fbp1200Coordinator(
+            hass,
+            _Entry(
+                {
+                    CONF_PRICE_ENTITIES: ["sensor.known"],
+                    CONF_LOAD_POWER: "sensor.load",
+                }
+            ),
+        )
+        hass.states.async_set("sensor.known", "2.0", {"prices": rows})
+        hass.states.async_set("sensor.load", "100")
+
+        learner = coordinator.runtime.load_learner
+        for offset_hours in (1, 18):
+            target = now + timedelta(hours=offset_hours)
+            for week in range(1, 13):
+                learner.observe(target - timedelta(weeks=week), 500)
+        learner.recent_w.clear()
+        learner.recent_w.extend([100] * 8)
+
+        slots = coordinator._price_slots(now)
+
+        assert slots[1].expected_load_wh == pytest.approx(140)
+        assert slots[18].expected_load_wh == pytest.approx(380)
+        assert slots[18].expected_load_wh > slots[1].expected_load_wh
 
     asyncio.run(scenario())
 

@@ -150,6 +150,14 @@ def _slot_transition(
     new_step = round(new_energy_wh / settings.energy_step_wh)
     new_step = min(maximum_step, max(minimum_step, new_step))
     actual_delta_wh = (new_step - state.energy_step) * settings.energy_step_wh
+    # An operating-mode label must correspond to real battery movement. At the
+    # reserve/target boundary the requested mode can otherwise do nothing;
+    # retaining BATTERY there merely avoids a switch penalty while publishing a
+    # misleading action for hours. Let GRID represent those idle intervals.
+    if action is Action.BATTERY and actual_delta_wh >= 0:
+        return None
+    if action is Action.CHARGE and actual_delta_wh <= 0:
+        return None
     if action is Action.CHARGE:
         charged_wh = max(0.0, actual_delta_wh)
         input_wh = charged_wh / charge_efficiency

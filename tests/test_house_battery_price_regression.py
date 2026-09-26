@@ -78,15 +78,27 @@ def test_known_price_regression_uses_load_wear_and_profit_hurdle() -> None:
     )
     blocks = merge_adjacent_blocks(plan.slots)
     actions = [(block.start, block.end, block.action) for block in blocks]
+    expected_actions = [
+        ("2026-09-25T16:55:00+02:00", "2026-09-25T17:15:00+02:00", Action.GRID),
+        ("2026-09-25T17:15:00+02:00", "2026-09-25T22:00:00+02:00", Action.BATTERY),
+        ("2026-09-25T22:00:00+02:00", "2026-09-26T13:15:00+02:00", Action.GRID),
+        ("2026-09-26T13:15:00+02:00", "2026-09-26T14:30:00+02:00", Action.CHARGE),
+        ("2026-09-26T14:30:00+02:00", "2026-09-26T17:15:00+02:00", Action.GRID),
+        ("2026-09-26T17:15:00+02:00", "2026-09-27T00:00:00+02:00", Action.BATTERY),
+    ]
+    assert actions == [
+        (datetime.fromisoformat(start), datetime.fromisoformat(end), action)
+        for start, end, action in expected_actions
+    ]
+    for previous, current in zip(plan.slots, plan.slots[1:]):
+        assert previous.start < previous.end
+        assert previous.end == current.start
 
     assert sum(slot.expected_load_wh for slot in plan.slots) == pytest.approx(3419.17, abs=1)
     assert plan.baseline_cost_dkk == pytest.approx(6.8816, abs=0.02)
     assert plan.expected_cost_dkk == pytest.approx(4.647, abs=0.20)
     assert plan.expected_savings_dkk == pytest.approx(2.235, abs=0.20)
 
-    assert actions[0] == (NOW, datetime.fromisoformat("2026-09-25T17:15:00+02:00"), Action.GRID)
-    assert actions[1][0] == datetime.fromisoformat("2026-09-25T17:15:00+02:00")
-    assert actions[1][2] is Action.BATTERY
     assert any(
         block.action is Action.CHARGE
         and block.start == datetime.fromisoformat("2026-09-26T13:15:00+02:00")

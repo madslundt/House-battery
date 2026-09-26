@@ -99,12 +99,19 @@ class FbpLocalSnapshot:
         here as diagnostics so the correct source can be verified.
         """
         summary = _first_mapping(self.raw.get("SSumInfoList"))
+        backup_reported = _number(summary, "TotalBackUpPower")
+        off_grid_total = _off_grid_total(self.raw)
+        backup_w = _normalized_backup_power_w(backup_reported, off_grid_total)
         return {
             "meter_total_active_power_w": _number(summary, "MeterTotalActivePower"),
             "smart_load_power_w": _number(summary, "TotalSmartLoadElectricalPower"),
-            "backup_load_power_w": _number(summary, "TotalBackUpPower"),
+            # Some FBP1200 firmware reports this aggregate at one tenth of the
+            # per-storage OffGridLoadPower value. Keep both the normalized W
+            # value and raw payload for diagnostics.
+            "backup_load_power_w": backup_w,
+            "backup_load_power_reported": backup_reported,
             "off_grid_load_power_per_unit_w": _off_grid_per_unit(self.raw),
-            "off_grid_load_power_total_w": _off_grid_total(self.raw),
+            "off_grid_load_power_total_w": off_grid_total,
             "off_grid_load_validation_error": self.off_grid_load_validation_error,
         }
 
@@ -121,23 +128,27 @@ class FbpLocalSnapshot:
 
         AECC defines ``TotalBackUpPower`` as the device's total off-grid power
         and ``OffGridLoadPower`` as the per-storage off-grid load, both in W.
-        When every storage unit reports its value, their sum must agree with the
-        system summary within rounding tolerance. A mismatch makes the load
-        unsafe for planning, so the caller receives ``None`` until telemetry is
-        internally consistent.
+        This FBP1200 has reported the aggregate at 0.1 scale, so that correction
+        is accepted only when multiplying it by ten agrees with the complete
+        per-storage sum. Any other mismatch makes the load unsafe for planning,
+        so the caller receives ``None`` until telemetry is internally
+        consistent.
         """
         per_storage_total = _off_grid_total(self.raw)
-        system_total = _number(
+        reported_system_total = _number(
             _first_mapping(self.raw.get("SSumInfoList")), "TotalBackUpPower"
+        )
+        system_total = _normalized_backup_power_w(
+            reported_system_total, per_storage_total
         )
         if per_storage_total is None or system_total is None:
             return None
-        tolerance_w = max(5.0, max(abs(per_storage_total), abs(system_total)) * 0.05)
-        if abs(per_storage_total - system_total) > tolerance_w:
+        if not _power_totals_match(per_storage_total, system_total):
             return (
                 "per-storage off-grid total "
                 f"({per_storage_total:g} W) disagrees with device total backup "
-                f"power ({system_total:g} W)"
+                f"power ({reported_system_total:g} W reported; "
+                f"{system_total:g} W normalized)"
             )
         return None
 
@@ -559,6 +570,34 @@ def _off_grid_total(response: dict[str, Any]) -> float | None:
     if not per_unit or not all(value is not None for value in per_unit):
         return None
     return sum(value for value in per_unit if value is not None)
+
+
+def _power_totals_match(first_w: float, second_w: float) -> bool:
+    """Allow normal sensor rounding while detecting meaningful conflicts."""
+    tolerance_w = max(5.0, max(abs(first_w), abs(second_w)) * 0.05)
+    return abs(first_w - second_w) <= tolerance_w
+
+
+def _normalized_backup_power_w(
+    reported_w: float | None, per_storage_total_w: float | None
+) -> float | None:
+    """Correct the FBP1200 summary's observed 0.1 scale when corroborated.
+
+    The AECC protocol documents both fields in watts, but this FBP1200 reports
+    ``TotalBackUpPower`` one tenth of the complete ``OffGridLoadPower`` sum.
+    Apply the scale correction only when multiplying the summary by ten makes
+    the two independent readings agree within normal rounding tolerance.
+    Otherwise preserve the reported value so real disagreements still fail
+    closed.
+    """
+    if reported_w is None or per_storage_total_w is None:
+        return reported_w
+    if _power_totals_match(reported_w, per_storage_total_w):
+        return reported_w
+    scaled_w = reported_w * 10
+    if _power_totals_match(scaled_w, per_storage_total_w):
+        return scaled_w
+    return reported_w
 
 
 def _first_mapping(value: Any) -> dict[str, Any]:

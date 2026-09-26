@@ -47,6 +47,7 @@ def test_decodes_summary_telemetry_without_per_unit_zero_values() -> None:
         "meter_total_active_power_w": 350,
         "smart_load_power_w": 106,
         "backup_load_power_w": 24,
+        "backup_load_power_reported": 24,
         "off_grid_load_power_per_unit_w": [None],
         "off_grid_load_power_total_w": None,
         "off_grid_load_validation_error": None,
@@ -86,7 +87,7 @@ def test_load_diagnostics_keeps_every_storage_unit_and_only_aggregates_complete_
     assert malformed.load_diagnostics["off_grid_load_power_total_w"] is None
 
 
-def test_off_grid_load_fails_closed_when_unit_and_system_totals_disagree() -> None:
+def test_normalizes_tenth_scale_backup_summary_against_per_storage_total() -> None:
     snapshot = decode_energy_parameter(
         {
             "SSumInfoList": [
@@ -96,10 +97,11 @@ def test_off_grid_load_fails_closed_when_unit_and_system_totals_disagree() -> No
         }
     )
 
+    assert snapshot.load_diagnostics["backup_load_power_w"] == 127
+    assert snapshot.load_diagnostics["backup_load_power_reported"] == 12.7
     assert snapshot.load_diagnostics["off_grid_load_power_total_w"] == 127
-    assert snapshot.off_grid_load_total_w is None
-    assert "127 W" in snapshot.off_grid_load_validation_error
-    assert "12.7 W" in snapshot.off_grid_load_validation_error
+    assert snapshot.off_grid_load_total_w == 127
+    assert snapshot.off_grid_load_validation_error is None
 
 
 def test_rejects_multi_unit_fallback_without_a_proven_summary() -> None:
