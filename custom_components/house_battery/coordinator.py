@@ -153,6 +153,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             lambda: self.runtime,
             self._power_flow,
             lambda: self.store.save(self.runtime),
+            lambda: self._load_power(),
         )
 
     @property
@@ -272,21 +273,18 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _power_flow(self) -> PowerFlowSnapshot | None:
         """Build the canonical load-vs-grid flow for this refresh.
 
-        This is the single adapter boundary between FBP1200 raw telemetry and
-        every downstream layer. For a direct-local entry the connected load is
-        the complete per-storage off-grid total and the grid flow is the signed
-        meter; for a legacy (HA-entity) entry the configured load and grid
-        entities are used. Battery flow is always inferred from the balance,
-        never read from the device.
+        Legacy HA-entity entries have measured load and grid inputs, so battery
+        flow can be inferred from their balance. Direct-local FBP1200 entries
+        have no CT meter; their zero meter value cannot establish grid flow, so
+        they do not produce a canonical balanced-flow sample.
         """
         now = datetime.now(UTC)
-        if self.is_direct_local and self._local_snapshot is not None:
-            return derive_power_flow(
-                self._local_snapshot.soc,
-                self._local_snapshot.off_grid_load_total_w,
-                self._local_snapshot.grid_power_w,
-                timestamp=now,
-            )
+        if self.is_direct_local:
+            # The FBP1200 direct-local path has no CT meter:
+            # MeterTotalActivePower is reported as 0 W even when the grid is
+            # feeding the house. Load minus that value would invent battery
+            # output, so no balanced grid/battery flow is available here.
+            return None
         return derive_power_flow(
             self._float(CONF_SOC),
             self._float(CONF_LOAD_POWER),
@@ -887,6 +885,33 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Local TCP recovery in progress: " + local_problem
             )
         flow = self.power_flow
+        local_snapshot = self._local_snapshot if self.is_direct_local else None
+        raw_charge_power = (
+            local_snapshot.raw_reported_charge_power_w
+            if local_snapshot is not None
+            else None
+        )
+        raw_output_power = (
+            local_snapshot.raw_reported_output_power_w
+            if local_snapshot is not None
+            else None
+        )
+        load_power = flow.load_w if flow else self._load_power()
+        battery_charge_power = (
+            flow.battery_charge_power_w if flow else raw_charge_power
+        )
+        battery_output_power = (
+            flow.battery_output_power_w if flow else raw_output_power
+        )
+        battery_power = (
+            flow.battery_net_power_w
+            if flow
+            else (
+                raw_output_power - raw_charge_power
+                if raw_output_power is not None and raw_charge_power is not None
+                else None
+            )
+        )
         return {
             "system_state": state,
             "healthy": (
@@ -904,16 +929,24 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "grid_available": grid_available,
             "command_result": command_result,
             "soc": soc,
-            # Canonical load-vs-grid power flow. Load is the connected load;
-            # grid is the signed meter; battery is inferred from the balance and
-            # never read from the FBP1200's raw charge/discharge telemetry.
-            "load_power_w": flow.load_w if flow else None,
+            # Legacy HA-entity entries use a measured load/grid balance. Direct
+            # local entries have no CT meter, so their battery sensors use raw
+            # device telemetry while grid flow remains unavailable.
+            "load_power_w": load_power,
             "grid_flow_power_w": flow.grid_power_w if flow else None,
             "grid_import_power_w": flow.grid_import_w if flow else None,
             "grid_export_power_w": flow.grid_export_w if flow else None,
-            "battery_power_w": flow.battery_net_power_w if flow else None,
-            "battery_charge_power_w": flow.battery_charge_power_w if flow else None,
-            "battery_output_power_w": flow.battery_output_power_w if flow else None,
+            "battery_power_w": battery_power,
+            "battery_charge_power_w": battery_charge_power,
+            "battery_output_power_w": battery_output_power,
+            "battery_power_source": (
+                "device telemetry"
+                if local_snapshot is not None
+                else "unavailable"
+                if self.is_direct_local
+                else "load/grid balance"
+            ),
+            "direct_local": self.is_direct_local,
             "power_source": self._classify_power_source(flow),
             "export_detected": export_detected,
             "export_safety_fault": export_safety_fault,

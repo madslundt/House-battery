@@ -9,12 +9,12 @@ entity picker; names below are the stable, user-facing names.
 | --- | --- | --- |
 | **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `RECOVERING`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. `RECOVERING` is a two-minute, write-paused grace period for a lost direct local TCP connection; read its `reason` attribute when it is not active. |
 | **Current decision** | The action the current plan wants now: `charge`, `grid`, `battery`, or `safe`. | Compare it with **Battery activity** to distinguish a planned mode from measured physical movement. |
-| **Battery activity** | Actual battery movement, derived from the load/grid/SOC balance — not copied from the inverter's raw charge/output registers. | `charging`, `discharging`, or `idle`; configured operating mode remains an attribute because it does not prove physical energy movement. |
+| **Battery activity** | `charging`, `discharging`, or `idle` based on physical power telemetry. Direct-local FBP1200 entries use reported battery charge/output power because they lack a CT meter; legacy entries use the measured load/grid balance. | Compare with **Current decision**; activity is observed independently of the optimizer plan. |
 | **Operating mode** | Direct local TCP selector for `Charge`, `Idle`, and the vendor-labelled `Self-Gen/Zero Export`. | This is a commanded state; vendor-app changes are not guaranteed to appear here. |
 | **Grid available** | Whether an on-grid supply physically exists. | This is not grid import. `off` produces `OUTAGE` and stops economic control. |
 | **Optimizer problem** | `on` when required telemetry is stale, invalid, faulted, offline, or grid status is unknown. | Treat it as a stop signal. Its `problems` attribute names the failed binding. |
-| **Export detected** | `on` when the grid meter reports power flowing to the grid above the noise floor. | Any grid export is a fault. This is the independent meter-side check on the Self-Gen/Zero Export guarantee; it fires even when House Battery is not currently commanding the inverter. |
-| **Export safety fault** | `on` while automatic control is enabled and the meter reports export. It latches and disables all inverter writes until you disable then re-enable control. | Fail-closed zero-export protection. Clear it by toggling automatic control off, confirming the export has stopped, then on again. |
+| **Export detected** | `on` when a configured grid meter reports power flowing to the grid above the noise floor. | Direct-local FBP1200 entries without a CT meter cannot measure export; their battery mode relies on the inverter's Self-Gen/Zero Export guarantee. |
+| **Export safety fault** | `on` while automatic control is enabled and a configured meter reports export. It latches and disables all inverter writes until you disable then re-enable control. | Meter-based fail-closed protection is available only when a grid meter is configured. |
 | **Automatic control** | Explicit permission for House Battery to issue local mode/limit writes. | Leave off during setup. It cannot turn on until the entry is commissioned and native SOC controls pass validation. |
 | **Use external price forecast** | Enables valid, fresh forecast intervals after the end of known prices. | Leave it off while measuring forecast quality. Its `status` attribute explains `used`, `stale`, `invalid`, `empty`, or another non-use result; none of these affects known-price planning. |
 | **Force safe mode** | Button that turns automatic control off and requests the configured safe local mode. | Use immediately if real battery behavior disagrees with the plan. |
@@ -30,14 +30,14 @@ the local provider, and the mode read-back before re-enabling automatic control.
 | **Battery state of charge** | Current usable battery percentage reported directly by the battery. |
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
 | **Local load diagnostics** | Direct-local entries only. Comparison of the FOSSiBOT whole-site meter, smart-load total, backup-load total, and every storage unit's off-grid reading. The complete per-storage off-grid total is automatically used for learning, planning, and automatic control; incomplete stack data fails closed. |
-| **Grid import power** | Current whole-site power bought from the grid; used for evidence and accounting. |
-| **Grid export power** | Whole-site power sent to the grid. Must read 0 (or non-positive) at all times while automatic control runs; any sustained positive value is the zero-export invariant being violated. |
-| **Battery output power** | Instantaneous power the battery is delivering to the load/grid, derived from the load/grid/SOC balance (battery power negative means it is charging). Used for learning, throughput, and realized savings estimates. Raw inverter charge/output powers are exposed for diagnostics only and are never fed to planning, accounting, or learning. |
-| **Power source** | Where the load is served from right now: `charging` (grid/serving battery charge), `battery` (battery serving load), `grid` (grid serving load), or `off` (no measured load). | A quick cross-check on **Battery activity** and **Grid import/export power**. |
+| **Grid import power** | Current whole-site power bought from the grid; used for evidence and accounting when a measured grid input is configured. Unavailable for direct-local FBP1200 entries without a CT meter. |
+| **Grid export power** | Whole-site power sent to the grid. Requires a measured grid meter; direct-local FBP1200 entries without a CT meter cannot report it. |
+| **Battery output power** | Legacy entries infer battery output from the measured load/grid balance. Direct-local entries show the inverter's reported battery output, which is useful for current activity but is not used for accounting or learning. Battery-flow accounting and learning require a measured grid balance. |
+| **Power source** | Where the load is served from right now: `charging` (battery charging), `battery` (battery serving load), `grid` (battery idle while load is present), or `off` (no measured load). Legacy entries use the load/grid balance; direct-local entries use reported battery direction. |
 | **Native minimum/maximum SOC** | Allowlisted battery hardware SOC registers. | They are read back after changes and used as the direct control limits. |
 | **Current electricity price** | Price for the current known price interval. |
 | **Expected plan savings** | Forecast saving across the current known horizon versus buying expected load from grid. It is a forecast, not cash earned. |
-| **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Compare matching tariff periods, not one unusual day. |
+| **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Direct-local FBP1200 entries without a CT meter cannot record balanced grid/battery savings. Compare matching tariff periods, not one unusual day. |
 | **Known price spread** | Highest minus lowest price in the known future horizon. |
 | **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before extra storage is allowed. |
 | **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary extra-storage ceiling. |
@@ -53,7 +53,7 @@ cycling is not worth it.
 
 | Entity | Plain-language description |
 | --- | --- |
-| **Battery charge/discharge today/month/total** | Energy moved into/out of the battery. These are throughput counters, not grid-meter billing totals. |
+| **Battery charge/discharge today/month/total** | Energy moved into/out of the battery when a measured flow balance is available. Direct-local entries without a CT meter do not add unverified throughput. These are throughput counters, not grid-meter billing totals. |
 | **Equivalent full cycles** | Lifetime discharged energy divided by usable capacity. One 1.958 kWh discharge is roughly one equivalent cycle. |
 | **Estimated battery degradation** | Capacity loss estimated from learned capacity when available, otherwise from cycle-life reference. It is not a BMS warranty value. |
 | **Estimated remaining capacity** | 100% minus the estimated degradation. |

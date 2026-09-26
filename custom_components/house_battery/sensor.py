@@ -389,15 +389,16 @@ class FbpActionSensor(Fbp1200Entity, SensorEntity):
         }
 
 
-def _battery_activity(data: dict[str, Any]) -> str:
-    """Classify physical battery power, never a configured operating mode.
-
-    Battery charge/output power are inferred from the measured load and grid
-    meter by the coordinator's canonical power-flow model; they are never the
-    FBP1200's raw reported charge/discharge telemetry.
-    """
-    charge = float(data.get("battery_charge_power_w") or 0)
-    output = float(data.get("battery_output_power_w") or 0)
+def _battery_activity(data: dict[str, Any]) -> str | None:
+    """Classify measured battery movement for the available telemetry path."""
+    if data.get("direct_local") and not data.get("local_connected"):
+        return None
+    charge_value = data.get("battery_charge_power_w")
+    output_value = data.get("battery_output_power_w")
+    if charge_value is None or output_value is None:
+        return None
+    charge = float(charge_value)
+    output = float(output_value)
     threshold_w = 10
     if charge >= threshold_w and output >= threshold_w:
         return "conflict"
@@ -416,31 +417,29 @@ class FbpModeSensor(Fbp1200Entity, SensorEntity):
         super().__init__(coordinator, "battery_mode")
 
     @property
-    def native_value(self) -> str:
+    def native_value(self) -> str | None:
         return _battery_activity(self.coordinator.data)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
-            "source": "canonical load-vs-grid power flow",
+            "source": self.coordinator.data.get("battery_power_source"),
             "configured_mode": self.coordinator.data.get("local_observed_mode"),
             "configured_action": self.coordinator.data.get("observed_action"),
             "current_decision": self.coordinator.data.get("current_action"),
             "charge_power_w": self.coordinator.data.get("battery_charge_power_w"),
             "output_power_w": self.coordinator.data.get("battery_output_power_w"),
             "active_power_threshold_w": 10,
-            "note": "Physical activity is idle below 10 W. Charge/output power are inferred from the measured load and grid meter, never the FBP1200's raw telemetry. Configured mode is shown separately and does not prove energy movement.",
+            "note": "Direct-local activity uses the inverter's reported charge/output power because this path has no CT meter. Legacy HA-entity activity is inferred from measured load and grid power. Configured mode is shown separately.",
         }
 
 
 class FbpPowerSourceSensor(Fbp1200Entity, SensorEntity):
     """Read-only classification of where the load's power is actually coming from.
 
-    The source is derived from the canonical power-flow model (measured load and
-    grid meter), so it reflects physical reality: what the battery is actually
-    doing, not what the optimizer requested. It reports ``unavailable`` when the
-    flow model cannot produce a source (missing or invalid primary
-    measurements).
+    Legacy entries use the canonical measured load/grid balance. Direct-local
+    entries use battery direction telemetry because the inverter has no CT
+    meter. The source is independent of what the optimizer requested.
     """
 
     _attr_name = "Power source"
@@ -465,7 +464,7 @@ class FbpPowerSourceSensor(Fbp1200Entity, SensorEntity):
             "grid_power_w": data.get("grid_flow_power_w"),
             "export_detected": data.get("export_detected"),
             "export_safety_fault": data.get("export_safety_fault"),
-            "note": "Derived from the measured load and grid meter, never the FBP1200's raw telemetry.",
+            "note": "Legacy entries use measured load/grid balance; direct-local entries use reported battery direction because no CT meter is available.",
         }
 
 
@@ -631,6 +630,8 @@ class FbpPlanExecutionSensor(Fbp1200Entity, SensorEntity):
             else "discharging" if discharge_wh > 0 else "idle"
         )
         actual = _battery_activity(self.coordinator.data)
+        if actual is None:
+            return "not_assessable"
         if expected == actual:
             return "matching"
         if expected == "idle":
