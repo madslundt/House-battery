@@ -57,7 +57,7 @@ entities:
   - entity: sensor.house_battery_optimizer_state
   - entity: binary_sensor.house_battery_optimizer_problem
   - entity: binary_sensor.house_battery_grid_available
-  - entity: sensor.house_battery_current_decision
+  - entity: sensor.house_battery_current_plan_slot
   - entity: sensor.house_battery_battery_mode
   - entity: sensor.house_battery_battery_state_of_charge
   - entity: sensor.house_battery_effective_charge_target_soc

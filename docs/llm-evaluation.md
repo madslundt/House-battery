@@ -37,17 +37,17 @@ Keep the usual House Battery telemetry at a 1 to 15 minute cadence:
 
 | Purpose | Entities |
 | --- | --- |
-| Safety and control state | **Optimizer state**, **Optimizer problem**, **Grid available**, **Automatic control**, **Current decision**, **Battery activity**, **Operating mode** |
+| Safety and control state | **Optimizer state**, **Optimizer problem**, **Grid available**, **Automatic control**, **Current plan slot**, **Battery activity**, **Operating mode** |
 | Plan and its inputs | **Operation plan**, **Current plan slot**, **Planned load power**, **Current electricity price**, **Extra storage policy**, **Effective charge target SOC** |
 | Physical outcome | **Battery state of charge**, **Connected load power**, **Grid import power**, **Battery charge power**, **Battery discharge power** |
 | Aggregate economics | **Expected plan savings**, all **Estimated realized savings** periods, battery charge/discharge counters, **Equivalent full cycles**, and **Estimated battery degradation** |
 | Model quality | **Load learning coverage**, **Load forecast mean absolute error**, **Battery learning**, **Learned usable capacity**, **Learned round-trip efficiency**, and **External price forecast accuracy** |
 
 Retain the attributes of **Current plan slot** and **Plan execution**. The
-former identifies the information used by the planner for the current price
-interval; the latter distinguishes planned movement from physical battery
-telemetry. The state of **Current plan slot** is its start timestamp, so it is
-also convenient to index by plan interval.
+former is the current planner action and identifies the information used for
+the active price interval; the latter distinguishes planned movement from
+physical battery telemetry. The slot start and end are attributes, so samples
+can be indexed by plan interval without a separate current-decision entity.
 
 Also retain the raw price-source intervals. A current-price sensor alone does
 not show the price horizon the planner could see. For external forecasts,

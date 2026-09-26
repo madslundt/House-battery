@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
@@ -23,6 +26,9 @@ from house_battery.sensor import (
     FbpPlanExecutionSensor,
     FbpPlannedLoadPowerSensor,
     daily_plan_blocks,
+)
+from house_battery.sensor import (
+    async_setup_entry as async_setup_sensor_entry,
 )
 from house_battery.switch import (
     FbpExternalForecastSwitch,
@@ -152,6 +158,7 @@ def test_battery_activity_uses_physical_power_not_configured_mode() -> None:
     )
 
     assert FbpModeSensor.native_value.fget(sensor) == "idle"
+    assert "current_decision" not in FbpModeSensor.extra_state_attributes.fget(sensor)
 
 
 def test_current_plan_slot_exposes_auditable_planner_inputs() -> None:
@@ -188,14 +195,54 @@ def test_current_plan_slot_exposes_auditable_planner_inputs() -> None:
 
     assert (
         FbpCurrentPlanSlotSensor.native_value.fget(slot_sensor)
-        == "2026-09-22T10:00:00+00:00"
+        == "charge"
     )
     attributes = FbpCurrentPlanSlotSensor.extra_state_attributes.fget(slot_sensor)
+    assert attributes["start"] == "2026-09-22T10:00:00+00:00"
+    assert attributes["end"] == "2026-09-22T10:15:00+00:00"
+    assert attributes["action"] == "charge"
     assert attributes["price_source"] == "forecast"
     assert attributes["expected_average_load_w"] == 500
     assert attributes["planned_battery_charge_kwh"] == 0.3
     assert FbpPlannedLoadPowerSensor.native_value.fget(load_sensor) == 500
     assert FbpPlanExecutionSensor.native_value.fget(execution_sensor) == "matching"
+
+
+def test_sensor_setup_removes_redundant_current_decision_entity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    removed: list[str] = []
+
+    class Registry:
+        def async_get_entity_id(
+            self, domain: str, platform: str, unique_id: str
+        ) -> str:
+            assert (domain, platform, unique_id) == (
+                "sensor",
+                "house_battery",
+                "entry-1_current_action",
+            )
+            return "sensor.house_battery_current_decision"
+
+        def async_remove(self, entity_id: str) -> None:
+            removed.append(entity_id)
+
+    monkeypatch.setattr("house_battery.sensor.er.async_get", lambda hass: Registry())
+    coordinator = SimpleNamespace(
+        entry=SimpleNamespace(entry_id="entry-1"),
+        data={},
+        config={},
+        device_info={},
+        is_direct_local=False,
+    )
+    entry = SimpleNamespace(runtime_data=coordinator, entry_id="entry-1")
+    entities = []
+
+    asyncio.run(async_setup_sensor_entry(SimpleNamespace(), entry, entities.extend))
+
+    assert removed == ["sensor.house_battery_current_decision"]
+    assert any(entity.unique_id == "entry-1_current_plan_slot" for entity in entities)
+    assert not any(entity.unique_id == "entry-1_current_action" for entity in entities)
 
 
 def test_operation_plan_blocks_expose_expected_grid_use_and_cost() -> None:

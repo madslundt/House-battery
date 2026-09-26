@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -14,12 +14,14 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import DOMAIN
 from .coordinator import Fbp1200Coordinator
 from .entity import Fbp1200Entity
-from .models import Action, POWER_SOURCE_STATES
+from .models import POWER_SOURCE_STATES
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -301,10 +303,17 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: Fbp1200Coordinator = entry.runtime_data
+    # This sensor duplicated ``Current plan slot.action``. Remove its registry
+    # entry as it is no longer provided, so it does not linger unavailable.
+    registry = er.async_get(hass)
+    old_entity_id = registry.async_get_entity_id(
+        "sensor", DOMAIN, f"{entry.entry_id}_current_action"
+    )
+    if old_entity_id:
+        registry.async_remove(old_entity_id)
     async_add_entities(
         [
             FbpSystemStateSensor(coordinator),
-            FbpActionSensor(coordinator),
             FbpModeSensor(coordinator),
             FbpPowerSourceSensor(coordinator),
             FbpPlanSensor(coordinator),
@@ -368,27 +377,6 @@ class FbpSystemStateSensor(Fbp1200Entity, SensorEntity):
         return {key: self.coordinator.data.get(key) for key in keys}
 
 
-class FbpActionSensor(Fbp1200Entity, SensorEntity):
-    _attr_name = "Current decision"
-    _attr_icon = "mdi:state-machine"
-
-    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
-        super().__init__(coordinator, "current_action")
-
-    @property
-    def native_value(self) -> str:
-        return self.coordinator.data.get("current_action", Action.SAFE.value)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "reason": self.coordinator.data.get("reason"),
-            "configured_action": self.coordinator.data.get("observed_action"),
-            "battery_activity": _battery_activity(self.coordinator.data),
-            "command_result": self.coordinator.data.get("command_result"),
-        }
-
-
 def _battery_activity(data: dict[str, Any]) -> str | None:
     """Classify measured battery movement for the available telemetry path."""
     if data.get("direct_local") and not data.get("local_connected"):
@@ -426,7 +414,6 @@ class FbpModeSensor(Fbp1200Entity, SensorEntity):
             "source": self.coordinator.data.get("battery_power_source"),
             "configured_mode": self.coordinator.data.get("local_observed_mode"),
             "configured_action": self.coordinator.data.get("observed_action"),
-            "current_decision": self.coordinator.data.get("current_action"),
             "charge_power_w": self.coordinator.data.get("battery_charge_power_w"),
             "output_power_w": self.coordinator.data.get("battery_output_power_w"),
             "active_power_threshold_w": 10,
@@ -444,7 +431,7 @@ class FbpPowerSourceSensor(Fbp1200Entity, SensorEntity):
 
     _attr_name = "Power source"
     _attr_icon = "mdi:transfer"
-    _attr_options = list(POWER_SOURCE_STATES)
+    _attr_options: ClassVar[list[str]] = list(POWER_SOURCE_STATES)
 
     def __init__(self, coordinator: Fbp1200Coordinator) -> None:
         super().__init__(coordinator, "power_source")
@@ -526,7 +513,7 @@ class FbpCurrentPlanSlotSensor(Fbp1200Entity, SensorEntity):
     @property
     def native_value(self) -> str | None:
         slot = _current_plan_slot(self.coordinator.data)
-        return slot.get("start") if slot else None
+        return slot.get("action") if slot else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -544,6 +531,7 @@ class FbpCurrentPlanSlotSensor(Fbp1200Entity, SensorEntity):
         expected_load_wh = float(slot.get("expected_load_wh") or 0)
         return {
             "status": "planned",
+            "start": slot.get("start"),
             "end": slot.get("end"),
             "action": slot.get("action"),
             "price_dkk_per_kwh": slot.get("price"),

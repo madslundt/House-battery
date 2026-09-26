@@ -8,8 +8,8 @@ entity picker; names below are the stable, user-facing names.
 | Entity | What it means | How to use it |
 | --- | --- | --- |
 | **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `RECOVERING`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. `RECOVERING` is a two-minute, write-paused grace period for a lost direct local TCP connection; read its `reason` attribute when it is not active. |
-| **Current decision** | The action the current plan wants now: `charge`, `grid`, `battery`, or `safe`. | Compare it with **Battery activity** to distinguish a planned mode from measured physical movement. |
-| **Battery activity** | `charging`, `discharging`, or `idle` based on physical power telemetry. Direct-local FBP1200 entries use reported battery charge/output power because they lack a CT meter; legacy entries use the measured load/grid balance. | Compare with **Current decision**; activity is observed independently of the optimizer plan. |
+| **Current plan slot** | The current planner action: `charge`, `grid`, `battery`, or `safe`. The slot start/end, reason, and expected battery movement are attributes. | This is the single source for the current planned action. Compare its state with **Battery activity**, which is measured independently. |
+| **Battery activity** | `charging`, `discharging`, or `idle` based on physical power telemetry. Direct-local FBP1200 entries use reported battery charge/output power because they lack a CT meter; legacy entries use the measured load/grid balance. | Compare with **Current plan slot** to see whether measured battery movement matches the plan. |
 | **Operating mode** | Direct local TCP selector for `Charge`, `Idle`, and the vendor-labelled `Self-Gen/Zero Export`. | This is a commanded state; vendor-app changes are not guaranteed to appear here. |
 | **Grid available** | Whether an on-grid supply physically exists. | This is not grid import. `off` produces `OUTAGE` and stops economic control. |
 | **Optimizer problem** | `on` when required telemetry is stale, invalid, faulted, offline, or grid status is unknown. | Treat it as a stop signal. Its `problems` attribute names the failed binding. |
@@ -20,7 +20,7 @@ entity picker; names below are the stable, user-facing names.
 | **Allow opportunistic full charge** | Permits the optimizer to compare the normal target with the optional higher target. | Enable it only if occasional 100% charging is acceptable. Its attributes show whether the higher target is currently active, the incremental savings, and the reason. |
 | **Force safe mode** | Button that turns automatic control off and requests the configured safe local mode. | Use immediately if real battery behavior disagrees with the plan. |
 
-Example: if **Current decision** says `battery` while **Battery activity** is
+Example: if **Current plan slot** says `battery` while **Battery activity** is
 `idle`, do not “fix” it by changing settings. Inspect **Optimizer problem**,
 the local provider, and the mode read-back before re-enabling automatic control.
 
@@ -77,7 +77,7 @@ SOC calibration; do not assume a warranty issue from this estimate alone.
 | --- | --- |
 | **Operation plan** | `blocks` attribute: contiguous start/end times, action, expected savings, energy, SOC start/end, and reason. Also exposes baseline cost, expected cost, terminal price, and horizon length. |
 | **Decision history** | Recent state/reason changes with timestamp, SOC, price, action, and command result. Use it to explain why the plan changed. |
-| **Current plan slot** | The active executable price interval, with its planned load, grid import, charge/discharge energy, SOC path, price provenance, conservative forecast buffer, costs, and reason. | Record this entity's attributes for a compact historical record of the inputs and output of each decision. |
+| **Current plan slot** | Its state is the current planner action. Attributes include the active executable price interval, planned load, grid import, charge/discharge energy, SOC path, price provenance, conservative forecast buffer, costs, and reason. | Use this entity for the current action and its supporting evidence; the separate **Operation plan** contains the full-day timeline. |
 | **Planned load power** | Average connected-load forecast for the active plan slot, including scheduled loads. | Compare it with **Connected load power** over matching intervals to find systematic forecast bias. |
 | **Plan execution** | A live comparison between planned battery movement and measured charge/discharge power. | `matching` is encouraging; investigate a repeated non-matching state over a completed price slot. A momentary mismatch is not proof of a failed command. |
 

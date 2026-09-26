@@ -32,11 +32,11 @@ from .const import (
     DECISION_HISTORY_LIMIT,
     DEFAULT_PORT,
     DIRECT_LOAD_SOURCE,
-    EXPORT_SAFETY_W,
     DOMAIN,
-    FORECAST_MAX_AGE,
+    EXPORT_SAFETY_W,
     FLOW_NOISE_FLOOR_W,
     FLOW_UI_ACTIVE_THRESHOLD_W,
+    FORECAST_MAX_AGE,
     LOCAL_TCP_RECOVERY_GRACE,
     MODE_BATTERY,
     MODE_CHARGE,
@@ -66,9 +66,9 @@ from .local_tcp import (
 )
 from .models import (
     Action,
-    PowerFlowSnapshot,
     Plan,
     PlannerSettings,
+    PowerFlowSnapshot,
     PriceSlot,
     derive_power_flow,
 )
@@ -990,9 +990,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 not problems and not local_tcp_recovering and grid_available is True
             ),
             "reason": reason,
-            "current_action": self.plan.current_action.value
-            if self.plan and self.plan.slots
-            else Action.SAFE.value,
             "observed_action": action.value,
             "execution_enabled": self.runtime.execution_enabled,
             "mode_override": self.runtime.override_action,

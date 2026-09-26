@@ -64,7 +64,7 @@ reference.
 
 New entries run in **SHADOW** mode: they build a plan but never write to the
 battery. Leave it there through at least one representative price horizon and
-compare **Current decision**, **Battery activity**, **Operation plan**, and the
+compare **Current plan slot**, **Battery activity**, **Operation plan**, and the
 power sensors.
 
 Before setting *I verified…* in Options and enabling **Automatic control**:
