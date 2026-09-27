@@ -448,7 +448,34 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     slot.source == "forecast" for slot in extended
                 )
                 if forecast_count:
-                    slots = extended
+                    other_forecasts = [
+                        slot
+                        for other_source, other_slots in available_forecasts
+                        if other_source != source
+                        for slot in other_slots
+                    ]
+                    # Conflicting feeds are additional forecast error, not a
+                    # reason to silently trust whichever entity has priority.
+                    slots = [
+                        replace(
+                            slot,
+                            uncertainty_dkk_per_kwh=(
+                                slot.uncertainty_dkk_per_kwh
+                                + max(
+                                    (
+                                        abs(slot.price - other.price)
+                                        for other in other_forecasts
+                                        if other.start < slot.end
+                                        and other.end > slot.start
+                                    ),
+                                    default=0.0,
+                                )
+                            ),
+                        )
+                        if slot.source == "forecast"
+                        else slot
+                        for slot in extended
+                    ]
                     self._forecast_planning_source = source
                     self._forecast_used_slot_count = forecast_count
                     break

@@ -81,9 +81,9 @@ def test_known_price_regression_uses_load_wear_and_profit_hurdle() -> None:
     expected_actions = [
         ("2026-09-25T16:55:00+02:00", "2026-09-25T17:15:00+02:00", Action.GRID),
         ("2026-09-25T17:15:00+02:00", "2026-09-25T22:00:00+02:00", Action.BATTERY),
-        ("2026-09-25T22:00:00+02:00", "2026-09-26T13:15:00+02:00", Action.GRID),
-        ("2026-09-26T13:15:00+02:00", "2026-09-26T14:30:00+02:00", Action.CHARGE),
-        ("2026-09-26T14:30:00+02:00", "2026-09-26T17:15:00+02:00", Action.GRID),
+        ("2026-09-25T22:00:00+02:00", "2026-09-26T12:30:00+02:00", Action.GRID),
+        ("2026-09-26T12:30:00+02:00", "2026-09-26T14:45:00+02:00", Action.CHARGE),
+        ("2026-09-26T14:45:00+02:00", "2026-09-26T17:15:00+02:00", Action.GRID),
         ("2026-09-26T17:15:00+02:00", "2026-09-27T00:00:00+02:00", Action.BATTERY),
     ]
     assert actions == [
@@ -96,13 +96,13 @@ def test_known_price_regression_uses_load_wear_and_profit_hurdle() -> None:
 
     assert sum(slot.expected_load_wh for slot in plan.slots) == pytest.approx(3419.17, abs=1)
     assert plan.baseline_cost_dkk == pytest.approx(6.8816, abs=0.02)
-    assert plan.expected_cost_dkk == pytest.approx(4.647, abs=0.20)
-    assert plan.expected_savings_dkk == pytest.approx(2.235, abs=0.20)
+    assert plan.expected_cost_dkk == pytest.approx(4.968, abs=0.02)
+    assert plan.expected_savings_dkk == pytest.approx(2.514, abs=0.02)
 
     assert any(
         block.action is Action.CHARGE
-        and block.start == datetime.fromisoformat("2026-09-26T13:15:00+02:00")
-        and block.end == datetime.fromisoformat("2026-09-26T14:30:00+02:00")
+        and block.start == datetime.fromisoformat("2026-09-26T12:30:00+02:00")
+        and block.end == datetime.fromisoformat("2026-09-26T14:45:00+02:00")
         for block in blocks
     )
     assert any(

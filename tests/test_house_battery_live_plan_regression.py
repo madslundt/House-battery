@@ -68,8 +68,8 @@ def _optimize(slots: list[PriceSlot], target_soc: float):
     )
 
 
-def test_live_known_price_plan_charges_only_for_modeled_evening_load() -> None:
-    """The live 73.8% peak is the optimum for the supplied known inputs.
+def test_live_known_price_plan_charges_for_evening_and_values_carryover() -> None:
+    """The known-price plan charges to its target and uses battery at the peak.
 
     The load value is reconstructed from HA's four published blocks; all prices
     and settings were read from their live HA entities/export on 2026-09-26.
@@ -83,19 +83,17 @@ def test_live_known_price_plan_charges_only_for_modeled_evening_load() -> None:
         (block.start.hour, block.start.minute, block.end.hour, block.end.minute, block.action)
         for block in blocks[-4:]
     ] == [
-        (4, 0, 14, 0, Action.GRID),
-        (14, 0, 15, 30, Action.CHARGE),
-        (15, 30, 17, 15, Action.GRID),
-        (17, 15, 0, 0, Action.BATTERY),
+        (4, 0, 13, 45, Action.GRID),
+        (13, 45, 15, 45, Action.CHARGE),
+        (15, 45, 17, 30, Action.GRID),
+        (17, 30, 0, 0, Action.BATTERY),
     ]
-    assert max(slot.soc_end for slot in normal.slots) == pytest.approx(73.8, abs=0.01)
+    assert max(slot.soc_end for slot in normal.slots) == pytest.approx(89.89, abs=0.02)
     evening = [slot for slot in normal.slots if slot.action is Action.BATTERY]
-    assert sum(slot.expected_load_wh for slot in evening) == pytest.approx(1003.05)
-    assert sum(slot.battery_charge_wh for slot in normal.slots) == pytest.approx(1050)
+    assert sum(slot.expected_load_wh for slot in evening) == pytest.approx(965.9)
+    assert sum(slot.battery_charge_wh for slot in normal.slots) == pytest.approx(1365)
 
-    # More permitted capacity cannot save money when the known horizon has no
-    # additional load to serve: both optimizations select the identical path.
-    assert full.slots == normal.slots
+    # The known evening peak justifies the optional higher charge ceiling.
     decision = select_opportunistic_plan(
         normal,
         full,
@@ -103,12 +101,12 @@ def test_live_known_price_plan_charges_only_for_modeled_evening_load() -> None:
         full_settings,
         enabled=True,
     )
-    assert not decision.active
-    assert decision.reason == "Higher target does not add meaningful charging"
+    assert decision.active
+    assert decision.settings.target_soc == 100
 
 
-def test_live_forecast_extension_changes_the_plan_but_not_full_charge_policy() -> None:
-    """Forecast peaks have value but cannot certify an opportunistic 100% cycle."""
+def test_live_forecast_extension_supports_a_full_charge_when_objective_improves() -> None:
+    """Select the higher target when forecast-adjusted cost supports it."""
     data, known, forecast, _ = _scenario()
     extended = extend_known_horizon(
         known,
@@ -122,7 +120,7 @@ def test_live_forecast_extension_changes_the_plan_but_not_full_charge_policy() -
     assert max(slot.soc_end for slot in normal.slots) == pytest.approx(89.89, abs=0.02)
     assert max(slot.soc_end for slot in full.slots) == pytest.approx(99.85, abs=0.02)
     assert full.realized_savings_dkk - normal.realized_savings_dkk == pytest.approx(
-        0.2767, abs=0.001
+        0.2860, abs=0.001
     )
     assert any(slot.action is Action.BATTERY for slot in normal.slots if slot.price_source == "forecast")
 
@@ -133,5 +131,6 @@ def test_live_forecast_extension_changes_the_plan_but_not_full_charge_policy() -
         full_settings,
         enabled=True,
     )
-    assert not decision.active
-    assert "known-price charge/discharge cycle" in decision.reason
+    assert decision.active
+    assert "Risk-adjusted plan objective" in decision.reason
+    assert decision.settings.target_soc == 100

@@ -25,6 +25,7 @@ class _Node:
 
 
 _TERMINAL_PRICE_LOOKBACK = timedelta(hours=3)
+_TERMINAL_PRICE_HAIRCUT = 0.75
 
 
 def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
@@ -62,17 +63,25 @@ def _terminal_price(slots: list[PriceSlot]) -> float:
     """Value carryover energy at a conservative price near the horizon edge.
 
     The cheapest price anywhere in the plan can come from a midday dip many
-    hours before the horizon ends. Using that price for leftover energy makes
-    charge retained for after the horizon almost worthless. The lowest
-    uncertainty-adjusted price in the final three hours better represents the
-    price regime the battery carries into, while remaining conservative.
+    hours before the horizon ends. Use the lowest uncertainty-adjusted price in
+    the final three hours as a continuation anchor. When the horizon contains a
+    meaningful price swing, apply a 25% haircut because prices beyond it are
+    unknown. On a flat-price horizon, keep the unadjusted anchor so uncertainty
+    alone does not create a fictitious arbitrage opportunity.
     """
     if not slots:
         return 0.0
     end = max(slot.end for slot in slots)
     tail_start = end - _TERMINAL_PRICE_LOOKBACK
     tail = [slot for slot in slots if slot.end > tail_start]
-    return min(slot.discharge_price_dkk_per_kwh for slot in tail or slots)
+    tail_price = min(slot.discharge_price_dkk_per_kwh for slot in tail or slots)
+    adjusted_prices = [slot.discharge_price_dkk_per_kwh for slot in slots]
+    haircut = (
+        _TERMINAL_PRICE_HAIRCUT
+        if max(adjusted_prices) - min(adjusted_prices) > 0.05
+        else 1.0
+    )
+    return max(0.0, tail_price * haircut)
 
 
 def _allowed_actions() -> tuple[Action, ...]:
@@ -178,19 +187,23 @@ def _slot_transition(
         grid_wh = max(0.0, load_wh - delivered_wh)
 
     interval_cost = grid_wh / 1000 * slot.price
-    optimization_price = (
-        slot.charge_price_dkk_per_kwh
-        if action is Action.CHARGE
-        else slot.discharge_price_dkk_per_kwh
-        if action is Action.BATTERY
-        else slot.price
-    )
-    optimization_cost = grid_wh / 1000 * optimization_price
+    # Forecast uncertainty is a hurdle on battery movement, not a discount on
+    # any residual grid import. Applying p-u to the residual import for a
+    # BATTERY action made disagreement perversely reduce its cost. Keep all
+    # imported energy at the common forecast price, then charge uncertainty on
+    # the energy whose value depends on the forecasted arbitrage decision.
+    optimization_cost = grid_wh / 1000 * slot.price
     if action is Action.BATTERY:
         delivered_kwh = discharged_wh * discharge_efficiency / 1000
         interval_cost += delivered_kwh * settings.degradation_cost_dkk_per_kwh
         optimization_cost += delivered_kwh * (
-            settings.degradation_cost_dkk_per_kwh + settings.minimum_profit_dkk_per_kwh
+            settings.degradation_cost_dkk_per_kwh
+            + settings.minimum_profit_dkk_per_kwh
+            + slot.uncertainty_dkk_per_kwh
+        )
+    elif action is Action.CHARGE:
+        optimization_cost += (
+            input_wh / 1000 * slot.uncertainty_dkk_per_kwh
         )
     interval_cost += switch_cost
     optimization_cost += switch_cost
@@ -433,4 +446,5 @@ def optimize(
         terminal_price,
         f"{action.value}: {reason}",
         terminal_value,
+        round(_final_node.cost - terminal_value, 6),
     )

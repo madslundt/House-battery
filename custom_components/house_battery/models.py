@@ -238,6 +238,7 @@ class Plan:
     terminal_price_dkk_per_kwh: float
     reason: str
     terminal_value_dkk: float = 0.0
+    optimization_objective_dkk: float | None = None
 
     @property
     def current_action(self) -> Action:

@@ -75,7 +75,10 @@ def test_opportunistic_policy_uses_100_percent_for_a_known_profitable_cycle() ->
     assert decision.active
     assert decision.settings.target_soc == 100
     assert max(slot.soc_end for slot in decision.plan.slots) > 99
-    assert decision.plan.slots[-1].soc_end <= normal_settings.target_soc
+    assert (
+        decision.plan.optimization_objective_dkk
+        < normal.optimization_objective_dkk
+    )
     assert decision.incremental_savings_dkk > 0
 
 
@@ -100,15 +103,17 @@ def test_opportunistic_policy_is_opt_in() -> None:
     assert decision.settings.target_soc == 90
 
 
-def test_opportunistic_policy_rejects_energy_left_above_normal_target() -> None:
+def test_opportunistic_policy_rejects_a_worse_risk_adjusted_objective() -> None:
     normal_settings = settings()
     full_settings = replace(normal_settings, target_soc=100)
     prices = _profitable_prices()
     now = prices[0].start
     normal = optimize(prices, now=now, soc=20, settings=normal_settings)
     full = optimize(prices, now=now, soc=20, settings=full_settings)
-    banked_last_slot = replace(full.slots[-1], soc_end=95)
-    banking_plan = replace(full, slots=(*full.slots[:-1], banked_last_slot))
+    banking_plan = replace(
+        full,
+        optimization_objective_dkk=(normal.optimization_objective_dkk or 0) + 0.02,
+    )
 
     decision = select_opportunistic_plan(
         normal,
@@ -120,7 +125,7 @@ def test_opportunistic_policy_rejects_energy_left_above_normal_target() -> None:
 
     assert not decision.active
     assert decision.plan is normal
-    assert "not scheduled for use" in decision.reason
+    assert "risk-adjusted plan objective" in decision.reason
 
 
 def test_grid_availability_is_parsed_only_from_its_explicit_state() -> None:

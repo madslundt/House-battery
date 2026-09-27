@@ -131,25 +131,23 @@ def _oracle_transition(
             return None
         throughput_wh = delta_wh
         grid_wh = load_wh + delta_wh / efficiency
-        effective_price = slot.charge_price_dkk_per_kwh
-        movement_cost = 0.0
+        movement_cost = delta_wh / efficiency / 1000 * slot.uncertainty_dkk_per_kwh
     elif action is Action.BATTERY:
         if delta_wh >= 0:
             return None
         throughput_wh = -delta_wh
         delivered_wh = throughput_wh * efficiency
         grid_wh = max(0.0, load_wh - delivered_wh)
-        effective_price = slot.discharge_price_dkk_per_kwh
         movement_cost = delivered_wh / 1000 * (
             settings.degradation_cost_dkk_per_kwh
             + settings.minimum_profit_dkk_per_kwh
+            + slot.uncertainty_dkk_per_kwh
         )
     else:
         throughput_wh = 0.0
-        effective_price = slot.price
         movement_cost = 0.0
 
-    interval_cost = grid_wh / 1000 * effective_price + movement_cost
+    interval_cost = grid_wh / 1000 * slot.price + movement_cost
     if changed:
         interval_cost += settings.switching_penalty_dkk
     return _OraclePath(
@@ -203,7 +201,12 @@ def _oracle(
         ]
 
     discharge_efficiency = sqrt(settings.round_trip_efficiency)
-    terminal_price = min(slot.discharge_price_dkk_per_kwh for slot in slots)
+    end = max(slot.end for slot in slots)
+    tail = [slot for slot in slots if slot.end > end - timedelta(hours=3)]
+    terminal_price = min(slot.discharge_price_dkk_per_kwh for slot in tail or slots)
+    adjusted_prices = [slot.discharge_price_dkk_per_kwh for slot in slots]
+    if max(adjusted_prices) - min(adjusted_prices) > 0.05:
+        terminal_price *= 0.75
     terminal_net_price = max(
         0.0,
         terminal_price - settings.degradation_cost_dkk_per_kwh,
@@ -232,18 +235,19 @@ def _plan_key(
     previous_action = current_action
     objective_cost = 0.0
     throughput_wh = 0.0
+    efficiency = sqrt(settings.round_trip_efficiency)
     for slot in plan_slots:
         if slot.action is Action.CHARGE:
-            price = slot.price + slot.price_uncertainty_dkk_per_kwh
-            movement_cost = 0.0
+            price = slot.price
+            input_wh = slot.battery_charge_wh / efficiency
+            movement_cost = input_wh / 1000 * slot.price_uncertainty_dkk_per_kwh
         elif slot.action is Action.BATTERY:
-            price = slot.price - slot.price_uncertainty_dkk_per_kwh
-            delivered_wh = slot.battery_discharge_wh * sqrt(
-                settings.round_trip_efficiency
-            )
+            price = slot.price
+            delivered_wh = slot.battery_discharge_wh * efficiency
             movement_cost = delivered_wh / 1000 * (
                 settings.degradation_cost_dkk_per_kwh
                 + settings.minimum_profit_dkk_per_kwh
+                + slot.price_uncertainty_dkk_per_kwh
             )
         else:
             price = slot.price
