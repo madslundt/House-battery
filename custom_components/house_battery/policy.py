@@ -56,25 +56,28 @@ def select_opportunistic_plan(
     *,
     enabled: bool,
 ) -> OpportunisticPlanDecision:
-    """Use the higher-SOC plan only for a complete, known, profitable cycle.
+    """Use the higher-SOC plan for a profitable cycle or valuable carryover.
 
-    Merely assigning a terminal value to energy left at the horizon is not
-    enough. The candidate must charge more than the normal plan, exceed the
-    normal target on known prices, discharge more later on known prices, return
-    to the normal target by the end of the horizon, and improve savings that do
-    not include the notional terminal credit.
+    Forecast slots are uncertainty-adjusted by the optimizer. For enabled
+    opportunistic charging, energy may also be retained beyond the price
+    horizon when its conservative terminal value covers the added cost.
     """
-    incremental_savings = (
+    incremental_realized_savings = (
         opportunistic_plan.realized_savings_dkk - normal_plan.realized_savings_dkk
     )
+    incremental_expected_savings = (
+        opportunistic_plan.expected_savings_dkk - normal_plan.expected_savings_dkk
+    )
 
-    def normal(reason: str) -> OpportunisticPlanDecision:
+    def normal(
+        reason: str, savings: float = incremental_expected_savings
+    ) -> OpportunisticPlanDecision:
         return OpportunisticPlanDecision(
             plan=normal_plan,
             settings=normal_settings,
             active=False,
             reason=reason,
-            incremental_savings_dkk=max(0.0, incremental_savings),
+            incremental_savings_dkk=max(0.0, savings),
         )
 
     if not enabled:
@@ -88,10 +91,10 @@ def select_opportunistic_plan(
     soc_tolerance = (
         100 * opportunistic_settings.energy_step_wh / opportunistic_settings.capacity_wh
     )
-    normal_charge_wh = sum(slot.battery_charge_wh for slot in normal_plan.slots)
-    extra_charge_wh = (
-        sum(slot.battery_charge_wh for slot in opportunistic_plan.slots)
-        - normal_charge_wh
+    extra_charge_above_target_wh = sum(
+        slot.battery_charge_wh
+        for slot in opportunistic_plan.slots
+        if slot.soc_end > normal_settings.target_soc + soc_tolerance
     )
     peak_index, peak_slot = max(
         enumerate(opportunistic_plan.slots),
@@ -123,19 +126,53 @@ def select_opportunistic_plan(
         and last_known_slot.soc_end <= normal_settings.target_soc + soc_tolerance
     )
 
-    if extra_charge_wh <= energy_tolerance_wh:
+    if extra_charge_above_target_wh <= energy_tolerance_wh:
         return normal("Higher target does not add meaningful charging")
     if peak_slot.soc_end <= normal_settings.target_soc + soc_tolerance:
         return normal("Plan does not need storage above the normal target")
+
+    last_opportunistic_slot = opportunistic_plan.slots[-1]
+    last_normal_slot = normal_plan.slots[-1] if normal_plan.slots else None
+    carries_extra_energy = (
+        last_normal_slot is not None
+        and last_opportunistic_slot.soc_end
+        > last_normal_slot.soc_end + soc_tolerance
+        and opportunistic_plan.terminal_value_dkk
+        > normal_plan.terminal_value_dkk + 0.01
+    )
+    if carries_extra_energy and incremental_expected_savings > 0.01:
+        return OpportunisticPlanDecision(
+            plan=opportunistic_plan,
+            settings=opportunistic_settings,
+            active=True,
+            reason=(
+                "Higher target preserves energy beyond the price horizon: "
+                f"conservative carryover value adds {incremental_expected_savings:.2f} DKK"
+            ),
+            incremental_savings_dkk=incremental_expected_savings,
+        )
+
     if (
         peak_slot.price_source != "known"
         or extra_known_discharge_wh <= energy_tolerance_wh
     ):
-        return normal("Extra capacity is not supported by a known-price charge/discharge cycle")
+        return normal(
+            "Extra capacity is not supported by a known-price charge/discharge cycle",
+            incremental_realized_savings,
+        )
     if not returned_to_normal_target_on_known_prices:
-        return normal("Extra energy is not scheduled for use within the known horizon")
-    if opportunistic_plan.realized_savings_dkk <= 0 or incremental_savings <= 0.01:
-        return normal("Higher target does not materially improve realized plan savings")
+        return normal(
+            "Extra energy is not scheduled for use within the known horizon",
+            incremental_realized_savings,
+        )
+    if (
+        opportunistic_plan.realized_savings_dkk <= 0
+        or incremental_realized_savings <= 0.01
+    ):
+        return normal(
+            "Higher target does not materially improve realized plan savings",
+            incremental_realized_savings,
+        )
 
     return OpportunisticPlanDecision(
         plan=opportunistic_plan,
@@ -143,7 +180,7 @@ def select_opportunistic_plan(
         active=True,
         reason=(
             f"Known-price cycle benefits from {opportunistic_settings.target_soc:g}%: "
-            f"incremental savings {incremental_savings:.2f} DKK"
+            f"incremental savings {incremental_realized_savings:.2f} DKK"
         ),
-        incremental_savings_dkk=incremental_savings,
+        incremental_savings_dkk=incremental_realized_savings,
     )

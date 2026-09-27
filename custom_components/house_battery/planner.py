@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import ceil, sqrt
 
 from .models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
@@ -22,6 +22,9 @@ class _Node:
     throughput_wh: float
     previous: _State | None
     detail: tuple[float, float, float, float, float, str] | None
+
+
+_TERMINAL_PRICE_LOOKBACK = timedelta(hours=3)
 
 
 def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
@@ -56,22 +59,20 @@ def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
 
 
 def _terminal_price(slots: list[PriceSlot]) -> float:
-    """Conservative per-kWh value of stored energy at the end of the horizon.
+    """Value carryover energy at a conservative price near the horizon edge.
 
-    Stored energy at the horizon edge is valued at the *avoided-purchase
-    floor*: the cheapest known price over the horizon. This has to be
-    conservative. The terminal value credits energy that cannot be spent once
-    the horizon closes, so crediting it at the average market price (p50 + p75) / 2
-    over-values the last unit and makes the DP *bank* energy at the horizon edge:
-    it charges into the afternoon dip and then holds the battery full through the
-    most expensive evening peak instead of discharging (realising a net loss).
-    A floor well below the peak-discharge benefit keeps holding energy from
-    dominating real arbitrage, so the optimizer still drains into spikes while
-    never banking through them.
+    The cheapest price anywhere in the plan can come from a midday dip many
+    hours before the horizon ends. Using that price for leftover energy makes
+    charge retained for after the horizon almost worthless. The lowest
+    uncertainty-adjusted price in the final three hours better represents the
+    price regime the battery carries into, while remaining conservative.
     """
     if not slots:
         return 0.0
-    return min(slot.discharge_price_dkk_per_kwh for slot in slots)
+    end = max(slot.end for slot in slots)
+    tail_start = end - _TERMINAL_PRICE_LOOKBACK
+    tail = [slot for slot in slots if slot.end > tail_start]
+    return min(slot.discharge_price_dkk_per_kwh for slot in tail or slots)
 
 
 def _allowed_actions() -> tuple[Action, ...]:
