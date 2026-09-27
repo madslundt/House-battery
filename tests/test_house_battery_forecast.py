@@ -171,7 +171,8 @@ def test_stromligning_current_tomorrow_and_forecast_entities_extend_the_plan() -
         assert slots[69].price == 1.297170
         assert slots[91].price == 6.619447
         assert all(slot.hours == 0.25 for slot in slots[:110])
-        assert all(slot.hours == 1.0 for slot in slots[110:])
+        assert all(slot.hours == 1.0 for slot in slots[110:-1])
+        assert slots[-1].hours == pytest.approx(0.5)
 
         # Known slots are never overwritten by the extension.
         assert slots[0].source == "known"
@@ -348,7 +349,12 @@ def test_external_forecast_only_extends_known_horizon_conservatively() -> None:
     known = [_slot(0, 1.0)]
     forecast = [_slot(0, 9.0), _slot(1, 0.5), _slot(2, 2.5)]
 
-    merged = extend_known_horizon(known, forecast, uncertainty_dkk_per_kwh=0.25)
+    merged = extend_known_horizon(
+        known,
+        forecast,
+        now=known[-1].end,
+        uncertainty_dkk_per_kwh=0.25,
+    )
 
     assert [slot.price for slot in merged] == [1.0, 0.5, 2.5]
     assert [slot.source for slot in merged] == ["known", "forecast", "forecast"]
@@ -380,9 +386,68 @@ def test_hourly_known_prices_and_quarterly_forecasts_keep_their_source_cadence()
         ]
     )
 
-    merged = extend_known_horizon(known, forecast, uncertainty_dkk_per_kwh=0.25)
+    merged = extend_known_horizon(
+        known,
+        forecast,
+        now=known[-1].end,
+        uncertainty_dkk_per_kwh=0.25,
+    )
 
     assert [slot.hours for slot in merged] == [1.0, 0.25, 0.25, 0.25, 0.25]
+
+
+def test_external_forecast_is_capped_at_three_days_and_stays_uncertain() -> None:
+    """The forecast horizon is capped from now without relabeling forecast rows."""
+    known = [_slot(0, 1.0)]
+    now = datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
+    forecast_start = known[-1].end
+    forecast = [
+        PriceSlot(
+            forecast_start + timedelta(hours=index),
+            forecast_start + timedelta(hours=index + 1),
+            1.0 + index,
+        )
+        for index in range(100)
+    ]
+
+    merged = extend_known_horizon(
+        known,
+        forecast,
+        now=now,
+        uncertainty_dkk_per_kwh=0.25,
+    )
+
+    assert merged[-1].end == now + timedelta(days=3)
+    assert all(slot.source == "forecast" for slot in merged[1:])
+    assert all(
+        slot.uncertainty_dkk_per_kwh == 0.25 for slot in merged[1:]
+    )
+    assert merged[-1].hours == pytest.approx(0.5)
+
+
+def test_forecast_is_not_appended_when_known_prices_reach_past_the_cap() -> None:
+    """The cap applies after now even when the confirmed horizon is longer."""
+    now = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    known = [
+        PriceSlot(
+            now + timedelta(hours=index),
+            now + timedelta(hours=index + 1),
+            1.0,
+        )
+        for index in range(80)
+    ]
+    forecast = [
+        PriceSlot(known[-1].end, known[-1].end + timedelta(hours=1), 2.0)
+    ]
+
+    merged = extend_known_horizon(
+        known,
+        forecast,
+        now=now,
+        uncertainty_dkk_per_kwh=0.25,
+    )
+
+    assert merged == known
 
 
 def test_missing_end_uses_the_source_cadence_inferred_from_adjacent_starts() -> None:

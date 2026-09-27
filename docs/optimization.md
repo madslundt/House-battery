@@ -40,6 +40,12 @@ inferred from the source's adjacent start times; only an isolated row defaults
 to one hour. Known prices and forecasts may therefore use different cadences,
 such as hourly known prices and quarter-hour forecasts.
 
+Forecasts can extend the optimizer's horizon to at most **72 hours from the
+current planning time**. A forecast interval crossing that boundary is clipped.
+Confirmed prices remain authoritative even when they extend farther ahead.
+Every appended forecast interval remains labeled `forecast` and carries the
+configured uncertainty; it is never relabeled as a known tariff.
+
 Known prices remain authoritative. When **Use external price forecast** is
 off, forecast data are collected only for accuracy evidence. Overlapping
 sources are each scored independently against the actual known price. When it

@@ -113,6 +113,7 @@ def test_live_forecast_extension_changes_the_plan_but_not_full_charge_policy() -
     extended = extend_known_horizon(
         known,
         forecast,
+        now=datetime.fromisoformat(data["now"]),
         uncertainty_dkk_per_kwh=data["forecast_uncertainty_dkk_per_kwh"],
     )
     normal, normal_settings = _optimize(extended, 90)

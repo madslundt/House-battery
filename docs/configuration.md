@@ -73,6 +73,12 @@ the known horizon; it cannot overwrite a known price or fill a gap. It is
 optional and isolated: an unavailable, malformed, empty, expired, or stale
 forecast is discarded without degrading known-price planning.
 
+Forecast prices can extend the optimizer's horizon by at most **72 hours from
+the current planning time**. Longer forecast rows are ignored after that limit;
+a row that crosses the boundary is clipped. Confirmed known prices are not
+limited by this forecast cap. Forecast intervals retain forecast source labels
+and the configured uncertainty allowance during planning.
+
 Each entity must have reported an update within **External price forecast maximum
 age** (180 minutes by default). Use a value that matches the forecast source's
 normal update cadence. The per-source status exposes `used`, `disabled`,

@@ -129,6 +129,7 @@ def test_attached_forecasts_change_the_plan_for_their_later_price_peaks(
     extended = extend_known_horizon(
         known,
         forecast,
+        now=now,
         uncertainty_dkk_per_kwh=data["forecast_uncertainty_dkk_per_kwh"],
     )
     forecasted = [

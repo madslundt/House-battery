@@ -428,7 +428,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         extensions = {
             source: extend_known_horizon(
-                known_slots, forecast_slots, uncertainty_dkk_per_kwh=uncertainty
+                known_slots,
+                forecast_slots,
+                now=now,
+                uncertainty_dkk_per_kwh=uncertainty,
             )
             for source, forecast_slots in available_forecasts
         }

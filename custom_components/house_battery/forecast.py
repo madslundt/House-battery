@@ -10,6 +10,7 @@ from .models import PriceSlot
 from .price import normalize_price_rows_with_report
 
 _MAX_SAMPLES = 1_000
+_MAX_FORECAST_HORIZON = timedelta(days=3)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,38 +56,55 @@ def extend_known_horizon(
     known: list[PriceSlot],
     forecast: list[PriceSlot],
     *,
+    now: datetime,
     uncertainty_dkk_per_kwh: float,
 ) -> list[PriceSlot]:
-    """Append only contiguous forecast slots after the known-price horizon.
+    """Append contiguous forecast slots, capped three days ahead of ``now``.
 
     A forecast can never replace a known price or bridge a missing known-price
     interval. This prevents an unavailable actual price feed from silently
     becoming a control input.
 
-    Known prices (up to ~36 hours ahead) are authoritative. Forecasts are only
-    appended when known prices truly end — they are never used to overwrite
-    or replace confirmed tariff data.
+    Known prices are authoritative. Forecasts are only appended when known
+    prices truly end — they are never used to overwrite or replace confirmed
+    tariff data. Every appended interval remains explicitly marked as
+    ``forecast`` and carries the configured uncertainty allowance. If the
+    three-day boundary falls inside a forecast interval, that final interval is
+    clipped to the boundary.
     """
     result = sorted(known, key=lambda item: item.start)
     if not result:
         return result
     expected_start = result[-1].end
+    horizon_end = now + _MAX_FORECAST_HORIZON
+    if horizon_end <= expected_start:
+        return result
     for slot in sorted(forecast, key=lambda item: item.start):
+        if slot.end <= slot.start:
+            continue
         if slot.start < expected_start:
             continue
         if slot.start != expected_start:
             break
+        end = min(slot.end, horizon_end)
+        if end <= slot.start:
+            break
+        fraction = (end - slot.start).total_seconds() / (
+            slot.end - slot.start
+        ).total_seconds()
         result.append(
             PriceSlot(
                 slot.start,
-                slot.end,
+                end,
                 slot.price,
-                slot.expected_load_wh,
+                slot.expected_load_wh * fraction,
                 source="forecast",
                 uncertainty_dkk_per_kwh=max(0.0, uncertainty_dkk_per_kwh),
             )
         )
-        expected_start = slot.end
+        expected_start = end
+        if end < slot.end:
+            break
     return result
 
 
