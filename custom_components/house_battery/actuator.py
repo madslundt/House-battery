@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from collections.abc import Awaitable, Callable
@@ -39,6 +40,8 @@ _ACTION_TO_MODE = {
 # connected load instead.
 _SOC_CONTROL_KEYS = (CONF_MIN_SOC_CONTROL, CONF_MAX_SOC_CONTROL)
 _UNAVAILABLE_STATES = {"unknown", "unavailable", "none", ""}
+_GRID_SWITCH_ATTEMPTS = 3
+_GRID_SWITCH_RETRY_DELAY_SECONDS = 0.5
 
 # The local adapter commands fixed-power Charge and Discharge custom slots
 # ("1,00:00,23:59,{power},..."), which draws energy into the battery for the
@@ -143,31 +146,38 @@ class LocalControlAdapter:
         if not entity_id:
             return True
         desired = "on" if enabled else "off"
-        current = self._hass.states.get(entity_id)
-        if current is not None and current.state == desired:
-            return True
-        try:
-            await self._hass.services.async_call(
-                "switch",
-                "turn_on" if enabled else "turn_off",
-                {"entity_id": entity_id},
-                blocking=True,
-            )
-            await self._hass.async_block_till_done()
-        except Exception as exc:
-            _LOGGER.warning(
-                "Could not turn %s grid isolation plug %s: %s",
-                desired,
-                entity_id,
-                exc,
-            )
-        state = self._hass.states.get(entity_id)
-        if state is not None and state.state == desired:
-            return True
+        for attempt in range(_GRID_SWITCH_ATTEMPTS):
+            current = self._hass.states.get(entity_id)
+            if current is not None and current.state == desired:
+                return True
+            try:
+                await self._hass.services.async_call(
+                    "switch",
+                    "turn_on" if enabled else "turn_off",
+                    {"entity_id": entity_id},
+                    blocking=True,
+                )
+                await self._hass.async_block_till_done()
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Could not turn %s grid isolation plug %s (attempt %d/%d): %s",
+                    desired,
+                    entity_id,
+                    attempt + 1,
+                    _GRID_SWITCH_ATTEMPTS,
+                    exc,
+                )
+            state = self._hass.states.get(entity_id)
+            if state is not None and state.state == desired:
+                return True
+            if attempt + 1 < _GRID_SWITCH_ATTEMPTS:
+                await asyncio.sleep(_GRID_SWITCH_RETRY_DELAY_SECONDS)
         _LOGGER.warning(
-            "Grid isolation plug %s did not confirm state %s; current state is %s",
+            "Grid isolation plug %s did not confirm state %s after %d attempts; "
+            "current state is %s",
             entity_id,
             desired,
+            _GRID_SWITCH_ATTEMPTS,
             state.state if state is not None else "unavailable",
         )
         return False
@@ -186,10 +196,11 @@ class LocalControlAdapter:
         runtime = self._runtime()
         requested_action = action
         isolation_confirmed = True
+        grid_restore_confirmed = True
         if action is not Action.BATTERY:
             # Restore the grid path before leaving Battery mode, so the FBP can
             # hand the load back to Grid or begin charging from the mains.
-            await self.async_set_grid_isolation(True)
+            grid_restore_confirmed = await self.async_set_grid_isolation(True)
         minimum = round(self._minimum_soc_for(action))
         maximum = round(
             target_soc if target_soc is not None else runtime.settings["target_soc"]
@@ -199,7 +210,16 @@ class LocalControlAdapter:
         # mode matches the physical mode the device is really in.
         direct_command_mode: str | None = None
         try:
-            if action in {Action.GRID, Action.SAFE}:
+            if not grid_restore_confirmed:
+                # Do not report a successful handoff while the mains remain
+                # isolated. Stop battery output, latch automatic control off,
+                # and require the grid path to be restored before resuming.
+                direct_command_mode = "Idle"
+                action = Action.GRID
+                runtime.execution_enabled = False
+                await client.async_set_grid_idle(minimum, maximum)
+                await self._save()
+            elif action in {Action.GRID, Action.SAFE}:
                 # An inactive custom slot did not stop an already-running fixed
                 # power charge on this FBP1200. The client uses a temporary
                 # 100% discharge floor to cancel active power before restoring
@@ -256,6 +276,13 @@ class LocalControlAdapter:
             runtime.transitions.append(now.isoformat())
         await self._save()
         result = "local TCP command acknowledged; SOC limits read back"
+        if not grid_restore_confirmed:
+            result = (
+                "grid isolation switch did not confirm on after "
+                f"{_GRID_SWITCH_ATTEMPTS} attempts; battery stopped in Grid/Idle "
+                "and automatic control disabled"
+            )
+            return False, result
         if requested_action is Action.BATTERY and not isolation_confirmed:
             result = (
                 "grid isolation plug unavailable or not confirmed off; battery "
