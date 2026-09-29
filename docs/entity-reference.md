@@ -106,6 +106,10 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **Fallback round-trip efficiency** | Used before measured efficiency is ready. | Set 80% rather than 85% to make early plans more conservative. |
 | **Battery degradation cost** | Wear cost charged to each discharged kWh. | Raise 0.35→0.60 DKK/kWh if avoiding wear matters more than short-term savings. |
 | **Minimum required profit** | Extra margin required for discharge. | Raise 0.75→1.25 DKK/kWh to reject marginal cycles. |
+| **Low-SOC charging breakpoint** | Below this SOC, the configurable charging premium applies, fading linearly to its maximum at 0%. | Lower 20→15% to limit price support to a more depleted battery. |
+| **Low-SOC charging price premium** | DKK/kWh discount to the optimizer's charge cost at 0% SOC, fading to zero at the breakpoint. | Raise 0.25→0.40 to favor replenishment more strongly when SOC is low. |
+| **High-SOC discharging breakpoint** | Above this SOC, the configurable discharge margin discount applies, reaching its maximum at 100%. | Raise 90→95% to apply it only when the battery is nearly full. |
+| **High-SOC discharge margin discount** | DKK/kWh reduction to the required profit at 100% SOC, fading to zero at the breakpoint. It cannot reduce the required profit below zero. | Raise 0.25→0.40 to make stored energy above the breakpoint easier to use. |
 | **Mode switching penalty** | Cost assigned to every mode change. | Raise 0.05→0.20 DKK to reduce chattering around similar prices. |
 | **Minimum mode duration** | How long a chosen mode stays locked. | Raise 30→60 min if the local controller needs more settling time. |
 | **Maximum daily mode transitions** | Daily switching budget. | Lower 4→2 for a quieter, more conservative system. |

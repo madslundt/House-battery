@@ -30,6 +30,19 @@ SETTING_NAMES = {
         "mdi:battery-heart-variant",
     ),
     "minimum_profit_dkk_per_kwh": ("Minimum required profit", "mdi:cash-lock"),
+    "low_soc_charge_threshold": ("Low-SOC charging breakpoint", "mdi:battery-low"),
+    "low_soc_charge_premium_dkk_per_kwh": (
+        "Low-SOC charging price premium",
+        "mdi:cash-plus",
+    ),
+    "high_soc_discharge_threshold": (
+        "High-SOC discharging breakpoint",
+        "mdi:battery-high",
+    ),
+    "high_soc_discharge_discount_dkk_per_kwh": (
+        "High-SOC discharge margin discount",
+        "mdi:cash-minus",
+    ),
     "cycle_life": ("Cycle-life reference", "mdi:sync"),
     "forecast_uncertainty_dkk_per_kwh": (
         "External price forecast uncertainty",
@@ -94,6 +107,13 @@ class FbpSettingNumber(Fbp1200Entity, NumberEntity):
             raise ValueError(
                 "Absolute emergency SOC ≤ arbitrage reserve < maximum charge SOC "
                 "≤ opportunistic charge SOC is required"
+            )
+        if not (
+            candidate["low_soc_charge_threshold"]
+            < candidate["high_soc_discharge_threshold"]
+        ):
+            raise ValueError(
+                "Low-SOC charging breakpoint must be below high-SOC discharging breakpoint"
             )
         await self.coordinator.async_set_setting(self.key, value)
 

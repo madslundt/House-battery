@@ -92,6 +92,28 @@ forecast plus that amount and a forecast discharge price as forecast minus it.
 For example, a 0.20 DKK/kWh forecast with a 0.25 allowance is evaluated as
 0.45 when charging; a 2.00 forecast is evaluated as 1.75 when discharging.
 
+## SOC-dependent price adjustments
+
+Four number entities tune how SOC changes the planner's willingness to charge
+or discharge:
+
+| Setting | Default | Effect |
+| --- | ---: | --- |
+| **Low-SOC charging breakpoint** | 20% | SOC below which charging gets a price premium. |
+| **Low-SOC charging price premium** | 0.25 DKK/kWh | At 0% SOC, this much is subtracted from the charge price in the optimization objective. The marginal adjustment fades linearly to zero at the breakpoint. |
+| **High-SOC discharging breakpoint** | 90% | SOC above which discharging gets a margin discount. |
+| **High-SOC discharge margin discount** | 0.25 DKK/kWh | At 100% SOC, this much is subtracted from the minimum required profit for discharge. The marginal adjustment fades linearly to zero at the breakpoint and cannot reduce the required profit below zero. |
+
+For a charge or discharge step that crosses a breakpoint, the planner averages
+the adjustment over the SOC range traversed, so energy closer to the breakpoint
+gets a smaller adjustment. These are economic preferences, not physical limits:
+**Arbitrage reserve SOC** remains the hard discharge floor, and **Maximum charge
+SOC** (or the active opportunistic target) remains the hard charge ceiling. The
+two breakpoints must satisfy low-SOC breakpoint < high-SOC breakpoint. Set
+either price adjustment to zero to disable that behavior. Plan cost and savings
+continue to report tariff and wear costs; these adjustments affect only which
+plan the optimizer selects.
+
 ## Mode mapping
 
 The adapter uses exactly these proven local options:

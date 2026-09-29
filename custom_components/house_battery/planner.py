@@ -89,6 +89,45 @@ def _allowed_actions() -> tuple[Action, ...]:
     return (Action.GRID, Action.BATTERY, Action.CHARGE)
 
 
+def _low_soc_weight(
+    start_wh: float, end_wh: float, capacity_wh: float, threshold_soc: float
+) -> float:
+    """Average charge premium weight over the SOC interval being filled."""
+    if end_wh <= start_wh or capacity_wh <= 0 or threshold_soc <= 0:
+        return 0.0
+    start_soc = 100 * start_wh / capacity_wh
+    end_soc = 100 * end_wh / capacity_wh
+    lower = max(0.0, start_soc)
+    upper = min(threshold_soc, end_soc)
+    if upper <= lower:
+        return 0.0
+    # Integrate (threshold - SOC) / threshold over the affected interval.
+    area = (
+        threshold_soc * (upper - lower) - (upper**2 - lower**2) / 2
+    ) / threshold_soc
+    return min(1.0, max(0.0, area / (end_soc - start_soc)))
+
+
+def _high_soc_weight(
+    start_wh: float, end_wh: float, capacity_wh: float, threshold_soc: float
+) -> float:
+    """Average discharge discount weight over the SOC interval being emptied."""
+    if start_wh <= end_wh or capacity_wh <= 0 or threshold_soc >= 100:
+        return 0.0
+    start_soc = 100 * start_wh / capacity_wh
+    end_soc = 100 * end_wh / capacity_wh
+    lower = max(threshold_soc, end_soc)
+    upper = min(100.0, start_soc)
+    if upper <= lower:
+        return 0.0
+    # Integrate (SOC - threshold) / (100 - threshold) over the affected interval.
+    denominator = 100 - threshold_soc
+    area = ((upper - threshold_soc) ** 2 - (lower - threshold_soc) ** 2) / (
+        2 * denominator
+    )
+    return min(1.0, max(0.0, area / (start_soc - end_soc)))
+
+
 def _slot_transition(
     state: _State,
     action: Action,
@@ -181,10 +220,35 @@ def _slot_transition(
         charged_wh = max(0.0, actual_delta_wh)
         input_wh = charged_wh / charge_efficiency
         grid_wh = load_wh + input_wh
+        low_soc_charge_weight = _low_soc_weight(
+            energy_wh,
+            energy_wh + charged_wh,
+            settings.capacity_wh,
+            settings.low_soc_charge_threshold,
+        )
+        if low_soc_charge_weight > 0:
+            reason += (
+                "; low-SOC charging premium weighted "
+                f"{low_soc_charge_weight:.0%}"
+            )
     elif action is Action.BATTERY:
         discharged_wh = max(0.0, -actual_delta_wh)
         delivered_wh = discharged_wh * discharge_efficiency
         grid_wh = max(0.0, load_wh - delivered_wh)
+        high_soc_discharge_weight = _high_soc_weight(
+            energy_wh,
+            energy_wh - discharged_wh,
+            settings.capacity_wh,
+            settings.high_soc_discharge_threshold,
+        )
+        if (
+            high_soc_discharge_weight > 0
+            and settings.high_soc_discharge_discount_dkk_per_kwh > 0
+        ):
+            reason += (
+                "; high-SOC discharge discount weighted "
+                f"{high_soc_discharge_weight:.0%}"
+            )
 
     interval_cost = grid_wh / 1000 * slot.price
     # Forecast uncertainty is a hurdle on battery movement, not a discount on
@@ -195,16 +259,28 @@ def _slot_transition(
     optimization_cost = grid_wh / 1000 * slot.price
     if action is Action.BATTERY:
         delivered_kwh = discharged_wh * discharge_efficiency / 1000
+        discharge_discount = (
+            settings.high_soc_discharge_discount_dkk_per_kwh
+            * high_soc_discharge_weight
+        )
+        required_profit = max(
+            0.0, settings.minimum_profit_dkk_per_kwh - discharge_discount
+        )
         interval_cost += delivered_kwh * settings.degradation_cost_dkk_per_kwh
         optimization_cost += delivered_kwh * (
             settings.degradation_cost_dkk_per_kwh
-            + settings.minimum_profit_dkk_per_kwh
+            + required_profit
             + slot.uncertainty_dkk_per_kwh
         )
     elif action is Action.CHARGE:
         optimization_cost += (
             input_wh / 1000 * slot.uncertainty_dkk_per_kwh
         )
+        charge_premium = (
+            settings.low_soc_charge_premium_dkk_per_kwh
+            * low_soc_charge_weight
+        )
+        optimization_cost -= input_wh / 1000 * charge_premium
     interval_cost += switch_cost
     optimization_cost += switch_cost
     next_state = _State(new_step, action)

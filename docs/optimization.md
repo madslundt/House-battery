@@ -9,6 +9,12 @@ charge/discharge power, round-trip losses, minimum mode duration, maximum
 daily transitions, switching cost, degradation cost, and the minimum required
 profit.
 
+The optional low-SOC charging premium and high-SOC discharge margin discount
+change the optimizer's marginal energy value smoothly between their configured
+SOC breakpoints. They can favor restoring a depleted battery and using energy
+near full SOC. They do not change the physical reserve, charge ceiling, tariff
+cost, or reported plan savings.
+
 The transition budget and mode-duration lock prevent routine chattering. They
 do not keep Self-Gen active when doing so would discharge stored energy below
 the economic floor: that protective exit to Grid takes precedence and is

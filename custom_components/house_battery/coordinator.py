@@ -619,6 +619,14 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             degradation_cost_dkk_per_kwh=values["degradation_cost_dkk_per_kwh"],
             minimum_profit_dkk_per_kwh=values["minimum_profit_dkk_per_kwh"],
             switching_penalty_dkk=values["switching_penalty_dkk"],
+            low_soc_charge_threshold=values["low_soc_charge_threshold"],
+            low_soc_charge_premium_dkk_per_kwh=values[
+                "low_soc_charge_premium_dkk_per_kwh"
+            ],
+            high_soc_discharge_threshold=values["high_soc_discharge_threshold"],
+            high_soc_discharge_discount_dkk_per_kwh=values[
+                "high_soc_discharge_discount_dkk_per_kwh"
+            ],
         )
 
     def _optimize_with_storage_policy(

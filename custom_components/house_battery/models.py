@@ -57,6 +57,10 @@ class PlannerSettings:
     degradation_cost_dkk_per_kwh: float
     minimum_profit_dkk_per_kwh: float
     switching_penalty_dkk: float
+    low_soc_charge_threshold: float = 20.0
+    low_soc_charge_premium_dkk_per_kwh: float = 0.0
+    high_soc_discharge_threshold: float = 90.0
+    high_soc_discharge_discount_dkk_per_kwh: float = 0.0
     energy_step_wh: float = 5.0
 
     def validate(self) -> None:
@@ -70,6 +74,19 @@ class PlannerSettings:
             raise ValueError("round_trip_efficiency must be in (0, 1]")
         if min(self.degradation_cost_dkk_per_kwh, self.minimum_profit_dkk_per_kwh) < 0:
             raise ValueError("Economic thresholds cannot be negative")
+        if not (
+            0 <= self.low_soc_charge_threshold
+            < self.high_soc_discharge_threshold
+            <= 100
+        ):
+            raise ValueError(
+                "Low-SOC charge threshold must be below high-SOC discharge threshold"
+            )
+        if min(
+            self.low_soc_charge_premium_dkk_per_kwh,
+            self.high_soc_discharge_discount_dkk_per_kwh,
+        ) < 0:
+            raise ValueError("SOC price adjustments cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)

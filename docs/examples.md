@@ -39,6 +39,10 @@ set the number entities as follows before commissioning:
 | Fallback round-trip efficiency | `85%` |
 | Battery degradation cost | `0.35 DKK/kWh` |
 | Minimum required profit | `0.75 DKK/kWh` |
+| Low-SOC charging breakpoint | `20%` |
+| Low-SOC charging price premium | `0.25 DKK/kWh` |
+| High-SOC discharging breakpoint | `90%` |
+| High-SOC discharge margin discount | `0.25 DKK/kWh` |
 | Minimum mode duration | `30 min` |
 | Maximum daily mode transitions | `4` |
 
