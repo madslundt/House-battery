@@ -116,10 +116,11 @@ The control method depends on the available hardware feedback:
 - **A configured meter independently verifies the result.** The coordinator
   decomposes the grid-meter reading into import and export. Any export above a
   small noise floor lights an `Export detected` binary sensor; export above a
-  slightly higher safety floor while automatic control is enabled latches an
-  `Export safety fault` that **disables all inverter writes** until the operator
-  resets execution. This is fail-closed: an export can never continue through
-  the next planning cycle.
+  slightly higher safety floor while automatic control is enabled raises a
+  latched `Export safety fault` that **pauses inverter writes**. This is
+  fail-closed: an export can never continue through the next planning cycle.
+  Authorization remains armed; after export stops, an operator off/on cycle
+  resets the fault.
 - **The planner still keeps a head of safety.** The planner does not schedule
   more discharge than forecast load, while the actuator independently uses the
   current measured load and a safety margin to

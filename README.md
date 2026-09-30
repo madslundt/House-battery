@@ -82,8 +82,10 @@ integration presentation.
 Keep automatic control off until each local mode, SOC limit, read-back,
 battery-served load source, and electrical setting has been tested. Bind **Grid available**
 to a physical on-grid/device status, never a power sensor. Stale telemetry,
-faults, an unknown on-grid status, or an outage fail safe and latch automatic
-control off.
+faults, an unknown on-grid status, or an outage pause economic writes and
+request a safe mode. The automatic-control switch remains armed and retries
+after valid inputs return; repeated local communication or command failures
+also trigger a throttled integration reload.
 
 The invariant is always:
 

@@ -77,4 +77,9 @@ Before setting *I verified…* in Options and enabling **Automatic control**:
 
 If grid state becomes unknown/unavailable, data are stale, or the device is
 faulted/offline, the optimizer stops economic control. An outage clears the
-plan, asks for safe mode if needed, and latches automatic control off.
+plan and asks for safe mode if needed, while leaving automatic control armed.
+It retries on the next coordinator refresh and resumes automatically after the
+health issue clears. Three consecutive local TCP or command failures schedule
+an integration reload, limited to one attempt per 15 minutes. This recovery
+does not bypass commissioning, telemetry, SOC, load, grid, or export safety
+checks.

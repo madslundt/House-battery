@@ -123,5 +123,5 @@ async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     coordinator: Fbp1200Coordinator = entry.runtime_data
     commissioned = bool({**entry.data, **entry.options}.get(CONF_COMMISSIONED, False))
     if coordinator.runtime.execution_enabled and not commissioned:
-        await coordinator.async_force_safe()
+        await coordinator.async_force_safe(disable_automatic_control=False)
     await hass.config_entries.async_reload(entry.entry_id)

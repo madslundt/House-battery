@@ -139,10 +139,9 @@ first command the FBP1200 into battery mode, then turn the plug off and wait for
 integration immediately commands Grid/Idle and keeps operating. When leaving
 Battery mode, it retries turning the plug on up to three times and checks for
 `on` after each attempt before issuing Charge or Grid/Idle. If `on` is not
-confirmed, it commands Grid/Idle to stop battery output, disables automatic
-control, and reports the failed handoff. Restore the grid input and re-enable
-automatic control only after verifying the plug state. Without a configured
-plug, behavior is unchanged.
+confirmed, it commands Grid/Idle to stop battery output and reports the failed
+handoff. Automatic control stays armed and retries after the plug state is
+confirmed. Without a configured plug, behavior is unchanged.
 
 ## Commissioning checklist
 
@@ -198,9 +197,13 @@ verified at the physical device.
 | `SHADOW` | Plan is valid but commissioning or automatic control is off. | Plan only; no writes. |
 | `ACTIVE` | Commissioned and automatic control is on. | Writes local limits/mode with read-back. |
 | `RECOVERING` | The direct local TCP connection has been unavailable for less than two minutes. | Pauses all automatic writes and retains the automatic-control switch. A fresh, valid local frame resumes `ACTIVE`; two minutes of loss becomes `DEGRADED`. |
-| `DEGRADED` | A required input is stale, invalid, faulted, offline, or prices cannot yield a plan. | Requests safe mode and latches automatic control off. |
-| `OUTAGE` | Physical grid signal is unavailable. | Clears plan, requests safe mode and latches automatic control off. |
+| `DEGRADED` | A required input is stale, invalid, faulted, offline, or prices cannot yield a plan. | Requests safe mode and retries on each refresh. Automatic control stays armed and resumes after health recovers. |
+| `OUTAGE` | Physical grid signal is unavailable. | Clears the plan, requests safe mode, and automatically resumes after grid availability returns. |
 
 `Force safe mode` immediately turns off automatic control and requests the
-adapter's safe local mode. The **Optimizer problem** binary sensor shows active
-health blockers.
+adapter's safe local mode. System errors pause writes without changing the
+switch; three consecutive local TCP or battery-command failures request an
+integration reload, with a 15-minute cooldown. Most health gates resume
+automatically when inputs recover. The export safety latch requires an
+operator off/on reset after export stops. The **Optimizer problem** binary
+sensor shows active health blockers.

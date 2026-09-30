@@ -140,10 +140,13 @@ TELEMETRY_STALE_AFTER = timedelta(minutes=5)
 # avoids exposing a tuning knob that can accidentally accept obsolete prices.
 FORECAST_MAX_AGE = timedelta(minutes=180)
 # A PS240/FBP1200 may briefly disappear while it renews its local network
-# session.  During this bounded window the coordinator stops writes but keeps
-# the user's automatic-control authorization intact.  Invalid telemetry and
-# every non-local-TCP health failure still fail safe immediately.
+# session. During this bounded window the coordinator pauses writes but keeps
+# the user's automatic-control authorization intact. Invalid telemetry and
+# other health failures still fail safe immediately, then resume automatically
+# once their inputs are valid again.
 LOCAL_TCP_RECOVERY_GRACE = timedelta(minutes=2)
+RECOVERY_RELOAD_AFTER_FAILURES = 3
+RECOVERY_RELOAD_COOLDOWN = timedelta(minutes=15)
 DECISION_HISTORY_LIMIT = 500
 LEDGER_HISTORY_LIMIT = 96 * 62
 

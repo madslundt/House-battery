@@ -94,11 +94,12 @@ class FbpExportDetectedBinarySensor(Fbp1200Entity, BinarySensorEntity):
 
 
 class FbpExportSafetyFaultBinarySensor(Fbp1200Entity, BinarySensorEntity):
-    """Latch while the optimizer is enabled and the meter reports export.
+    """Latch a confirmed export safety fault.
 
-    Once latched, the coordinator disables further writes so an export cannot
-    continue through the next planning cycle. It stays set until an operator
-    resets execution (or the entry reloads), matching the fail-closed intent."""
+    The coordinator requests safe mode and blocks economic writes. The user's
+    authorization remains armed; after export stops, an explicit off/on cycle
+    resets the fault.
+    """
 
     _attr_name = "Export safety fault"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
@@ -115,5 +116,5 @@ class FbpExportSafetyFaultBinarySensor(Fbp1200Entity, BinarySensorEntity):
     def extra_state_attributes(self) -> dict[str, object]:
         return {
             "source": "grid meter",
-            "reset": "Disable then re-enable optimizer control to clear the latch.",
+            "reset": "After export stops, turn automatic control off then on.",
         }

@@ -27,6 +27,7 @@ class RuntimeState:
     decisions: list[dict[str, Any]] = field(default_factory=list)
     scheduled_loads: list[dict[str, Any]] = field(default_factory=list)
     execution_enabled: bool = False
+    export_safety_fault_latched: bool = False
     last_action: str = "safe"
     last_action_at: str | None = None
     transitions: list[str] = field(default_factory=list)
@@ -83,6 +84,7 @@ class RuntimeState:
             "decisions": self.decisions[-500:],
             "scheduled_loads": self.scheduled_loads,
             "execution_enabled": self.execution_enabled,
+            "export_safety_fault_latched": self.export_safety_fault_latched,
             "last_action": self.last_action,
             "last_action_at": self.last_action_at,
             "transitions": self.transitions[-100:],
@@ -164,6 +166,9 @@ class RuntimeState:
             decisions=list(data.get("decisions", []))[-500:],
             scheduled_loads=list(data.get("scheduled_loads", [])),
             execution_enabled=bool(data.get("execution_enabled", False)),
+            export_safety_fault_latched=bool(
+                data.get("export_safety_fault_latched", False)
+            ),
             last_action=str(data.get("last_action", "safe")),
             last_action_at=data.get("last_action_at"),
             transitions=list(data.get("transitions", []))[-100:],

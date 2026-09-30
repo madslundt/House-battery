@@ -106,8 +106,11 @@ Suggested seams:
    `set_mode` API. Each mutating operation must read back the exact registers
    and report an unambiguous confirmation result.
 4. `OptimizerControlPort`: the existing planner-facing control interface. It
-   must disable automatic execution on an uncertain write, stale telemetry,
-   unknown grid availability, or any read-back mismatch.
+   must pause physical writes on an uncertain write, stale telemetry, unknown
+   grid availability, or any read-back mismatch while retaining the user's
+   authorization. Retry on the next refresh using fresh telemetry; after three
+   consecutive local transport or command failures, request a rate-limited
+   integration reload. Never blindly replay an ambiguous protocol write.
 
 ## Non-negotiable safety gates
 
@@ -125,10 +128,11 @@ Suggested seams:
   no unbounded power setpoint, no secret/credential register reads, and no
   Modbus writes. A command acknowledgement without matching read-back is a
   failure.
-- On transport loss, malformed/stale frames, fault, or outage, stop optimizer
+- On transport loss, malformed/stale frames, fault, or outage, pause optimizer
   writes, preserve the last observed physical state as stale (not current),
-  and surface the failure. A safe fallback may be attempted once only if a
-  fresh transport is available; do not endlessly retry battery commands.
+  and surface the failure. Request safe mode when a fresh transport is
+  available; retry recovery at the coordinator's bounded cadence without
+  turning off the user's authorization.
 - Integration tests need a scripted TCP server for fragmented JSON, empty
   replies, concurrent polling/control, socket resets, slow replies, malformed
   frames, and exact command/read-back ordering. Keep protocol fixtures captured

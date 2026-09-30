@@ -212,11 +212,10 @@ class LocalControlAdapter:
         try:
             if not grid_restore_confirmed:
                 # Do not report a successful handoff while the mains remain
-                # isolated. Stop battery output, latch automatic control off,
-                # and require the grid path to be restored before resuming.
+                # isolated. Stop battery output. The coordinator keeps the
+                # user's authorization armed and retries once the plug recovers.
                 direct_command_mode = "Idle"
                 action = Action.GRID
-                runtime.execution_enabled = False
                 await client.async_set_grid_idle(minimum, maximum)
                 await self._save()
             elif action in {Action.GRID, Action.SAFE}:
@@ -265,8 +264,6 @@ class LocalControlAdapter:
                     await client.async_set_grid_idle(minimum, maximum)
         except Exception as exc:
             _LOGGER.exception("Local TCP mode command failed")
-            runtime.execution_enabled = False
-            await self._save()
             return False, f"local TCP command failed: {exc}"
         if self._direct_mode_changed:
             self._direct_mode_changed(direct_command_mode or _ACTION_TO_MODE[action])
@@ -279,15 +276,17 @@ class LocalControlAdapter:
         if not grid_restore_confirmed:
             result = (
                 "grid isolation switch did not confirm on after "
-                f"{_GRID_SWITCH_ATTEMPTS} attempts; battery stopped in Grid/Idle "
-                "and automatic control disabled"
+                f"{_GRID_SWITCH_ATTEMPTS} attempts; battery stopped in Grid/Idle; "
+                "automatic control remains armed and will retry"
             )
             return False, result
         if requested_action is Action.BATTERY and not isolation_confirmed:
             result = (
                 "grid isolation plug unavailable or not confirmed off; battery "
-                "discharge inhibited and grid/idle mode commanded"
+                "discharge inhibited and grid/idle mode commanded; "
+                "automatic control remains armed and will retry"
             )
+            return False, result
         return True, result
 
     async def _set_number(
@@ -395,8 +394,6 @@ class LocalControlAdapter:
         except Exception as exc:  # The safety command must remain available.
             if action is not Action.SAFE:
                 _LOGGER.exception("Battery SOC limit command failed")
-                runtime.execution_enabled = False
-                await self._save()
                 return False, f"command failed: {exc}"
             limits_warning = f"SOC limits not confirmed: {exc}"
             _LOGGER.warning("%s; continuing with requested safe mode", limits_warning)
@@ -415,14 +412,10 @@ class LocalControlAdapter:
             )
         except Exception as exc:  # Home Assistant service failures vary by adapter
             _LOGGER.exception("Battery command failed")
-            runtime.execution_enabled = False
-            await self._save()
             return False, f"command failed: {exc}"
         await self._hass.async_block_till_done()
         readback = self._hass.states.get(mode_entity)
         if readback is None or readback.state != mode:
-            runtime.execution_enabled = False
-            await self._save()
             return False, f"mode read-back did not confirm {mode}"
         if runtime.last_action != action.value:
             runtime.last_action = action.value

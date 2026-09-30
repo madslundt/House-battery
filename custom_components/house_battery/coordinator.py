@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from dataclasses import replace
@@ -45,6 +46,8 @@ from .const import (
     OVERRIDE_AUTO,
     OVERRIDE_OPTIONS,
     OVERRIDE_TO_ACTION,
+    RECOVERY_RELOAD_AFTER_FAILURES,
+    RECOVERY_RELOAD_COOLDOWN,
     UPDATE_INTERVAL,
 )
 from .dailyplan import local_day_bounds, reconcile_daily_plan
@@ -135,12 +138,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Canonical load-vs-grid physical flow, rebuilt once per refresh and
         # shared by evidence, sensors and the export-safety layer.
         self.power_flow: PowerFlowSnapshot | None = None
-        # Latched grid-export fault (meter-observed). High hysteresis so a
-        # few-watt meter fluctuation never disables automatic control.
-        self._export_fault_since: datetime | None = None
+        # Persistent export latch blocks inverter writes but preserves the
+        # user's automatic-control authorization until they reset it.
         self._local_controls: dict[str, str] = {}
         self._local_telemetry_validator = FbpTelemetryValidator()
         self._local_tcp_unavailable_since: datetime | None = None
+        self._consecutive_local_failures = 0
+        self._consecutive_command_failures = 0
+        self._recovery_reload_scheduled = False
+        self._recovery_reload_reason: str | None = None
         self._commanded_local_mode = MODE_SAFE
         self._observed_local_mode: str | None = None
         self._startup_control_gate_reason: str | None = None
@@ -198,10 +204,14 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             # The first fresh refresh validates controls and sends no command.
             self._startup_control_gate_reason = "Awaiting fresh local telemetry and SOC-control validation after restart"
         elif self.runtime.execution_enabled:
+            # Preserve the user's authorization across restarts and validation
+            # failures. Health/commissioning gates still pause writes; valid
+            # inputs let the coordinator resume without a manual switch cycle.
             problems = await self.async_soc_control_problems()
             if not self.config.get(CONF_COMMISSIONED, False) or problems:
-                self.runtime.execution_enabled = False
-                await self.store.save(self.runtime)
+                self._startup_control_gate_reason = (
+                    "Waiting for commissioning and valid SOC controls before writes"
+                )
 
     def _state(self, key: str):
         entity_id = self.config.get(key)
@@ -713,11 +723,55 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.runtime.execution_enabled:
             return "automatic writes disabled"
         success, result = await self.actuator.async_command(Action.SAFE, now)
-        self.runtime.execution_enabled = False
-        await self.store.save(self.runtime)
+        self._record_command_result(success, result)
         if success:
-            return f"{result}; automatic control latched off"
+            return f"{result}; writes resume automatically when health recovers"
         return result
+
+    def _record_command_result(self, success: bool, result: str) -> None:
+        """Count failed writes and schedule bounded integration recovery."""
+        if success:
+            self._consecutive_command_failures = 0
+            return
+        self._consecutive_command_failures += 1
+        _LOGGER.warning(
+            "Battery command failed (%d consecutive attempts): %s",
+            self._consecutive_command_failures,
+            result,
+        )
+        if self._consecutive_command_failures >= RECOVERY_RELOAD_AFTER_FAILURES:
+            self._schedule_recovery_reload("repeated battery command failures")
+
+    def _schedule_recovery_reload(self, reason: str) -> None:
+        """Reload this config entry after repeated failures, with a cooldown."""
+        if self._recovery_reload_scheduled or self.hass.is_stopping:
+            return
+        cooldowns = self.hass.data.setdefault(f"{DOMAIN}_recovery", {})
+        now = datetime.now(UTC)
+        previous = cooldowns.get(self.entry.entry_id)
+        if isinstance(previous, datetime) and now - previous < RECOVERY_RELOAD_COOLDOWN:
+            return
+        cooldowns[self.entry.entry_id] = now
+        self._recovery_reload_scheduled = True
+        self._recovery_reload_reason = reason
+        _LOGGER.warning(
+            "Scheduling House Battery integration reload: %s", reason
+        )
+
+    async def _async_reload_for_recovery(self, reason: str) -> None:
+        """Run a recovery reload after the current coordinator refresh returns."""
+        await asyncio.sleep(1)
+        try:
+            _LOGGER.warning(
+                "Reloading House Battery integration for recovery: %s", reason
+            )
+            reloaded = await self.hass.config_entries.async_reload(self.entry.entry_id)
+            if not reloaded:
+                self._recovery_reload_scheduled = False
+                _LOGGER.warning("Home Assistant did not reload the House Battery entry")
+        except Exception:
+            self._recovery_reload_scheduled = False
+            _LOGGER.exception("House Battery recovery reload failed")
 
     async def _async_update_data(self) -> dict[str, Any]:
         now = datetime.now(UTC)
@@ -736,6 +790,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._local_controls
                 )
                 self._local_tcp_unavailable_since = None
+                self._consecutive_local_failures = 0
             except LocalProtocolError as exc:
                 self._local_snapshot = None
                 self._local_controls = {}
@@ -743,6 +798,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 local_problem = f"battery local TCP unavailable: {exc}"
                 if self._local_tcp_unavailable_since is None:
                     self._local_tcp_unavailable_since = now
+                self._consecutive_local_failures += 1
+                if self._consecutive_local_failures >= RECOVERY_RELOAD_AFTER_FAILURES:
+                    self._schedule_recovery_reload(
+                        "repeated local TCP telemetry/control failures"
+                    )
                 elapsed = now - self._local_tcp_unavailable_since
                 if elapsed < LOCAL_TCP_RECOVERY_GRACE:
                     local_tcp_recovery_remaining = LOCAL_TCP_RECOVERY_GRACE - elapsed
@@ -780,19 +840,22 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         export_detected = (
             export_w > FLOW_NOISE_FLOOR_W if export_w is not None else None
         )
+        if (
+            self.runtime.execution_enabled
+            and export_w is not None
+            and export_w > EXPORT_SAFETY_W
+            and not self.runtime.export_safety_fault_latched
+        ):
+            self.runtime.export_safety_fault_latched = True
+            await self.store.save(self.runtime)
         export_safety_fault = (
-            self.runtime.execution_enabled and export_w > EXPORT_SAFETY_W
-            if export_w is not None
-            else None
+            self.runtime.export_safety_fault_latched if export_w is not None else None
         )
-        if export_safety_fault:
-            if self._export_fault_since is None:
-                self._export_fault_since = now
+        if self.runtime.execution_enabled and self.runtime.export_safety_fault_latched:
             problems.append(
-                f"grid export observed at {round(export_w)} W; failing to grid/idle"
+                "grid export safety fault is latched; turn automatic control off "
+                "then on after confirming export has stopped"
             )
-        elif self._export_fault_since is not None and export_detected is False:
-            self._export_fault_since = None
 
         state = "BOOTSTRAP"
         reason = "Waiting for valid local telemetry and price intervals"
@@ -940,14 +1003,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # Direct-local units have no CT/grid-flow signal, so cap a
                     # manual discharge slot below the fresh connected-load
                     # reading. Missing load telemetry fails closed to 0 W.
-                    command_result = (
-                        await self.actuator.async_command(
-                            requested_action,
-                            now,
-                            target_soc=effective_settings.target_soc,
-                            load_w=self._load_power(),
-                        )
-                    )[1]
+                    command_ok, command_result = await self.actuator.async_command(
+                        requested_action,
+                        now,
+                        target_soc=effective_settings.target_soc,
+                        load_w=self._load_power(),
+                    )
+                    self._record_command_result(command_ok, command_result)
 
         decision_key = (state, reason)
         decision_changed = decision_key != self._last_decision_key
@@ -1041,7 +1103,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else None
             )
         )
-        return {
+        data = {
             "system_state": state,
             "healthy": (
                 not problems and not local_tcp_recovering and grid_available is True
@@ -1219,8 +1281,17 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "scheduled_load_count": len(self.runtime.scheduled_loads),
             "recent_decisions": self.runtime.decisions[-20:],
             "health_problems": reported_health_problems,
+            "consecutive_local_failures": self._consecutive_local_failures,
+            "consecutive_command_failures": self._consecutive_command_failures,
             "last_refresh": now.isoformat(),
         }
+        if self._recovery_reload_scheduled and self._recovery_reload_reason:
+            # Dispatch only after the refresh has assembled/published its state;
+            # the short delay also lets a config entry finish initial setup.
+            reason = self._recovery_reload_reason
+            self._recovery_reload_reason = None
+            self.hass.async_create_task(self._async_reload_for_recovery(reason))
+        return data
 
     async def async_set_execution_enabled(self, enabled: bool) -> None:
         if enabled and not self.config.get(CONF_COMMISSIONED, False):
@@ -1239,6 +1310,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     f"load: {problem}"
                 )
         was_enabled = self.runtime.execution_enabled
+        if enabled and not was_enabled:
+            # An explicit off/on cycle is the operator reset for a confirmed
+            # grid-export safety latch. If export persists, this refresh will
+            # immediately latch it again before any economic write.
+            self.runtime.export_safety_fault_latched = False
         self.runtime.execution_enabled = enabled
         self._startup_control_gate_reason = None
         await self.store.save(self.runtime)
@@ -1367,10 +1443,14 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.store.save(self.runtime)
         await self.async_request_refresh()
 
-    async def async_force_safe(self) -> None:
-        self.runtime.execution_enabled = False
+    async def async_force_safe(
+        self, *, disable_automatic_control: bool = True
+    ) -> None:
+        if disable_automatic_control:
+            self.runtime.execution_enabled = False
         await self.store.save(self.runtime)
-        await self.actuator.async_command(Action.SAFE, datetime.now(UTC))
+        result = await self.actuator.async_command(Action.SAFE, datetime.now(UTC))
+        self._record_command_result(*result)
         await self.async_request_refresh()
 
     async def async_add_scheduled_load(

@@ -7,22 +7,23 @@ entity picker; names below are the stable, user-facing names.
 
 | Entity | What it means | How to use it |
 | --- | --- | --- |
-| **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `RECOVERING`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. `RECOVERING` is a two-minute, write-paused grace period for a lost direct local TCP connection; read its `reason` attribute when it is not active. |
+| **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `RECOVERING`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. `RECOVERING` is a two-minute, write-paused grace period for a lost direct local TCP connection; read its `reason` attribute when it is not active. Errors pause writes without turning off the automatic-control switch; valid inputs resume operation automatically. |
 | **Current plan slot** | The current planner action: `charge`, `grid`, `battery`, or `safe`. The slot start/end, reason, and expected battery movement are attributes. | This is the single source for the current planned action. Compare its state with **Battery activity**, which is measured independently. |
 | **Battery activity** | `charging`, `discharging`, or `idle` based on physical power telemetry. Direct-local FBP1200 entries use reported battery charge/output power because they lack a CT meter; legacy entries use the measured load/grid balance. | Compare with **Current plan slot** to see whether measured battery movement matches the plan. |
 | **Operating mode** | Direct local TCP selector for `Charge`, `Idle`, and the vendor-labelled `Self-Gen/Zero Export`. | This is a commanded state; vendor-app changes are not guaranteed to appear here. |
 | **Grid available** | Whether an on-grid supply physically exists. | This is not grid import. `off` produces `OUTAGE` and stops economic control. |
 | **Optimizer problem** | `on` when required telemetry is stale, invalid, faulted, offline, or grid status is unknown. | Treat it as a stop signal. Its `problems` attribute names the failed binding. |
 | **Export detected** | `on` when a configured grid meter reports power flowing to the grid above the noise floor. | Direct-local FBP1200 entries without a CT meter report this as unavailable; their manual discharge is capped below connected load and fails closed when that load is unavailable. |
-| **Export safety fault** | `on` while automatic control is enabled and a configured meter reports export. It latches and disables all inverter writes until you disable then re-enable control. | Meter-based fail-closed protection is available only when a grid meter is configured. |
+| **Export safety fault** | `on` after a configured meter reports export above the safety threshold. It latches and blocks inverter writes. | Meter-based fail-closed protection is available only when a grid meter is configured. After export stops, turn Automatic control off then on to reset the fault; the fault never turns the switch off by itself. |
 | **Automatic control** | Explicit permission for House Battery to issue local mode/limit writes. | Leave off during setup. It cannot turn on until the entry is commissioned and native SOC controls pass validation. |
 | **Use external price forecast** | Enables valid, fresh forecast intervals after the end of known prices. | Leave it off while measuring forecast quality. Its `status` attribute explains `used`, `stale`, `invalid`, `empty`, or another non-use result; none of these affects known-price planning. |
 | **Allow opportunistic full charge** | Permits the optimizer to compare the normal target with the optional higher target. | Enable it only if occasional 100% charging is acceptable. Its attributes show whether the higher target is currently active, the incremental savings, and the reason. |
 | **Force safe mode** | Button that turns automatic control off and requests the configured safe local mode. | Use immediately if real battery behavior disagrees with the plan. |
 
 Example: if **Current plan slot** says `battery` while **Battery activity** is
-`idle`, do not “fix” it by changing settings. Inspect **Optimizer problem**,
-the local provider, and the mode read-back before re-enabling automatic control.
+`idle`, inspect **Optimizer problem**, the local provider, and the mode read-back.
+The integration retries on its next refresh and reloads itself after repeated
+local TCP or command failures.
 
 ## Telemetry and economics
 

@@ -43,6 +43,10 @@ class FbpAutomaticControlSwitch(Fbp1200Entity, SwitchEntity):
         return {
             "commissioned": self.coordinator.data.get("commissioned", False),
             "safety": "Writes only through the configured local Operating Mode entity",
+            "recovery": (
+                "System errors pause writes but keep this authorization armed; "
+                "the integration retries automatically"
+            ),
         }
 
     async def async_turn_on(self, **kwargs: object) -> None:
