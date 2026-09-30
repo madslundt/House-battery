@@ -38,16 +38,22 @@ from .const import (
     FLOW_NOISE_FLOOR_W,
     FLOW_UI_ACTIVE_THRESHOLD_W,
     FORECAST_MAX_AGE,
+    HIGH_SOC_DISCHARGE_DISCOUNT_DKK_PER_KWH,
+    HIGH_SOC_DISCHARGE_THRESHOLD,
+    LOW_SOC_CHARGE_PREMIUM_DKK_PER_KWH,
+    LOW_SOC_CHARGE_THRESHOLD,
     LOCAL_TCP_RECOVERY_GRACE,
     MODE_BATTERY,
     MODE_CHARGE,
     MODE_GRID,
     MODE_SAFE,
+    OPPORTUNISTIC_TARGET_SOC,
     OVERRIDE_AUTO,
     OVERRIDE_OPTIONS,
     OVERRIDE_TO_ACTION,
     RECOVERY_RELOAD_AFTER_FAILURES,
     RECOVERY_RELOAD_COOLDOWN,
+    SWITCHING_PENALTY_DKK,
     UPDATE_INTERVAL,
 )
 from .dailyplan import local_day_bounds, reconcile_daily_plan
@@ -273,7 +279,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return ["native SOC controls report invalid or unavailable bounds"]
         requested_absolute_min = self.runtime.settings["absolute_min_soc"]
         requested_reserve = self.runtime.settings["reserve_soc"]
-        requested_max = self.runtime.settings["opportunistic_target_soc"]
+        requested_max = OPPORTUNISTIC_TARGET_SOC
         if not 0 <= requested_absolute_min <= requested_reserve <= requested_max <= 100:
             return ["configured SOC limits are invalid"]
         return []
@@ -628,15 +634,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             round_trip_efficiency=efficiency,
             degradation_cost_dkk_per_kwh=values["degradation_cost_dkk_per_kwh"],
             minimum_profit_dkk_per_kwh=values["minimum_profit_dkk_per_kwh"],
-            switching_penalty_dkk=values["switching_penalty_dkk"],
-            low_soc_charge_threshold=values["low_soc_charge_threshold"],
-            low_soc_charge_premium_dkk_per_kwh=values[
-                "low_soc_charge_premium_dkk_per_kwh"
-            ],
-            high_soc_discharge_threshold=values["high_soc_discharge_threshold"],
-            high_soc_discharge_discount_dkk_per_kwh=values[
-                "high_soc_discharge_discount_dkk_per_kwh"
-            ],
+            switching_penalty_dkk=SWITCHING_PENALTY_DKK,
+            low_soc_charge_threshold=LOW_SOC_CHARGE_THRESHOLD,
+            low_soc_charge_premium_dkk_per_kwh=LOW_SOC_CHARGE_PREMIUM_DKK_PER_KWH,
+            high_soc_discharge_threshold=HIGH_SOC_DISCHARGE_THRESHOLD,
+            high_soc_discharge_discount_dkk_per_kwh=(
+                HIGH_SOC_DISCHARGE_DISCOUNT_DKK_PER_KWH
+            ),
         )
 
     def _optimize_with_storage_policy(
@@ -658,7 +662,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         opportunistic_settings = replace(
             settings,
-            target_soc=self.runtime.settings["opportunistic_target_soc"],
+            target_soc=OPPORTUNISTIC_TARGET_SOC,
         )
         if (
             not self.runtime.opportunistic_charging_enabled
@@ -1311,6 +1315,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
         was_enabled = self.runtime.execution_enabled
         if enabled and not was_enabled:
+            # A prior forced selection must never become active implicitly when
+            # automatic control is re-armed.
+            self.runtime.override_action = OVERRIDE_AUTO
+        elif not enabled:
+            self.runtime.override_action = OVERRIDE_AUTO
+        if enabled and not was_enabled:
             # An explicit off/on cycle is the operator reset for a confirmed
             # grid-export safety latch. If export persists, this refresh will
             # immediately latch it again before any economic write.
@@ -1351,7 +1361,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.config,
                 absolute_min_soc=self.runtime.settings["absolute_min_soc"],
                 reserve_soc=self.runtime.settings["reserve_soc"],
-                maximum_soc=self.runtime.settings["opportunistic_target_soc"],
+                maximum_soc=OPPORTUNISTIC_TARGET_SOC,
             )
         try:
             assert self.local_client is not None
@@ -1364,27 +1374,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return ["native SOC controls report invalid bounds"]
         requested_absolute_min = self.runtime.settings["absolute_min_soc"]
         requested_reserve = self.runtime.settings["reserve_soc"]
-        requested_max = self.runtime.settings["opportunistic_target_soc"]
+        requested_max = OPPORTUNISTIC_TARGET_SOC
         if not 0 <= requested_absolute_min <= requested_reserve <= requested_max <= 100:
             return ["configured SOC limits are invalid"]
         self._local_controls = controls
         return []
-
-    async def async_set_native_soc_limit(self, key: str, value: float) -> None:
-        if not self.local_client:
-            raise ValueError("This entity is only available for direct local setup")
-        controls = await self.local_client.async_read_controls()
-        minimum = round(_control_number(controls, "3023") or 0)
-        maximum = round(_control_number(controls, "3024") or 100)
-        if key == "minimum":
-            minimum = round(value)
-        elif key == "maximum":
-            maximum = round(value)
-        else:
-            raise ValueError(f"Unknown native SOC limit: {key}")
-        await self.local_client.async_set_limits(minimum, maximum)
-        self._local_controls = {"3023": str(minimum), "3024": str(maximum)}
-        await self.async_request_refresh()
 
     async def async_set_manual_mode(self, mode: str) -> None:
         if not self.local_client:
@@ -1439,6 +1433,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ValueError(
                 "Commission the integration in Options before overriding control"
             )
+        if mode != OVERRIDE_AUTO and not self.runtime.execution_enabled:
+            raise ValueError("Enable Automatic control before selecting a forced action")
         self.runtime.override_action = mode
         await self.store.save(self.runtime)
         await self.async_request_refresh()
@@ -1448,6 +1444,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         if disable_automatic_control:
             self.runtime.execution_enabled = False
+        self.runtime.override_action = OVERRIDE_AUTO
         await self.store.save(self.runtime)
         result = await self.actuator.async_command(Action.SAFE, datetime.now(UTC))
         self._record_command_result(*result)

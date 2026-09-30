@@ -34,8 +34,8 @@ slot is not a feasible or relevant replacement opportunity.
   ([planner](../../custom_components/house_battery/planner.py)). The default
   85% efficiency is close to NREL's representative 86% figure for Li-ion
   systems ([NREL ATB](https://atb.nrel.gov/electricity/2021/utility-scale_battery_storage)).
-- It accounts for SOC bounds, power caps, minimum mode duration, transition
-  budget, switching penalty, and forecast uncertainty. These all prevent
+- It accounts for SOC bounds, power caps, a fixed internal switching penalty,
+  and forecast uncertainty. These all prevent
   uneconomic chattering.
 - The wear setting is applied per delivered kWh in the planner. The ledger
   applies it per measured discharge kWh, so users should calibrate it

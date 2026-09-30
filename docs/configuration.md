@@ -5,8 +5,8 @@
 Before adding this integration, give the battery a stable local IP address.
 House Battery connects to its local TCP interface directly: enter the IP,
 port (normally `8080`), and device name, then complete the read-only telemetry
-check. It creates battery telemetry, native SOC-limit, and operating-mode
-entities itself. The optimizer project is maintained at
+check. It creates battery telemetry and read-only native SOC-limit diagnostics
+itself. The optimizer project is maintained at
 [github.com/madslundt/House-battery](https://github.com/madslundt/House-battery).
 
 You also need an electricity-price integration that exposes dated **known**
@@ -18,19 +18,20 @@ those known rows.
 
 | Config-flow field | Expected entity | Notes |
 | --- | --- | --- |
-| Battery-served local load | Local telemetry | Direct-local entries automatically use the complete per-storage off-grid total. Smart-load and backup-load readings remain diagnostics. An incomplete stack total fails closed. |
-| Grid import power | `sensor` (single signed reading: import positive, export negative, or separate import/export entities) | Numeric watts. Required to derive the power-flow model — it defines battery output/charge power and load balance — and for accounting/telemetry and zero-export verification. |
+| Battery-served local load | Local telemetry | Direct-local entries automatically use the complete per-storage off-grid total. Smart-load and backup-load readings remain diagnostics. An incomplete stack total fails closed. Legacy entries bind a load sensor. |
+| Grid import power | Legacy entries: `sensor` (single signed reading: import positive, export negative, or separate import/export entities) | Numeric watts. Required by legacy entries for load balance, accounting, and meter-based zero-export verification. Direct-local entries use battery telemetry and do not bind this field. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
 | External price forecast entities | optional ordered `sensor` list | Same row format; each is scored independently; the first usable source that can safely extend the horizon is used for planning. |
 | Grid input smart plug | optional `switch` | Select the switch controlling power to the FBP1200's grid connection. It is turned off before Battery mode and turned on after Charge, Grid, or Safe mode. |
 
 Fault state and online state are optional.
-Battery SOC, the **Operating mode** selector, and the native
-minimum/maximum SOC controls come from the direct connection. Native SOC limits
-are read back after every automatic limit write and checked again before control
-can be enabled. Battery charge/power flow is *derived* from the load, grid, and
-SOC balance — it is not read from any battery telemetry.
+Battery SOC, local operating-mode telemetry, and native minimum/maximum SOC
+readbacks come from the direct connection. The native SOC values are read-only
+diagnostics; House Battery still writes validated limits through its local
+adapter. Direct-local battery charge/output power comes from battery telemetry.
+Legacy entries with external battery providers derive battery flow from load,
+grid, and SOC balance.
 
 ## Grid availability is not grid use
 
@@ -79,9 +80,8 @@ a row that crosses the boundary is clipped. Confirmed known prices are not
 limited by this forecast cap. Forecast intervals retain forecast source labels
 and the configured uncertainty allowance during planning.
 
-Each entity must have reported an update within **External price forecast maximum
-age** (180 minutes by default). Use a value that matches the forecast source's
-normal update cadence. The per-source status exposes `used`, `disabled`,
+Each entity must have reported an update within the fixed three-hour forecast
+age limit. The per-source status exposes `used`, `disabled`,
 `unavailable`, `stale`, `invalid`, `empty`, `expired`, or
 `no_contiguous_extension`; only `used` contributes forecast intervals to a
 plan.
@@ -92,27 +92,26 @@ forecast plus that amount and a forecast discharge price as forecast minus it.
 For example, a 0.20 DKK/kWh forecast with a 0.25 allowance is evaluated as
 0.45 when charging; a 2.00 forecast is evaluated as 1.75 when discharging.
 
-## SOC-dependent price adjustments
+## Internal SOC-dependent price adjustments
 
-Four number entities tune how SOC changes the planner's willingness to charge
-or discharge:
+The optimizer uses fixed policy values rather than exposing four rarely used
+number entities:
 
 | Setting | Default | Effect |
 | --- | ---: | --- |
-| **Low-SOC charging breakpoint** | 20% | SOC below which charging gets a price premium. |
-| **Low-SOC charging price premium** | 0.25 DKK/kWh | At 0% SOC, this much is subtracted from the charge price in the optimization objective. The marginal adjustment fades linearly to zero at the breakpoint. |
-| **High-SOC discharging breakpoint** | 90% | SOC above which discharging gets a margin discount. |
-| **High-SOC discharge margin discount** | 0.25 DKK/kWh | At 100% SOC, this much is subtracted from the minimum required profit for discharge. The marginal adjustment fades linearly to zero at the breakpoint and cannot reduce the required profit below zero. |
+| Low-SOC charging breakpoint | 20% | Below this SOC, charging receives a price premium. |
+| Low-SOC charging price premium | 0.25 DKK/kWh | Maximum adjustment at 0% SOC, fading to zero at the breakpoint. |
+| High-SOC discharging breakpoint | 90% | Above this SOC, discharging receives a margin discount. |
+| High-SOC discharge margin discount | 0.25 DKK/kWh | Maximum adjustment at 100% SOC, fading to zero at the breakpoint. |
 
 For a charge or discharge step that crosses a breakpoint, the planner averages
 the adjustment over the SOC range traversed, so energy closer to the breakpoint
 gets a smaller adjustment. These are economic preferences, not physical limits:
 **Arbitrage reserve SOC** remains the hard discharge floor, and **Maximum charge
-SOC** (or the active opportunistic target) remains the hard charge ceiling. The
-two breakpoints must satisfy low-SOC breakpoint < high-SOC breakpoint. Set
-either price adjustment to zero to disable that behavior. Plan cost and savings
-continue to report tariff and wear costs; these adjustments affect only which
-plan the optimizer selects.
+SOC** (or the fixed 100% opportunistic target) remains the hard charge ceiling.
+The two breakpoints satisfy low-SOC breakpoint < high-SOC breakpoint. Plan cost
+and savings continue to report tariff and wear costs; these adjustments affect
+only which plan the optimizer selects.
 
 ## Mode mapping
 
@@ -125,8 +124,10 @@ The adapter uses exactly these proven local options:
 | `battery` | Native `Self-Gen/Zero Export`, or a load-capped `Discharge` slot on direct-local FBP1200 entries |
 | `safe` | Native safe mode, or `Idle` on direct-local FBP1200 entries |
 
-**Operating mode** shows the last command acknowledged by the battery's local
-interface. The vendor app can change the mode separately. Direct-local
+**Operation mode** is House Battery's temporary override selector (`auto`,
+`charge`, `battery`, or `grid`), not the battery's reported native mode. The
+local adapter's mode and SOC readbacks are diagnostics; the vendor app can
+change the device separately. Direct-local
 discharge fails closed to 0 W without a complete connected-load reading and is
 capped below the current load with a 50 W margin. The physical
 confirmation of what actually happened is the **grid meter** (zero export) and
@@ -152,8 +153,9 @@ you mark the integration commissioned in its Options. Commission only after:
    current and represent the actual battery/load path.
 2. Verifying that the grid-available entity changes accurately during an
    on-grid/off-grid test or approved simulation.
-3. Manually checking each mode through **Operating mode** and confirming the
-   local command and measured power response.
+3. Reviewing the mode mapping below. After commissioning, verify each action's
+   local readback and measured power response during supervised operation;
+   forced **Operation mode** selections require automatic control to be on.
 4. Checking the native minimum/maximum SOC controls and the resulting device
    behavior. In particular, understand what the battery does at its minimum
    SOC when the grid is absent.
@@ -163,16 +165,16 @@ you mark the integration commissioned in its Options. Commission only after:
    conservative values for your battery.
 
 After commissioning, first leave **Automatic control** off and inspect the
-shadow plan for a few complete price horizons. Turn it on only when the plan,
-mode mapping, and SOC bounds are consistently correct.
+shadow plan for a few complete price horizons. When ready, enable it during a
+supervised check of the mode mapping and SOC bounds.
 
 ## SOC settings
 
-The following number entities must satisfy:
+The SOC number entities must satisfy:
 
 ```text
 absolute emergency SOC ≤ arbitrage reserve SOC
-  < maximum charge SOC ≤ opportunistic charge SOC
+  < maximum charge SOC ≤ 100%
 ```
 
 - **Absolute emergency SOC**: device-level lower SOC value written through the
@@ -181,9 +183,9 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 - **Arbitrage reserve SOC**: planning floor. The optimizer never schedules a
   battery discharge below this value.
 - **Maximum charge SOC**: normal planning and hardware ceiling.
-- **Opportunistic charge SOC**: the opt-in higher ceiling. It is used only when
-  **Allow opportunistic full charge** is enabled and a complete additional
-  known-price cycle improves realized plan savings.
+- **Opportunistic full charge**: the opt-in policy always targets 100%. It is
+  used only when **Allow opportunistic full charge** is enabled and a complete
+  additional known-price cycle improves plan savings.
 
 Changing a number updates the persistent plan setting and triggers replanning.
 It does not make a previously unsafe device configuration safe; that must be

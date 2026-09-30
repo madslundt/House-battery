@@ -7,6 +7,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import OPPORTUNISTIC_TARGET_SOC
 from .coordinator import Fbp1200Coordinator
 from .entity import Fbp1200Entity
 
@@ -42,7 +43,7 @@ class FbpAutomaticControlSwitch(Fbp1200Entity, SwitchEntity):
     def extra_state_attributes(self) -> dict[str, object]:
         return {
             "commissioned": self.coordinator.data.get("commissioned", False),
-            "safety": "Writes only through the configured local Operating Mode entity",
+            "safety": "Writes only through the configured local battery adapter",
             "recovery": (
                 "System errors pause writes but keep this authorization armed; "
                 "the integration retries automatically"
@@ -100,7 +101,7 @@ class FbpExternalForecastSwitch(Fbp1200Entity, SwitchEntity):
 
 
 class FbpOpportunisticChargingSwitch(Fbp1200Entity, SwitchEntity):
-    """Allow a higher charge target only for a proven profitable cycle."""
+    """Allow charging to 100% only when a profitable cycle warrants it."""
 
     _attr_name = "Allow opportunistic full charge"
     _attr_icon = "mdi:battery-charging-100"
@@ -118,9 +119,7 @@ class FbpOpportunisticChargingSwitch(Fbp1200Entity, SwitchEntity):
         return {
             "active": self.coordinator.data.get("extra_storage_active", False),
             "normal_target_soc": self.coordinator.runtime.settings["target_soc"],
-            "opportunistic_target_soc": self.coordinator.runtime.settings[
-                "opportunistic_target_soc"
-            ],
+            "opportunistic_target_soc": OPPORTUNISTIC_TARGET_SOC,
             "effective_target_soc": self.coordinator.data.get("effective_target_soc"),
             "incremental_savings_dkk": self.coordinator.data.get(
                 "opportunistic_incremental_savings_dkk"

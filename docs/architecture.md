@@ -3,7 +3,7 @@
 ## Local data flow
 
 ```text
-Local battery-provider entities + price forecast + load measurement
+Direct-local battery telemetry or legacy provider entities + price + load
                          │
                          ▼
                   coordinator (1 min)
@@ -14,13 +14,12 @@ Local battery-provider entities + price forecast + load measurement
            commissioned automatic control only
                          │
                          ▼
-      native SOC/power controls + local Operating Mode select
+      native SOC/power controls + local battery mode command
 ```
 
 The integration never controls relays, grid wiring, or a transfer switch. The
-optimizer consumes verified local battery-provider entities; its direct TCP
-compatibility layer remains behind hardware validation and is not an automatic
-fallback.
+direct-local TCP adapter supplies FBP1200 telemetry and control. Legacy entries
+can use entities from an existing battery provider instead.
 
 ## Forecasting
 
@@ -43,7 +42,7 @@ join quarter-hour external forecasts. It builds a dynamic-programming state
 space:
 
 ```text
-(stored-energy step, current action, remaining mode lock, transitions used)
+(stored-energy step, current action)
 ```
 
 For each slot it considers `grid`, `charge`, and `battery`, constrained by:
@@ -52,11 +51,9 @@ For each slot it considers `grid`, `charge`, and `battery`, constrained by:
 - learned/configured usable capacity;
 - charge/discharge power limits;
 - round-trip efficiency;
-- minimum mode duration;
-- maximum daily transitions; and
 - expected battery-served load.
 
-Ties are resolved deterministically by cost, transition count, throughput, and
+Ties are resolved deterministically by total cost, battery throughput, and
 action name. Given the same telemetry, stored learning state, settings, and
 price rows, the plan is reproducible.
 
@@ -78,8 +75,8 @@ places, not as a gate on already-stored energy:
 
 Discharge still carries the configured degradation cost and required-profit
 margin in the optimization objective (the required margin is *not* subtracted
-from the terminal value, which would double-count it). A switching penalty and
-minimum mode duration make small, frequent changes unattractive. Energy left
+from the terminal value, which would double-count it). A fixed internal
+switching penalty makes small, frequent changes unattractive. Energy left
 above reserve receives a terminal value based on the latter part of the known
 horizon, preventing the planner from emptying a useful battery solely because
 the horizon ends.

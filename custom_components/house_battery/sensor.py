@@ -33,6 +33,7 @@ class FbpSensorDescription:
     precision: int | None = None
     device_class: SensorDeviceClass | None = None
     state_class: SensorStateClass | None = None
+    enabled_by_default: bool = True
 
 
 SENSORS = (
@@ -136,6 +137,7 @@ SENSORS = (
         icon="mdi:cash-check",
         unit="DKK",
         precision=2,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="week_net_savings_dkk",
@@ -143,6 +145,7 @@ SENSORS = (
         icon="mdi:cash-check",
         unit="DKK",
         precision=2,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="last_week_net_savings_dkk",
@@ -150,6 +153,7 @@ SENSORS = (
         icon="mdi:cash-check",
         unit="DKK",
         precision=2,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="month_net_savings_dkk",
@@ -157,6 +161,7 @@ SENSORS = (
         icon="mdi:calendar-check",
         unit="DKK",
         precision=2,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="last_month_net_savings_dkk",
@@ -164,6 +169,7 @@ SENSORS = (
         icon="mdi:calendar-check",
         unit="DKK",
         precision=2,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="lifetime_net_savings_dkk",
@@ -178,6 +184,7 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="yesterday_charge_kwh",
@@ -185,6 +192,7 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="week_charge_kwh",
@@ -192,6 +200,7 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="last_week_charge_kwh",
@@ -199,6 +208,7 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="today_discharge_kwh",
@@ -206,6 +216,7 @@ SENSORS = (
         icon="mdi:battery-arrow-down",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="month_charge_kwh",
@@ -213,6 +224,7 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="last_month_charge_kwh",
@@ -220,6 +232,7 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="month_discharge_kwh",
@@ -227,6 +240,7 @@ SENSORS = (
         icon="mdi:battery-arrow-down",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="lifetime_charge_kwh",
@@ -253,6 +267,7 @@ SENSORS = (
         unit="cycles",
         precision=2,
         state_class=SensorStateClass.TOTAL_INCREASING,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="estimated_degradation_pct",
@@ -260,6 +275,7 @@ SENSORS = (
         icon="mdi:battery-heart-variant",
         unit=PERCENTAGE,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="estimated_remaining_capacity_pct",
@@ -267,6 +283,7 @@ SENSORS = (
         icon="mdi:battery-heart",
         unit=PERCENTAGE,
         precision=2,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="learned_capacity_kwh",
@@ -274,6 +291,7 @@ SENSORS = (
         icon="mdi:battery-high",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="learned_efficiency_pct",
@@ -281,6 +299,7 @@ SENSORS = (
         icon="mdi:percent-circle",
         unit=PERCENTAGE,
         precision=1,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="load_learning_confidence_pct",
@@ -288,6 +307,7 @@ SENSORS = (
         icon="mdi:brain",
         unit=PERCENTAGE,
         precision=1,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="load_forecast_error_w",
@@ -295,6 +315,7 @@ SENSORS = (
         icon="mdi:chart-bell-curve",
         unit=UnitOfPower.WATT,
         precision=0,
+        enabled_by_default=False,
     ),
 )
 
@@ -311,6 +332,13 @@ async def async_setup_entry(
     )
     if old_entity_id:
         registry.async_remove(old_entity_id)
+    if coordinator.is_direct_local:
+        for suffix in ("native_minimum_soc", "native_maximum_soc"):
+            old_number = registry.async_get_entity_id(
+                "number", DOMAIN, f"{entry.entry_id}_{suffix}"
+            )
+            if old_number:
+                registry.async_remove(old_number)
     async_add_entities(
         [
             FbpSystemStateSensor(coordinator),
@@ -324,6 +352,14 @@ async def async_setup_entry(
             FbpBatteryLearningSensor(coordinator),
             FbpPriceForecastAccuracySensor(coordinator),
             FbpDecisionHistorySensor(coordinator),
+            *(
+                [
+                    FbpNativeSocSensor(coordinator, "minimum"),
+                    FbpNativeSocSensor(coordinator, "maximum"),
+                ]
+                if coordinator.is_direct_local
+                else []
+            ),
             *(
                 [FbpLocalLoadDiagnosticsSensor(coordinator)]
                 if coordinator.is_direct_local
@@ -375,6 +411,36 @@ class FbpSystemStateSensor(Fbp1200Entity, SensorEntity):
             "last_refresh",
         )
         return {key: self.coordinator.data.get(key) for key in keys}
+
+
+class FbpNativeSocSensor(Fbp1200Entity, SensorEntity):
+    """Read-only diagnostic for the hardware SOC limits House Battery owns."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator: Fbp1200Coordinator, key: str) -> None:
+        super().__init__(coordinator, f"native_{key}_soc")
+        self.key = key
+        self._attr_name = (
+            "Native minimum SOC" if key == "minimum" else "Native maximum SOC"
+        )
+        self._attr_icon = (
+            "mdi:battery-lock" if key == "minimum" else "mdi:battery-charging-100"
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        data_key = "native_min_soc" if self.key == "minimum" else "native_max_soc"
+        return self.coordinator.data.get(data_key)
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.data.get(
+            "native_min_soc" if self.key == "minimum" else "native_max_soc"
+        ) is not None
 
 
 def _battery_activity(data: dict[str, Any]) -> str | None:
@@ -659,6 +725,8 @@ class FbpPlanExecutionSensor(Fbp1200Entity, SensorEntity):
 class FbpStoragePolicySensor(Fbp1200Entity, SensorEntity):
     _attr_name = "Extra storage policy"
     _attr_icon = "mdi:battery-plus-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: Fbp1200Coordinator) -> None:
         super().__init__(coordinator, "extra_storage_policy")
@@ -688,6 +756,8 @@ class FbpStoragePolicySensor(Fbp1200Entity, SensorEntity):
 class FbpBatteryLearningSensor(Fbp1200Entity, SensorEntity):
     _attr_name = "Battery learning"
     _attr_icon = "mdi:battery-heart-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: Fbp1200Coordinator) -> None:
         super().__init__(coordinator, "battery_learning")
@@ -719,6 +789,8 @@ class FbpPriceForecastAccuracySensor(Fbp1200Entity, SensorEntity):
 
     _attr_name = "External price forecast accuracy"
     _attr_icon = "mdi:chart-bell-curve-cumulative"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: Fbp1200Coordinator) -> None:
         super().__init__(coordinator, "external_price_forecast_accuracy")
@@ -752,6 +824,8 @@ class FbpPriceForecastAccuracySensor(Fbp1200Entity, SensorEntity):
 class FbpDecisionHistorySensor(Fbp1200Entity, SensorEntity):
     _attr_name = "Decision history"
     _attr_icon = "mdi:history"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: Fbp1200Coordinator) -> None:
         super().__init__(coordinator, "decision_history")
@@ -771,6 +845,7 @@ class FbpLocalLoadDiagnosticsSensor(Fbp1200Entity, SensorEntity):
     _attr_name = "Local load diagnostics"
     _attr_icon = "mdi:meter-electric-outline"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: Fbp1200Coordinator) -> None:
         super().__init__(coordinator, "local_load_diagnostics")
@@ -826,6 +901,7 @@ class FbpValueSensor(Fbp1200Entity, SensorEntity):
         self._attr_suggested_display_precision = description.precision
         self._attr_device_class = description.device_class
         self._attr_state_class = description.state_class
+        self._attr_entity_registry_enabled_default = description.enabled_by_default
 
     @property
     def native_value(self) -> Any:

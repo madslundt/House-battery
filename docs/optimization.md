@@ -5,31 +5,30 @@
 Every minute, House Battery validates local telemetry, retains each price
 source's valid interval duration, predicts the connected load, and uses a
 deterministic dynamic-programming plan. The plan respects SOC bounds, capacity,
-charge/discharge power, round-trip losses, minimum mode duration, maximum
-daily transitions, switching cost, degradation cost, and the minimum required
-profit.
+charge/discharge power, round-trip losses, switching cost, degradation cost,
+and the minimum required profit. Mode switching cost is fixed internally;
+there is no user-configurable mode lock or daily transition budget.
 
-The optional low-SOC charging premium and high-SOC discharge margin discount
+The internal low-SOC charging premium and high-SOC discharge margin discount
 change the optimizer's marginal energy value smoothly between their configured
 SOC breakpoints. They can favor restoring a depleted battery and using energy
 near full SOC. They do not change the physical reserve, charge ceiling, tariff
 cost, or reported plan savings.
 
-The transition budget and mode-duration lock prevent routine chattering. They
-do not keep Self-Gen active when doing so would discharge stored energy below
-the economic floor: that protective exit to Grid takes precedence and is
-recorded as the physical mode change it is. During automatic operation, the
-integration applies the arbitrage reserve as the inverter's native minimum SOC
-before changing modes, so a failed mode command cannot expose stored reserve.
-The lower absolute emergency SOC is used only for the safe/outage mode.
+The switching cost discourages routine chattering. A partial first price slot
+continues the current action through its tariff boundary. During automatic
+operation, the integration applies the arbitrage reserve as the inverter's
+native minimum SOC before changing modes, so a failed mode command cannot
+expose stored reserve. The lower absolute emergency SOC is used only for the
+safe/outage mode.
 
 It therefore does not cycle the battery merely because the next interval is a
 little more expensive. The normal economic floor is **Arbitrage reserve SOC**;
 **Absolute emergency SOC** is the lower native limit preserved for an outage.
 
 When **Allow opportunistic full charge** is enabled, the coordinator compares
-the normal-target plan with a second plan using **Opportunistic charge SOC**
-(100% by default). The higher target is selected only when known prices support
+the normal-target plan with a second plan using a fixed 100% target. The higher
+target is selected only when known prices support
 a complete extra charge/discharge cycle, the added energy is scheduled back
 below the normal target before known prices end, and realized plan savings
 improve after round-trip losses, degradation, switching cost, and **Minimum
@@ -110,8 +109,8 @@ assuming a price pattern mandates battery use.
 
 Review at least two representative tariff weeks. **Battery charge/discharge
 total** and **Equivalent full cycles** show throughput; rising throughput
-without realized savings suggests increasing minimum profit, degradation cost,
-or switching penalty. **Estimated degradation**, **Learned usable capacity**,
+without realized savings suggests increasing minimum profit or degradation
+cost. **Estimated degradation**, **Learned usable capacity**,
 and **Learned round-trip efficiency** should be compared with the BMS or
 manufacturer diagnostics.
 

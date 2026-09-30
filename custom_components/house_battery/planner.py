@@ -422,7 +422,7 @@ def optimize(
     # discharge optimization cost above); it must not also discount the stored
     # energy the program is deciding whether to keep. Double-counting the margin
     # there made holding vs discharging a mathematical wash, which the
-    # throughput tiebreak then turned into wasteful discharge at target SOC.
+        # throughput tiebreak then turned into wasteful discharge at target SOC.
     # Keeping the margin only in the discharge cost makes "hold at target"
     # strictly preferred whenever there is no clear price advantage.
     terminal_net_price = max(
@@ -439,9 +439,9 @@ def optimize(
         )
         # Absorb floating-point noise from the two accumulation paths (grid-only
         # vs. battery movement) so that a genuine economic *wash* ties on the
-        # cost term. The existing tiebreak is "fewer transitions, then less
-        # battery throughput", which deliberately prefers HOLDING when moving the
-        # battery buys nothing. Without this rounding the wash decided itself on a
+        # cost term. The existing tiebreak is "less battery throughput, then
+        # stable action order", which deliberately prefers HOLDING when moving
+        # the battery buys nothing. Without this rounding the wash decided itself on a
         # ~1e-8 difference, letting the greedy per-layer optimiser slip a
         # wasteful discharge (e.g. at target SOC with flat prices) through the
         # back door after the hard discharge floor was removed.

@@ -38,12 +38,13 @@ actuator's second, real-time cap is deliberately independent of that forecast.
       external meter and understand that HA cannot latch on detected export.
 - [ ] **Native SOC controls read back** (minimum / maximum) with valid, sane
       bounds. Automatic control stays off until they are commissioned.
-- [ ] **`Absolute emergency SOC` ≤ `Reserve SOC` ≤ `Opportunistic target SOC`**
+- [ ] **`Absolute emergency SOC` ≤ `Reserve SOC` < `Maximum charge SOC` ≤ 100%**
       and all sit inside the native bounds. The reserve is raised to the
       inverter's native minimum during discharge, so a failed mode command cannot
       expose stored reserve.
-- [ ] **Connected load power** is configured (the `Load power` entity). The
-      derived battery flow and the `Power source` sensor depend on it.
+- [ ] **Connected load power** is available. Direct-local entries use the
+      complete per-storage off-grid telemetry; legacy entries bind a `Load
+      power` sensor. The flow model and `Power source` sensor depend on it.
 - [ ] **Commission** is toggled on *after* the above are satisfied.
 
 ## Physically verifying zero export

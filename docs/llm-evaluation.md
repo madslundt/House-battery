@@ -37,7 +37,7 @@ Keep the usual House Battery telemetry at a 1 to 15 minute cadence:
 
 | Purpose | Entities |
 | --- | --- |
-| Safety and control state | **Optimizer state**, **Optimizer problem**, **Grid available**, **Automatic control**, **Current plan slot**, **Battery activity**, **Operating mode** |
+| Safety and control state | **Optimizer state**, **Optimizer problem**, **Grid available**, **Automatic control**, **Current plan slot**, **Battery activity**, **Operation mode** |
 | Plan and its inputs | **Operation plan**, **Current plan slot**, **Planned load power**, **Current electricity price**, **Extra storage policy**, **Effective charge target SOC** |
 | Physical outcome | **Battery state of charge**, **Connected load power**, **Grid import power**, **Battery charge power**, **Battery discharge power** |
 | Aggregate economics | **Expected plan savings**, all **Estimated realized savings** periods, battery charge/discharge counters, **Equivalent full cycles**, and **Estimated battery degradation** |
@@ -235,17 +235,17 @@ the supplied evidence; do not control equipment or infer data that is absent.
 The optimizer chooses charge, grid, or battery for each price interval using
 the price horizon available then, predicted connected load, SOC, capacity,
 charge/discharge limits, round-trip efficiency, degradation cost, minimum
-profit, reserve SOC, switching penalty, minimum mode duration, and transition
-budget. Known prices are authoritative. Forecast prices, if used, have a
-conservative uncertainty buffer.
+profit, reserve SOC, and an internal fixed switching penalty. Known prices are
+authoritative. Forecast prices, if used, have a conservative uncertainty
+buffer.
 
 Review requirements:
 - Evaluate a past plan only against information available at its decision time.
   Do not use later prices or realised load as if they were known.
 - Separate execution mismatch, load/price forecast error, telemetry quality,
   configuration choice, and planner/economic issue.
-- Include efficiency, degradation, profit threshold, reserve, power/capacity,
-  transition budget, and mode lock before calling an opportunity profitable.
+- Include efficiency, degradation, profit threshold, reserve, and
+  power/capacity before calling an opportunity profitable.
 - Treat realised savings as an estimate and ignore incomplete ledger rows for
   quantified conclusions.
 - Do not propose changing emergency or arbitrage reserve without stating the

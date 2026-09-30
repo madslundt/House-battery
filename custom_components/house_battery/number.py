@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
+from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import SETTING_LIMITS
+from .const import DOMAIN, SETTING_LIMITS
 from .coordinator import Fbp1200Coordinator
 from .entity import Fbp1200Entity
 
@@ -18,11 +18,7 @@ SETTING_NAMES = {
     "absolute_min_soc": ("Absolute emergency SOC", "mdi:battery-alert"),
     "reserve_soc": ("Arbitrage reserve SOC", "mdi:battery-lock"),
     "target_soc": ("Maximum charge SOC", "mdi:battery-charging-90"),
-    "opportunistic_target_soc": (
-        "Opportunistic charge SOC",
-        "mdi:battery-charging-100",
-    ),
-    "charge_power_w": ("Charge-mode total power budget", "mdi:battery-charging"),
+    "charge_power_w": ("Maximum AC charge power", "mdi:battery-charging"),
     "discharge_power_w": ("Maximum discharge power", "mdi:battery-arrow-down"),
     "round_trip_efficiency": ("Fallback round-trip efficiency", "mdi:percent-circle"),
     "degradation_cost_dkk_per_kwh": (
@@ -30,19 +26,6 @@ SETTING_NAMES = {
         "mdi:battery-heart-variant",
     ),
     "minimum_profit_dkk_per_kwh": ("Minimum required profit", "mdi:cash-lock"),
-    "low_soc_charge_threshold": ("Low-SOC charging breakpoint", "mdi:battery-low"),
-    "low_soc_charge_premium_dkk_per_kwh": (
-        "Low-SOC charging price premium",
-        "mdi:cash-plus",
-    ),
-    "high_soc_discharge_threshold": (
-        "High-SOC discharging breakpoint",
-        "mdi:battery-high",
-    ),
-    "high_soc_discharge_discount_dkk_per_kwh": (
-        "High-SOC discharge margin discount",
-        "mdi:cash-minus",
-    ),
     "cycle_life": ("Cycle-life reference", "mdi:sync"),
     "forecast_uncertainty_dkk_per_kwh": (
         "External price forecast uncertainty",
@@ -55,16 +38,28 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: Fbp1200Coordinator = entry.runtime_data
-    entities: list[NumberEntity] = [
-        FbpSettingNumber(coordinator, key) for key in SETTING_NAMES
-    ]
+    registry = er.async_get(hass)
+    obsolete_settings = {
+        "opportunistic_target_soc",
+        "low_soc_charge_threshold",
+        "low_soc_charge_premium_dkk_per_kwh",
+        "high_soc_discharge_threshold",
+        "high_soc_discharge_discount_dkk_per_kwh",
+        "switching_penalty_dkk",
+    }
     if coordinator.is_direct_local:
-        entities.extend(
-            [
-                FbpNativeSocNumber(coordinator, "minimum"),
-                FbpNativeSocNumber(coordinator, "maximum"),
-            ]
-        )
+        obsolete_settings.add("cycle_life")
+    for key in obsolete_settings:
+        unique_id = f"{entry.entry_id}_setting_{key}"
+        entity_id = registry.async_get_entity_id("number", DOMAIN, unique_id)
+        if entity_id:
+            registry.async_remove(entity_id)
+
+    entities: list[NumberEntity] = [
+        FbpSettingNumber(coordinator, key)
+        for key in SETTING_NAMES
+        if key != "cycle_life" or not coordinator.is_direct_local
+    ]
     async_add_entities(entities)
 
 
@@ -85,6 +80,8 @@ class FbpSettingNumber(Fbp1200Entity, NumberEntity):
         self._attr_native_max_value = maximum
         self._attr_native_step = step
         self._attr_native_unit_of_measurement = unit
+        if key == "forecast_uncertainty_dkk_per_kwh":
+            self._attr_entity_registry_enabled_default = False
 
     @property
     def native_value(self) -> float:
@@ -101,53 +98,9 @@ class FbpSettingNumber(Fbp1200Entity, NumberEntity):
             <= candidate["absolute_min_soc"]
             <= candidate["reserve_soc"]
             < candidate["target_soc"]
-            <= candidate["opportunistic_target_soc"]
             <= 100
         ):
             raise ValueError(
-                "Absolute emergency SOC ≤ arbitrage reserve < maximum charge SOC "
-                "≤ opportunistic charge SOC is required"
-            )
-        if not (
-            candidate["low_soc_charge_threshold"]
-            < candidate["high_soc_discharge_threshold"]
-        ):
-            raise ValueError(
-                "Low-SOC charging breakpoint must be below high-SOC discharging breakpoint"
+                "Absolute emergency SOC ≤ arbitrage reserve < maximum charge SOC ≤ 100% is required"
             )
         await self.coordinator.async_set_setting(self.key, value)
-
-
-class FbpNativeSocNumber(Fbp1200Entity, NumberEntity):
-    """Directly expose the battery's two allowlisted native SOC registers."""
-
-    _attr_entity_category = EntityCategory.CONFIG
-    _attr_device_class = NumberDeviceClass.BATTERY
-    _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_native_min_value = 0
-    _attr_native_max_value = 100
-    _attr_native_step = 1
-    _attr_mode = NumberMode.BOX
-
-    def __init__(self, coordinator: Fbp1200Coordinator, key: str) -> None:
-        super().__init__(coordinator, f"native_{key}_soc")
-        self.key = key
-        self._attr_name = (
-            "Native minimum SOC" if key == "minimum" else "Native maximum SOC"
-        )
-        self._attr_icon = (
-            "mdi:battery-lock" if key == "minimum" else "mdi:battery-charging-100"
-        )
-
-    @property
-    def native_value(self) -> float | None:
-        data_key = "native_min_soc" if self.key == "minimum" else "native_max_soc"
-        return self.coordinator.data.get(data_key)
-
-    @property
-    def available(self) -> bool:
-        data_key = "native_min_soc" if self.key == "minimum" else "native_max_soc"
-        return self.coordinator.data.get(data_key) is not None
-
-    async def async_set_native_value(self, value: float) -> None:
-        await self.coordinator.async_set_native_soc_limit(self.key, value)

@@ -29,34 +29,33 @@ integration's operation on earlier supported versions.
 House Battery connects to the battery itself. In the first setup screen, enter
 the battery's local IP address, TCP port (normally `8080`), and a display name.
 The flow performs a read-only telemetry handshake before it creates the entry.
-It then creates the battery SOC, charging/discharging-power, native SOC-limit,
-and operating-mode entities under the new device. No separate battery-provider
-integration is needed.
+It then creates battery SOC and power telemetry, read-only native SOC-limit
+diagnostics, and House Battery control entities under the new device. No
+separate battery-provider integration is needed.
 
 ## Connect the battery locally
 
 1. Give the battery a DHCP reservation/static IP.
 2. Add **House Battery**, enter its IP address, TCP port, and name, then let
    the read-only connection check complete.
-3. Verify the created **Battery state of charge**, **Battery charge power**,
-   **Battery discharge power**, **Native minimum SOC**, **Native maximum SOC**,
-   and **Operating mode** entities.
-4. Verify each intended mode manually: `Charge`, `Idle`, and
-   `Self-Gen/Zero Export`. The operating-mode entity is a local
-   commanded state; check the physical power sensors after every command.
+3. Verify **Battery state of charge**, battery power telemetry, and the
+   read-only **Native minimum SOC** and **Native maximum SOC** diagnostics.
+4. During commissioning, verify the local adapter's mode readback and physical
+   power response for each intended action. Use **Operation mode** to select
+   `auto`, `charge`, `battery`, or `grid` after automatic control is enabled.
 
 ## Bind the required entities
 
 | Binding | What it must mean |
 | --- | --- |
 | Battery-served local load | Direct-local entries automatically use the complete per-storage off-grid total. Other local readings are diagnostic only. |
-| Grid import power | Imported power, in W. |
+| Grid import power | Imported power, in W; required for legacy provider entries only. Direct-local entries use battery telemetry. |
 | Grid available / on-grid state | Physical/device-reported supply availability, not grid use. |
 | Known electricity-price entities | Actual published intervals in a supported list attribute. |
 
-Fault and online status are optional. The direct
-adapter supplies the battery telemetry and native SOC controls; the latter are
-validated again when you enable automatic control. See
+Fault and online status are optional. The direct adapter supplies battery
+telemetry and read-only native SOC readbacks; those bounds are validated again
+when you enable automatic control. See
 [configuration.md](configuration.md) for accepted values and the full field
 reference.
 
@@ -67,13 +66,18 @@ battery. Leave it there through at least one representative price horizon and
 compare **Current plan slot**, **Battery activity**, **Operation plan**, and the
 power sensors.
 
-Before setting *I verified…* in Options and enabling **Automatic control**:
+Before setting *I verified…* in Options:
 
-- Test all three modes and their read-back with normal household loads.
+- Review the local mode mapping and the effects of each action.
 - Confirm the native SOC limits are writable and the device honours them.
 - Confirm an outage changes **Grid available** to unavailable; do not test an
   electrical outage unless it is safe and planned.
 - Check that local electrical protection and operating requirements are already correct.
+
+After commissioning, enable **Automatic control** during supervised
+operation and verify each forced action's local readback and physical power
+response. Forced **Operation mode** selections are unavailable while automatic
+control is off.
 
 If grid state becomes unknown/unavailable, data are stale, or the device is
 faulted/offline, the optimizer stops economic control. An outage clears the

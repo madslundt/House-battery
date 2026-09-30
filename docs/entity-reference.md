@@ -10,7 +10,7 @@ entity picker; names below are the stable, user-facing names.
 | **Optimizer state** | `BOOTSTRAP`, `SHADOW`, `ACTIVE`, `RECOVERING`, `DEGRADED`, or `OUTAGE`. | Only `ACTIVE` permits automatic writes. `RECOVERING` is a two-minute, write-paused grace period for a lost direct local TCP connection; read its `reason` attribute when it is not active. Errors pause writes without turning off the automatic-control switch; valid inputs resume operation automatically. |
 | **Current plan slot** | The current planner action: `charge`, `grid`, `battery`, or `safe`. The slot start/end, reason, and expected battery movement are attributes. | This is the single source for the current planned action. Compare its state with **Battery activity**, which is measured independently. |
 | **Battery activity** | `charging`, `discharging`, or `idle` based on physical power telemetry. Direct-local FBP1200 entries use reported battery charge/output power because they lack a CT meter; legacy entries use the measured load/grid balance. | Compare with **Current plan slot** to see whether measured battery movement matches the plan. |
-| **Operating mode** | Direct local TCP selector for `Charge`, `Idle`, and the vendor-labelled `Self-Gen/Zero Export`. | This is a commanded state; vendor-app changes are not guaranteed to appear here. |
+| **Operation mode** | House Battery override selector: `auto`, `charge`, `battery`, or `grid`. | `auto` follows the optimizer. Forced actions are available only while automatic control is on; disabling control or pressing Force safe returns this selector to `auto`. |
 | **Grid available** | Whether an on-grid supply physically exists. | This is not grid import. `off` produces `OUTAGE` and stops economic control. |
 | **Optimizer problem** | `on` when required telemetry is stale, invalid, faulted, offline, or grid status is unknown. | Treat it as a stop signal. Its `problems` attribute names the failed binding. |
 | **Export detected** | `on` when a configured grid meter reports power flowing to the grid above the noise floor. | Direct-local FBP1200 entries without a CT meter report this as unavailable; their manual discharge is capped below connected load and fails closed when that load is unavailable. |
@@ -36,7 +36,7 @@ local TCP or command failures.
 | **Grid export power** | Whole-site power sent to the grid. Requires a measured grid meter; direct-local FBP1200 entries without a CT meter cannot report it. |
 | **Battery output power** | Legacy entries infer battery output from the measured load/grid balance. Direct-local entries show the inverter's reported battery output, which is useful for current activity but is not used for accounting or learning. Battery-flow accounting and learning require a measured grid balance. |
 | **Power source** | Where the load is served from right now: `charging` (battery charging), `battery` (battery serving load), `grid` (battery idle while load is present), or `off` (no measured load). Legacy entries use the load/grid balance; direct-local entries use reported battery direction. |
-| **Native minimum/maximum SOC** | Allowlisted battery hardware SOC registers. | They are read back after changes and used as the direct control limits. |
+| **Native minimum/maximum SOC** | Read-only diagnostics for the battery's hardware SOC registers. | House Battery validates and writes limits through its local adapter; these sensors show the latest readback. |
 | **Current electricity price** | Price for the current known price interval. |
 | **Expected plan savings** | Forecast saving across the current planning horizon (known prices plus any enabled, valid extension) versus buying expected load from grid. It is a forecast, not cash earned. |
 | **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Direct-local FBP1200 entries without a CT meter cannot record balanced grid/battery savings. Compare matching tariff periods, not one unusual day. |
@@ -93,7 +93,7 @@ All values are persistent inputs. This ordering is enforced:
 
 ```text
 absolute emergency SOC ≤ arbitrage reserve SOC
-  < maximum charge SOC ≤ opportunistic charge SOC ≤ 100
+  < maximum charge SOC ≤ 100
 ```
 
 | Number | What changing it does | Realistic change |
@@ -102,20 +102,21 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **Absolute emergency SOC** | Native lower hardware floor written during automatic commands. | Raise 10→20% if outage reserve is more valuable than arbitrage. |
 | **Arbitrage reserve SOC** | Planner's no-discharge floor. | Raise 20→35% before a storm; the optimizer keeps more backup but has less energy to sell against peak prices. |
 | **Maximum charge SOC** | Normal charge ceiling. | Lower 90→80% to reduce high-SOC dwell time; it may skip otherwise profitable evening coverage. |
-| **Opportunistic charge SOC** | Opt-in higher ceiling reserved for a complete profitable known-price cycle. | Keep 100% to allow full charges; use **Allow opportunistic full charge** to enable or disable the policy. |
-| **Maximum charge/discharge power** | Planner and native command power cap. | Lower discharge 800→500 W if the load path or battery behaves better at a lower sustained output. |
+| **Maximum AC charge power** | Maximum power budget used for charging. | The available range tops out at 1200 W; lower it if the battery or electrical installation needs a conservative cap. |
+| **Maximum discharge power** | Planner and native command power cap. | Lower discharge 800→500 W if the load path or battery behaves better at a lower sustained output. |
 | **Fallback round-trip efficiency** | Used before measured efficiency is ready. | Set 80% rather than 85% to make early plans more conservative. |
 | **Battery degradation cost** | Wear cost charged to each discharged kWh. | Raise 0.35→0.60 DKK/kWh if avoiding wear matters more than short-term savings. |
 | **Minimum required profit** | Extra margin required for discharge. | Raise 0.75→1.25 DKK/kWh to reject marginal cycles. |
-| **Low-SOC charging breakpoint** | Below this SOC, the configurable charging premium applies, fading linearly to its maximum at 0%. | Lower 20→15% to limit price support to a more depleted battery. |
-| **Low-SOC charging price premium** | DKK/kWh discount to the optimizer's charge cost at 0% SOC, fading to zero at the breakpoint. | Raise 0.25→0.40 to favor replenishment more strongly when SOC is low. |
-| **High-SOC discharging breakpoint** | Above this SOC, the configurable discharge margin discount applies, reaching its maximum at 100%. | Raise 90→95% to apply it only when the battery is nearly full. |
-| **High-SOC discharge margin discount** | DKK/kWh reduction to the required profit at 100% SOC, fading to zero at the breakpoint. It cannot reduce the required profit below zero. | Raise 0.25→0.40 to make stored energy above the breakpoint easier to use. |
-| **Mode switching penalty** | Cost assigned to every mode change. | Raise 0.05→0.20 DKK to reduce chattering around similar prices. |
-| **Minimum mode duration** | How long a chosen mode stays locked. | Raise 30→60 min if the local controller needs more settling time. |
-| **Maximum daily mode transitions** | Daily switching budget. | Lower 4→2 for a quieter, more conservative system. |
-| **Cycle-life reference** | Fallback degradation model denominator. | Set it to the manufacturer-supported cycle rating; it does not change physical battery behavior. |
-| **External price forecast uncertainty** | Conservative error allowance for external price forecasts. | Set 0.25 DKK/kWh if the forecast's MAE is about 0.20; forecast charging is evaluated 0.25 higher and discharge 0.25 lower. |
+| **Cycle-life reference** | Legacy fallback degradation model denominator. | Available only for legacy provider entries. Direct-local entries use an internal default because they lack a trustworthy grid/battery throughput balance. |
+| **External price forecast uncertainty** | Conservative error allowance for external price forecasts. Disabled by default. | Set 0.25 DKK/kWh if the forecast's MAE is about 0.20; forecast charging is evaluated 0.25 higher and discharge 0.25 lower. |
+
+The mode-switching penalty is an internal fixed cost of 0.05 DKK per action
+change. Opportunistic full-charge planning uses a fixed 100% target. Detailed
+throughput, learning, decision
+history, and local-load diagnostic entities are disabled by default; enable
+them from the entity registry when investigating behavior. These settings and
+diagnostics remain out of the default control surface because changing or
+watching them adds tuning surface without improving routine operation.
 
 Change one number at a time. Observe at least several similar tariff days, then
 compare **realized savings**, **equivalent cycles**, forecast error, and the
