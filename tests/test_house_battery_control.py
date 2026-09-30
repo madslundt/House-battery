@@ -464,8 +464,8 @@ def test_configured_grid_isolation_switch_brackets_battery_mode() -> None:
 
     asyncio.run(scenario())
     assert timeline == [
-        ("tcp", "Discharge"),
         ("service", "turn_off"),
+        ("tcp", "Discharge"),
         ("service", "turn_on"),
         ("tcp", "Idle"),
     ]
@@ -516,11 +516,57 @@ def test_unavailable_grid_isolation_inhibits_battery_discharge_without_crashing(
 
     assert success
     assert "discharge inhibited" in result
+    assert direct.calls == [("grid_idle", 20, 90)]
+    assert state.execution_enabled
+
+
+def test_failed_battery_command_stops_output_and_restores_grid_path() -> None:
+    class DirectClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def async_set_limits(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("limits", minimum, maximum))
+
+        async def async_set_grid_idle(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("grid_idle", minimum, maximum))
+
+        async def async_set_mode(
+            self, mode: str, power: int, *, min_soc: int, max_soc: int
+        ) -> None:
+            self.calls.append(("mode", mode, power, min_soc, max_soc))
+            raise RuntimeError("mode write failed")
+
+    states = FakeStates(
+        {"switch.fbp_grid_input": SimpleNamespace(state="on", attributes={})}
+    )
+    services = FakeServices(states)
+    direct = DirectClient()
+    state = runtime()
+    state.execution_enabled = True
+
+    async def save() -> None:
+        return None
+
+    configured = {**config(), CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input"}
+    control = LocalControlAdapter(
+        FakeHass(states, services), lambda: configured, lambda: state, save,
+        lambda: direct,
+    )
+
+    success, _ = asyncio.run(
+        control.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=150
+        )
+    )
+
+    assert not success
     assert direct.calls == [
         ("limits", 20, 90),
         ("mode", "Discharge", 100, 20, 90),
         ("grid_idle", 20, 90),
     ]
+    assert states.get("switch.fbp_grid_input").state == "on"
     assert state.execution_enabled
 
 
@@ -696,6 +742,7 @@ def test_failed_grid_exit_keeps_the_native_reserve_protected() -> None:
             self.calls.append(("mode", mode, power, min_soc, max_soc))
 
     state = runtime()
+    state.execution_enabled = True
     direct = DirectClient()
 
     async def save() -> None:
@@ -716,7 +763,7 @@ def test_failed_grid_exit_keeps_the_native_reserve_protected() -> None:
     assert not success
     assert "local TCP command failed" in result
     assert direct.calls == [("grid_idle", 20, 90)]
-    assert not state.execution_enabled
+    assert state.execution_enabled
 
 
 def test_repeated_direct_command_does_not_consume_transition_budget() -> None:
@@ -903,7 +950,7 @@ def test_enabling_direct_control_keeps_transition_history_as_diagnostics() -> No
     asyncio.run(scenario())
 
 
-def test_restart_disables_persisted_control_without_native_soc_controls() -> None:
+def test_restart_preserves_persisted_control_without_native_soc_controls() -> None:
     async def scenario() -> None:
         from homeassistant.core import HomeAssistant
 
@@ -915,8 +962,8 @@ def test_restart_disables_persisted_control_without_native_soc_controls() -> Non
 
         await coordinator.async_initialize()
 
-        assert not coordinator.runtime.execution_enabled
-        assert store.saved
+        assert coordinator.runtime.execution_enabled
+        assert coordinator._startup_control_gate_reason is not None
 
     asyncio.run(scenario())
 
@@ -942,7 +989,7 @@ def test_direct_restart_preserves_control_until_fresh_telemetry_validates_it() -
     asyncio.run(scenario())
 
 
-def test_transient_local_tcp_loss_pauses_writes_before_latching_control_off() -> None:
+def test_transient_local_tcp_loss_pauses_writes_without_disabling_control() -> None:
     """A short local-network loss must not require manual re-authorisation."""
 
     class UnavailableDirectClient:
@@ -972,7 +1019,6 @@ def test_transient_local_tcp_loss_pauses_writes_before_latching_control_off() ->
 
         async def force_safe(now: datetime) -> str:
             safe_calls.append(now)
-            coordinator.runtime.execution_enabled = False
             return "safe command requested"
 
         coordinator._force_safe_if_needed = force_safe
@@ -995,7 +1041,7 @@ def test_transient_local_tcp_loss_pauses_writes_before_latching_control_off() ->
         degraded = await coordinator._async_update_data()
 
         assert degraded["system_state"] == "DEGRADED"
-        assert not degraded["execution_enabled"]
+        assert degraded["execution_enabled"]
         assert len(safe_calls) == 1
 
     asyncio.run(scenario())

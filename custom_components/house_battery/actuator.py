@@ -195,7 +195,7 @@ class LocalControlAdapter:
             return None
         runtime = self._runtime()
         requested_action = action
-        isolation_confirmed = True
+        isolation_confirmed = False
         grid_restore_confirmed = True
         if action is not Action.BATTERY:
             # Restore the grid path before leaving Battery mode, so the FBP can
@@ -225,25 +225,36 @@ class LocalControlAdapter:
                 # the requested limits and leaving an explicit 0 W slot.
                 direct_command_mode = "Idle"
                 await client.async_set_grid_idle(minimum, maximum)
+            elif action is Action.BATTERY:
+                # Confirm that the grid path is isolated before requesting
+                # battery output. If it is unavailable, stop the inverter in
+                # Grid/Idle and leave automatic control armed for the next
+                # refresh to retry.
+                isolation_confirmed = await self.async_set_grid_isolation(False)
+                if not isolation_confirmed:
+                    direct_command_mode = "Idle"
+                    action = Action.GRID
+                    await client.async_set_grid_idle(minimum, maximum)
+                else:
+                    await client.async_set_limits(minimum, maximum)
+                    power_w = round(
+                        clamp_setpoint_to_device(
+                            discharge_setpoint_below_load(
+                                runtime.settings["discharge_power_w"], load_w
+                            )
+                        )
+                    )
+                    direct_command_mode = "Discharge" if power_w else "Idle"
+                    await client.async_set_mode(
+                        direct_command_mode,
+                        power_w,
+                        min_soc=minimum,
+                        max_soc=maximum,
+                    )
             else:
                 await client.async_set_limits(minimum, maximum)
 
-            if action is Action.BATTERY:
-                power_w = round(
-                    clamp_setpoint_to_device(
-                        discharge_setpoint_below_load(
-                            runtime.settings["discharge_power_w"], load_w
-                        )
-                    )
-                )
-                direct_command_mode = "Discharge" if power_w else "Idle"
-                await client.async_set_mode(
-                    direct_command_mode,
-                    power_w,
-                    min_soc=minimum,
-                    max_soc=maximum,
-                )
-            elif action is Action.CHARGE:
+            if action is Action.CHARGE:
                 direct_command_mode = "Charge"
                 await client.async_set_mode(
                     "Charge",
@@ -251,19 +262,26 @@ class LocalControlAdapter:
                     min_soc=minimum,
                     max_soc=maximum,
                 )
-            if action is Action.BATTERY:
-                # Engage battery mode first so its dedicated off-grid AC output
-                # can take the load, then isolate the grid connection.
-                isolation_confirmed = await self.async_set_grid_isolation(False)
-                if not isolation_confirmed:
-                    # If the plug fails after the mode change, immediately
-                    # restore Grid/Idle to limit the time battery output can
-                    # reach the grid.
-                    direct_command_mode = "Idle"
-                    action = Action.GRID
-                    await client.async_set_grid_idle(minimum, maximum)
         except Exception as exc:
             _LOGGER.exception("Local TCP mode command failed")
+            if requested_action is Action.BATTERY:
+                # If a battery command fails after the grid path was opened,
+                # stop any partially-applied battery output before reconnecting
+                # the grid. Keep authorization armed so the next refresh retries.
+                try:
+                    await client.async_set_grid_idle(minimum, maximum)
+                    direct_command_mode = "Idle"
+                except Exception:
+                    _LOGGER.exception(
+                        "Could not stop battery output after a failed battery command"
+                    )
+                if not await self.async_set_grid_isolation(True):
+                    _LOGGER.warning(
+                        "Could not confirm grid isolation plug restored after "
+                        "failed battery command"
+                    )
+                if self._direct_mode_changed and direct_command_mode == "Idle":
+                    self._direct_mode_changed(direct_command_mode)
             return False, f"local TCP command failed: {exc}"
         if self._direct_mode_changed:
             self._direct_mode_changed(direct_command_mode or _ACTION_TO_MODE[action])
@@ -286,7 +304,7 @@ class LocalControlAdapter:
                 "discharge inhibited and grid/idle mode commanded; "
                 "automatic control remains armed and will retry"
             )
-            return False, result
+            return True, result
         return True, result
 
     async def _set_number(
