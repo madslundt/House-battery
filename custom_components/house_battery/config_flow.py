@@ -13,6 +13,7 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
+    CONF_ACCOUNTING_LOAD_POWER,
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
     CONF_DISCHARGE_POWER_CONTROL,
@@ -112,6 +113,8 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
     defaults = _with_forecast_defaults(defaults)
     fields: dict[Any, Any] = {
         _required(CONF_GRID_AVAILABLE, defaults): _entity(["sensor", "binary_sensor"]),
+        _optional(CONF_GRID_IMPORT_POWER, defaults): _entity("sensor"),
+        _optional(CONF_ACCOUNTING_LOAD_POWER, defaults): _entity("sensor"),
         _required(CONF_PRICE_ENTITIES, defaults): selector.EntitySelector(
             selector.EntitySelectorConfig(
                 domain="sensor", multiple=True

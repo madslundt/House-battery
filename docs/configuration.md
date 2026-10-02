@@ -19,7 +19,8 @@ those known rows.
 | Config-flow field | Expected entity | Notes |
 | --- | --- | --- |
 | Battery-served local load | Local telemetry | Direct-local entries automatically use the complete per-storage off-grid total. Smart-load and backup-load readings remain diagnostics. An incomplete stack total fails closed. Legacy entries bind a load sensor. |
-| Grid import power | Legacy entries: `sensor` (single signed reading: import positive, export negative, or separate import/export entities) | Numeric watts. Required by legacy entries for load balance, accounting, and meter-based zero-export verification. Direct-local entries use battery telemetry and do not bind this field. |
+| Grid import power | Legacy entries: required `sensor`; direct-local entries: optional `sensor` (single signed reading: import positive, export negative, or separate import/export entities) | Numeric watts. A direct-local CT meter enables export detection. Pair it with the whole-house load sensor below for balanced-flow accounting and realized-savings estimates. Battery throughput and tariff valuation use battery telemetry without either binding. |
+| Whole-house load power for accounting | Direct-local entries: optional `sensor` | Numeric watts. Bind this together with the optional CT meter to enable a balanced household savings estimate. It is separate from the battery-served local load used for planning and control. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
 | External price forecast entities | optional ordered `sensor` list | Same row format; each is scored independently; the first usable source that can safely extend the horizon is used for planning. |
@@ -31,7 +32,10 @@ readbacks come from the direct connection. The native SOC values are read-only
 diagnostics; House Battery still writes validated limits through its local
 adapter. Direct-local battery charge/output power comes from battery telemetry.
 Legacy entries with external battery providers derive battery flow from load,
-grid, and SOC balance.
+grid, and SOC balance. Direct-local entries use measured battery charge/output
+telemetry for throughput and tariff valuation; an optional whole-house CT meter
+and whole-house load sensor together add the balance needed for realized-savings
+accounting.
 
 ## Grid availability is not grid use
 

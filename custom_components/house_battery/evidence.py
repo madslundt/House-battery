@@ -43,12 +43,28 @@ class EvidenceCollector:
         self._session_energy_wh = 0.0
 
     async def async_observe(
-        self, now: datetime, price: float | None, action: Action, soc: float
+        self,
+        now: datetime,
+        price: float | None,
+        action: Action,
+        soc: float,
+        battery_charge_power_w: float | None = None,
+        battery_discharge_power_w: float | None = None,
+        battery_learning_enabled: bool = True,
     ) -> None:
         flow = self._flow()
         await self._learn_load(now, self._load_power())
-        await self._learn_battery(now, action, soc, flow)
-        await self._account(now, price, action, soc, flow)
+        if battery_learning_enabled:
+            await self._learn_battery(now, action, soc, flow)
+        await self._account(
+            now,
+            price,
+            action,
+            soc,
+            flow,
+            battery_charge_power_w,
+            battery_discharge_power_w,
+        )
 
     async def _learn_load(self, now: datetime, watts: float | None) -> None:
         """Learn connected load independently of grid/battery-flow evidence."""
@@ -83,6 +99,8 @@ class EvidenceCollector:
         action: Action,
         soc: float,
         flow: PowerFlowSnapshot | None,
+        battery_charge_power_w: float | None,
+        battery_discharge_power_w: float | None,
     ) -> None:
         runtime = self._runtime()
         bucket = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
@@ -93,9 +111,10 @@ class EvidenceCollector:
             )
             self._accumulator = None
             await self._save()
-        # Without a canonical flow there is no trustworthy load/grid/battery
-        # balance, so skip this refresh entirely rather than recording zeros.
-        if flow is None or not flow.flow_available:
+        flow_available = flow is not None and flow.flow_available
+        if not flow_available and (
+            battery_charge_power_w is None or battery_discharge_power_w is None
+        ):
             return
         if self._accumulator is None:
             self._accumulator = IntervalAccumulator(bucket)
@@ -108,16 +127,27 @@ class EvidenceCollector:
             else 0
         )
         self._last_sample_at = now
+        charge_w = (
+            flow.battery_charge_power_w
+            if flow_available and battery_charge_power_w is None
+            else battery_charge_power_w
+        )
+        discharge_w = (
+            flow.battery_output_power_w
+            if flow_available and battery_discharge_power_w is None
+            else battery_discharge_power_w
+        )
         self._accumulator.add(
             seconds=elapsed,
-            load_w=flow.load_w,
-            grid_power_w=flow.grid_power_w,
+            load_w=flow.load_w if flow_available else 0.0,
+            grid_power_w=flow.grid_power_w if flow_available else 0.0,
             grid_sign=GRID_POWER_IMPORT_POSITIVE,
-            charge_w=flow.battery_charge_power_w,
-            discharge_w=flow.battery_output_power_w,
+            charge_w=charge_w or 0.0,
+            discharge_w=discharge_w or 0.0,
             price=price,
-            soc=flow.soc,
+            soc=flow.soc if flow_available else soc,
             action=action,
+            flow_available=flow_available,
         )
 
     async def _learn_battery(

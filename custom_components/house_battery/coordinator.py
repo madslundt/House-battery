@@ -19,6 +19,7 @@ from homeassistant.util import dt as dt_util
 from .accounting import calendar_period_bounds
 from .actuator import LocalControlAdapter, soc_control_problems
 from .const import (
+    CONF_ACCOUNTING_LOAD_POWER,
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
@@ -80,6 +81,7 @@ from .models import (
     PowerFlowSnapshot,
     PriceSlot,
     derive_power_flow,
+    normalize_grid_flow,
 )
 from .planner import optimize
 from .policy import (
@@ -224,9 +226,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self.hass.states.get(entity_id) if entity_id else None
 
     def _float(self, key: str, default: float | None = None) -> float | None:
-        # For a direct-local entry only SOC comes from the TCP snapshot. Load
-        # and grid flow are read from the canonical PowerFlowSnapshot, and the
-        # raw device charge/discharge values are diagnostics, not model inputs.
+        # For a direct-local entry, SOC and battery-served load come from the
+        # TCP snapshot. Optional whole-house measurements are read from HA.
         if self.is_direct_local and self._local_snapshot is not None and key == CONF_SOC:
             return self._local_snapshot.soc
         state = self._state(key)
@@ -293,20 +294,24 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Build the canonical load-vs-grid flow for this refresh.
 
         Legacy HA-entity entries have measured load and grid inputs, so battery
-        flow can be inferred from their balance. Direct-local FBP1200 entries
-        have no CT meter; their zero meter value cannot establish grid flow, so
-        they do not produce a canonical balanced-flow sample.
+        flow can be inferred from their balance. Direct-local entries only have
+        a balanced household sample when independent whole-house load and grid
+        meter entities are both configured.
         """
         now = datetime.now(UTC)
         if self.is_direct_local:
-            # The FBP1200 direct-local path has no CT meter:
-            # MeterTotalActivePower is reported as 0 W even when the grid is
-            # feeding the house. Load minus that value would invent battery
-            # output, so no balanced grid/battery flow is available here.
-            return None
+            # MeterTotalActivePower is not a whole-house grid meter. Only use
+            # balanced flow when both independent household measurements are
+            # explicitly bound; local off-grid load remains the planner input.
+            if not self.config.get(CONF_GRID_IMPORT_POWER) or not self.config.get(
+                CONF_ACCOUNTING_LOAD_POWER
+            ):
+                return None
         return derive_power_flow(
             self._float(CONF_SOC),
-            self._float(CONF_LOAD_POWER),
+            self._float(CONF_ACCOUNTING_LOAD_POWER)
+            if self.is_direct_local
+            else self._float(CONF_LOAD_POWER),
             self._float(CONF_GRID_IMPORT_POWER),
             timestamp=now,
         )
@@ -318,12 +323,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         The ``power_source`` sensor is a read-only indicator of physical reality.
         For a legacy (HA-entity) entry the canonical load-vs-grid balance is the
-        correct source. For a direct-local entry there is no CT meter, so the grid
-        meter always reads 0 and the derived load-minus-grid balance cannot tell
-        whether the grid or the battery serves the load (it would label every
-        loaded grid-tied moment as ``battery``). The raw reported charge/discharge
-        power reliably indicate physical direction for this device, so classify
-        from those instead. ``off`` means idle with no connected load; ``None``
+        correct source. Direct-local entries classify from reported
+        charge/discharge power so displayed activity stays independent from the
+        requested mode. ``off`` means idle with no connected load; ``None``
         means the sample is unavailable.
         """
         if self.is_direct_local and self._local_snapshot is not None:
@@ -832,15 +834,56 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         action = self._observed_action()
         grid_available = self._grid_available()
         price = self._current_price(slots, now)
-        if soc is not None and not direct_load_problem:
-            await self.evidence.async_observe(now, price, action, soc)
+        actual_charge_power = (
+            self._local_snapshot.raw_reported_charge_power_w
+            if self.is_direct_local and self._local_snapshot is not None
+            else self.power_flow.battery_charge_power_w
+            if self.power_flow is not None
+            else None
+        )
+        actual_discharge_power = (
+            self._local_snapshot.raw_reported_output_power_w
+            if self.is_direct_local and self._local_snapshot is not None
+            else self.power_flow.battery_output_power_w
+            if self.power_flow is not None
+            else None
+        )
+        local_now = dt_util.as_local(now)
+        actual_history_should_save = self.runtime.actual_history.record(
+            local_now,
+            soc,
+            actual_charge_power,
+            actual_discharge_power,
+            price,
+        )
+        if soc is not None:
+            await self.evidence.async_observe(
+                now,
+                price,
+                action,
+                soc,
+                battery_charge_power_w=actual_charge_power,
+                battery_discharge_power_w=actual_discharge_power,
+                battery_learning_enabled=not self.is_direct_local,
+            )
 
         # The grid meter is the authoritative zero-export safety signal. Export
         # is only ever observed, never commanded; a large or persistent export
         # while automatic control is enabled fails the optimizer safe and
         # disables writes. The hysteresis between ``FLOW_NOISE_FLOOR_W`` and
         # ``EXPORT_SAFETY_W`` keeps a few-watt meter fluctuation from latching.
-        export_w = self.power_flow.grid_export_w if self.power_flow else None
+        direct_grid_power = (
+            self._float(CONF_GRID_IMPORT_POWER)
+            if self.is_direct_local and self.config.get(CONF_GRID_IMPORT_POWER)
+            else None
+        )
+        export_w = (
+            self.power_flow.grid_export_w
+            if self.power_flow
+            else normalize_grid_flow(direct_grid_power)[1]
+            if direct_grid_power is not None
+            else None
+        )
         export_detected = (
             export_w > FLOW_NOISE_FLOOR_W if export_w is not None else None
         )
@@ -1037,6 +1080,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             decision_changed
             or self._forecast_evidence_changed
             or self._daily_plan_dirty
+            or actual_history_should_save
         ):
             # RuntimeStore writes atomically, so persisting the whole runtime
             # publishes the reconciled daily plan without risk of a partial
@@ -1045,7 +1089,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.store.save(self.runtime)
             self._daily_plan_dirty = False
 
-        local_now = dt_util.as_local(now)
         periods = {
             name: self.runtime.ledger.totals_between(
                 start.astimezone(UTC), end.astimezone(UTC)
@@ -1093,19 +1136,40 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         load_power = flow.load_w if flow else self._load_power()
         battery_charge_power = (
-            flow.battery_charge_power_w if flow else raw_charge_power
+            raw_charge_power
+            if local_snapshot is not None
+            else flow.battery_charge_power_w if flow else None
         )
         battery_output_power = (
-            flow.battery_output_power_w if flow else raw_output_power
+            raw_output_power
+            if local_snapshot is not None
+            else flow.battery_output_power_w if flow else None
         )
         battery_power = (
-            flow.battery_net_power_w
+            raw_output_power - raw_charge_power
+            if local_snapshot is not None
+            and raw_output_power is not None
+            and raw_charge_power is not None
+            else flow.battery_net_power_w if flow else None
+        )
+        grid_power = (
+            flow.grid_power_w
             if flow
-            else (
-                raw_output_power - raw_charge_power
-                if raw_output_power is not None and raw_charge_power is not None
-                else None
-            )
+            else direct_grid_power
+        )
+        grid_import_power = (
+            flow.grid_import_w
+            if flow
+            else normalize_grid_flow(direct_grid_power)[0]
+            if direct_grid_power is not None
+            else None
+        )
+        grid_export_power = (
+            flow.grid_export_w
+            if flow
+            else normalize_grid_flow(direct_grid_power)[1]
+            if direct_grid_power is not None
+            else None
         )
         data = {
             "system_state": state,
@@ -1121,13 +1185,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "grid_available": grid_available,
             "command_result": command_result,
             "soc": soc,
-            # Legacy HA-entity entries use a measured load/grid balance. Direct
-            # local entries have no CT meter, so their battery sensors use raw
-            # device telemetry while grid flow remains unavailable.
+            # Direct-local battery sensors always use device telemetry. Its
+            # optional independent grid meter supplies whole-house accounting.
             "load_power_w": load_power,
-            "grid_flow_power_w": flow.grid_power_w if flow else None,
-            "grid_import_power_w": flow.grid_import_w if flow else None,
-            "grid_export_power_w": flow.grid_export_w if flow else None,
+            "grid_flow_power_w": grid_power,
+            "grid_import_power_w": grid_import_power,
+            "grid_export_power_w": grid_export_power,
             "battery_power_w": battery_power,
             "battery_charge_power_w": battery_charge_power,
             "battery_output_power_w": battery_output_power,
@@ -1215,10 +1278,23 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.plan.terminal_price_dkk_per_kwh if self.plan else None
                 ),
             ),
+            "actual_history_date": local_now.date().isoformat(),
+            "actual_history_blocks": self.runtime.actual_history.today(local_now),
+            "actual_history_days_available": sorted(
+                self.runtime.actual_history.days
+            ),
             **periods,
             "lifetime_charge_kwh": self.runtime.ledger.total_charge_kwh,
             "lifetime_discharge_kwh": self.runtime.ledger.total_discharge_kwh,
-            "lifetime_net_savings_dkk": self.runtime.ledger.total_net_savings_dkk,
+            "lifetime_charge_cost_dkk": self.runtime.ledger.total_charge_cost_dkk,
+            "lifetime_discharge_value_dkk": (
+                self.runtime.ledger.total_discharge_value_dkk
+            ),
+            "lifetime_net_savings_dkk": (
+                self.runtime.ledger.total_net_savings_dkk
+                if self.runtime.ledger.savings_intervals
+                else None
+            ),
             "equivalent_full_cycles": equivalent_cycles,
             "estimated_degradation_pct": degradation_pct,
             "estimated_remaining_capacity_pct": 100 - degradation_pct,

@@ -8,6 +8,7 @@ from typing import Any
 
 from homeassistant.helpers.storage import Store
 
+from .actual_history import ActualDailyHistory
 from .accounting import EnergyLedger
 from .const import DEFAULT_SETTINGS, DOMAIN, STORAGE_KEY, STORAGE_VERSION
 from .dailyplan import DailyPlan
@@ -24,6 +25,7 @@ class RuntimeState:
     load_learner_source: str | None = None
     battery_learner: BatteryLearner = field(default_factory=BatteryLearner)
     ledger: EnergyLedger = field(default_factory=EnergyLedger)
+    actual_history: ActualDailyHistory = field(default_factory=ActualDailyHistory)
     decisions: list[dict[str, Any]] = field(default_factory=list)
     scheduled_loads: list[dict[str, Any]] = field(default_factory=list)
     execution_enabled: bool = False
@@ -75,12 +77,13 @@ class RuntimeState:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "settings": self.settings,
             "load_learner": self.load_learner.as_dict(),
             "load_learner_source": self.load_learner_source,
             "battery_learner": self.battery_learner.as_dict(),
             "ledger": self.ledger.as_dict(),
+            "actual_history": self.actual_history.as_dict(),
             "decisions": self.decisions[-500:],
             "scheduled_loads": self.scheduled_loads,
             "execution_enabled": self.execution_enabled,
@@ -110,6 +113,7 @@ class RuntimeState:
             "load_model": self.load_learner.as_dict(),
             "battery_model": self.battery_learner.as_dict(),
             "ledger": self.ledger.as_dict(),
+            "actual_history": self.actual_history.as_dict(),
             "decisions": self.decisions,
             "scheduled_loads": self.scheduled_loads,
             "forecast": {
@@ -163,6 +167,7 @@ class RuntimeState:
                 if is_legacy
                 else EnergyLedger.from_dict(data.get("ledger", {}))
             ),
+            actual_history=ActualDailyHistory.from_dict(data.get("actual_history", {})),
             decisions=list(data.get("decisions", []))[-500:],
             scheduled_loads=list(data.get("scheduled_loads", [])),
             execution_enabled=bool(data.get("execution_enabled", False)),

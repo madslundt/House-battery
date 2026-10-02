@@ -54,6 +54,11 @@ external optimizer.
   estimates.
 - Expected and realized savings, throughput, cycles, estimated degradation,
   decision history, diagnostics, and JSON evidence export.
+- Measured battery charge/discharge energy and tariff-weighted prices, plus a
+  persisted daily timeline of actual SOC and battery activity for comparison
+  with the operation plan.
+- Optional whole-house CT-meter and load-sensor bindings for balanced grid
+  accounting and realized-savings estimates on direct-local battery entries.
 - Independent **Grid available** status, which means on-grid supply exists —
   never merely that the load is currently importing power.
 - A commissioning gate and separate **Automatic control** switch. Every new

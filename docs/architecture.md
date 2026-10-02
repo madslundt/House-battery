@@ -81,24 +81,25 @@ above reserve receives a terminal value based on the latter part of the known
 horizon, preventing the planner from emptying a useful battery solely because
 the horizon ends.
 
-### The power-flow model: battery flow is derived, never read from the device
+### Battery telemetry and balanced household flow
 
-The FBP1200 reports raw charge/output power in its EMS registers, but those
-figures include converter loss and are not a trustworthy measure of energy
-actually moving in or out of the cells. The integration therefore does not feed
-any device-reported charge/discharge power into planning, accounting, or
-learning. Instead it computes a canonical power flow every refresh from three
-first-class inputs:
+The FBP1200 reports charge/output power in its EMS registers. House Battery
+uses those readings as estimated battery throughput and in the persisted actual
+activity timeline; it does not use them for battery-capacity or efficiency
+learning. A separate canonical household flow is computed when an independent
+whole-house load measurement and grid meter are both available:
 
-- connected-load power (from the configured load entity),
+- whole-house load power (from the optional accounting-load entity for
+  direct-local entries, or the configured load entity for legacy entries),
 - grid power (signed at the grid meter: positive import, negative export), and
 - the battery SOC.
 
-Battery charge power is what the load *isn't* taking from the grid-plus-battery
-sum while SOC is rising; battery output power is the residual the battery
-supplies when load exceeds grid import. The raw device charge/output powers are
-kept as diagnostics only (`battery_charge_power_w` / `battery_output_power_w`
-downstream of the device) and are exposed for inspection, never for control.
+Battery charge/output energy is paired with the known interval price to report
+weighted average charge price, charge cost, discharge value, and actual
+charge/discharge/idle blocks with observed SOC. These are battery telemetry
+estimates. Balanced whole-house flow is still required for measured realized
+savings. Direct-local entries need both a CT meter and a whole-house load
+entity for that calculation; the CT meter alone enables export monitoring.
 
 ### Zero export enforcement
 
@@ -144,14 +145,15 @@ and forecast-only opportunities cannot activate it.
 
 ## Accounting and degradation
 
-The evidence ledger is updated in 15-minute intervals from sampled observed
-connected-load power, grid power (decomposed into import and export), the
-derived battery charge/output power, SOC, the current price, and the
-optimizer's current action. It records estimated realized savings and
-charge/discharge energy for today, month, and lifetime. Forecast load and future
-plan values are not treated as observed ledger inputs. Export is reported in the
+The evidence ledger is updated in 15-minute intervals. Direct-local battery
+telemetry supplies charge/discharge energy and its interval-price valuation;
+legacy entries use their balanced measured flow. A complete load/grid balance
+is required before realized savings are recorded. Forecast load and future plan
+values are not treated as observed ledger inputs. Export is reported in the
 ledger but never credited: exported energy is not valued as avoided import
-because there is no export contract to settle against.
+because there is no export contract to settle against. Separately, the actual
+daily history coalesces measured charging, discharging, and idle samples into
+blocks with SOC start/end/range and energy totals, retaining eight local days.
 
 Equivalent full cycles are lifetime battery discharge energy divided by usable
 capacity. Estimated degradation is applied to discharged energy through the

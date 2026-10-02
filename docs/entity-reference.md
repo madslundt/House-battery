@@ -32,14 +32,15 @@ local TCP or command failures.
 | **Battery state of charge** | Current usable battery percentage reported directly by the battery. |
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
 | **Local load diagnostics** | Direct-local entries only. Comparison of the FOSSiBOT whole-site meter, smart-load total, backup-load total, and every storage unit's off-grid reading. The complete per-storage off-grid total is automatically used for learning, planning, and automatic control; incomplete stack data fails closed. |
-| **Grid import power** | Current whole-site power bought from the grid; used for evidence and accounting when a measured grid input is configured. Unavailable for direct-local FBP1200 entries without a CT meter. |
+| **Grid import power** | Current whole-site power bought from the grid; used for balanced evidence, export monitoring, and realized savings when paired with a whole-house load sensor. Optional for direct-local FBP1200 entries. |
 | **Grid export power** | Whole-site power sent to the grid. Requires a measured grid meter; direct-local FBP1200 entries without a CT meter cannot report it. |
-| **Battery output power** | Legacy entries infer battery output from the measured load/grid balance. Direct-local entries show the inverter's reported battery output, which is useful for current activity but is not used for accounting or learning. Battery-flow accounting and learning require a measured grid balance. |
+| **Battery output power** | Legacy entries infer battery output from the measured load/grid balance. Direct-local entries show the inverter's reported output, used for throughput accounting and actual-use history. A CT meter and whole-house load sensor are needed for balanced realized-savings accounting. |
 | **Power source** | Where the load is served from right now: `charging` (battery charging), `battery` (battery serving load), `grid` (battery idle while load is present), or `off` (no measured load). Legacy entries use the load/grid balance; direct-local entries use reported battery direction. |
 | **Native minimum/maximum SOC** | Read-only diagnostics for the battery's hardware SOC registers. | House Battery validates and writes limits through its local adapter; these sensors show the latest readback. |
 | **Current electricity price** | Price for the current known price interval. |
 | **Expected plan savings** | Forecast saving across the current planning horizon (known prices plus any enabled, valid extension) versus buying expected load from grid. It is a forecast, not cash earned. |
-| **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Direct-local FBP1200 entries without a CT meter cannot record balanced grid/battery savings. Compare matching tariff periods, not one unusual day. |
+| **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Direct-local FBP1200 entries need both a CT meter and whole-house load sensor for balanced grid/battery savings. Compare matching tariff periods, not one unusual day. |
+| **Average charge price / discharge value** | Energy-weighted known tariff for charge/discharge energy estimated by integrating reported battery power. Corresponding DKK cost/value totals are available. These are battery-energy tariff estimates, not a complete household bill calculation. |
 | **Known price spread** | Highest minus lowest price in the known future horizon. |
 | **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before battery cycling is worthwhile. |
 | **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary opportunistic ceiling. |
@@ -55,7 +56,7 @@ known expensive window has enough forecast load to use the extra energy. With
 
 | Entity | Plain-language description |
 | --- | --- |
-| **Battery charge/discharge today/month/total** | Energy moved into/out of the battery when a measured flow balance is available. Direct-local entries without a CT meter do not add unverified throughput. These are throughput counters, not grid-meter billing totals. |
+| **Battery charge/discharge today/month/total** | Energy estimated by integrating measured battery charge/output telemetry. These are throughput estimates, not grid-meter billing totals. |
 | **Equivalent full cycles** | Lifetime discharged energy divided by usable capacity. One 1.958 kWh discharge is roughly one equivalent cycle. |
 | **Estimated battery degradation** | Capacity loss estimated from learned capacity when available, otherwise from cycle-life reference. It is not a BMS warranty value. |
 | **Estimated remaining capacity** | 100% minus the estimated degradation. |
@@ -77,6 +78,7 @@ SOC calibration; do not assume a warranty issue from this estimate alone.
 | Entity | What to inspect |
 | --- | --- |
 | **Operation plan** | `blocks` attribute: contiguous start/end times, action, expected savings, energy, SOC start/end, and reason. Also exposes baseline cost, expected cost, terminal price, and horizon length. |
+| **Actual battery history** | Measured charge/discharge/idle blocks with start/end time and SOC start/end/min/max; energy is estimated by integrating reported battery power. The sensor exposes today; `export_data` retains up to eight local days. The timeline is based on physical telemetry, not the plan or commanded mode. |
 | **Decision history** | Recent state/reason changes with timestamp, SOC, price, action, and command result. Use it to explain why the plan changed. |
 | **Current plan slot** | Its state is the current planner action. Attributes include the active executable price interval, planned load, grid import, charge/discharge energy, SOC path, price provenance, conservative forecast buffer, costs, and reason. | Use this entity for the current action and its supporting evidence; the separate **Operation plan** contains the full-day timeline. |
 | **Planned load power** | Average connected-load forecast for the active plan slot, including scheduled loads. | Compare it with **Connected load power** over matching intervals to find systematic forecast bias. |

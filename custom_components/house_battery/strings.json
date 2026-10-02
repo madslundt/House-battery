@@ -29,9 +29,10 @@
       },
       "household": {
         "title": "Connect household and tariff data",
-        "description": "Battery telemetry, controls, and estimated load are created directly from the local connection. Select the independent grid and tariff sources.",
+        "description": "Battery telemetry, controls, and connected load are created directly from the local connection. Select grid availability and known tariff sources; bind both whole-house load and grid-meter sensors to enable balanced savings accounting.",
         "data": {
-          "grid_import_power_entity": "Grid import power",
+          "grid_import_power_entity": "Whole-house grid import power / CT meter (optional)",
+          "accounting_load_power_entity": "Whole-house load power for savings accounting (optional)",
           "grid_available_entity": "Grid available / on-grid state",
           "price_entities": "Known electricity-price entities",
           "price_forecast_entities": "External price forecast entities (optional, ordered)",
@@ -51,7 +52,8 @@
         "data": {
           "soc_entity": "Battery state of charge",
           "load_power_entity": "Connected/house load power",
-          "grid_import_power_entity": "Grid import power",
+          "grid_import_power_entity": "Whole-house grid import power / CT meter (optional)",
+          "accounting_load_power_entity": "Whole-house load power for savings accounting (optional)",
           "grid_available_entity": "Grid available / on-grid state",
           "operating_mode_entity": "Battery Operating Mode",
           "price_entities": "Known electricity-price entities",

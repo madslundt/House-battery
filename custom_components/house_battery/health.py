@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from .const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
+    CONF_ACCOUNTING_LOAD_POWER,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
@@ -66,7 +67,9 @@ def get_health_problems(
     # binary template that only reports on change, so requiring repeated `on`
     # reports would disable a healthy direct battery after five minutes.
     freshness_keys = (
-        (CONF_GRID_IMPORT_POWER,) if config.get("host") else _PHYSICAL
+        (CONF_GRID_IMPORT_POWER, CONF_ACCOUNTING_LOAD_POWER)
+        if config.get("host")
+        else _PHYSICAL
     )
     for key in freshness_keys:
         if (entity_id := config.get(key)) and (value := hass.states.get(entity_id)):

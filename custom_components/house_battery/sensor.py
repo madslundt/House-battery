@@ -184,7 +184,7 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
+        enabled_by_default=True,
     ),
     FbpSensorDescription(
         key="yesterday_charge_kwh",
@@ -216,7 +216,39 @@ SENSORS = (
         icon="mdi:battery-arrow-down",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
+        enabled_by_default=True,
+    ),
+    FbpSensorDescription(
+        key="today_charge_price_dkk_per_kwh",
+        name="Average battery charge price today",
+        icon="mdi:cash-minus",
+        unit="DKK/kWh",
+        precision=3,
+        enabled_by_default=True,
+    ),
+    FbpSensorDescription(
+        key="today_discharge_price_dkk_per_kwh",
+        name="Average battery discharge value today",
+        icon="mdi:cash-plus",
+        unit="DKK/kWh",
+        precision=3,
+        enabled_by_default=True,
+    ),
+    FbpSensorDescription(
+        key="today_charge_cost_dkk",
+        name="Battery charge cost today",
+        icon="mdi:cash-minus",
+        unit="DKK",
+        precision=2,
+        enabled_by_default=True,
+    ),
+    FbpSensorDescription(
+        key="today_discharge_value_dkk",
+        name="Battery discharge value today",
+        icon="mdi:cash-plus",
+        unit="DKK",
+        precision=2,
+        enabled_by_default=True,
     ),
     FbpSensorDescription(
         key="month_charge_kwh",
@@ -259,6 +291,22 @@ SENSORS = (
         precision=3,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    FbpSensorDescription(
+        key="lifetime_charge_cost_dkk",
+        name="Recorded battery charge cost total",
+        icon="mdi:cash-minus",
+        unit="DKK",
+        precision=2,
+        enabled_by_default=False,
+    ),
+    FbpSensorDescription(
+        key="lifetime_discharge_value_dkk",
+        name="Recorded battery discharge value total",
+        icon="mdi:cash-plus",
+        unit="DKK",
+        precision=2,
+        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="equivalent_full_cycles",
@@ -346,6 +394,7 @@ async def async_setup_entry(
             FbpPowerSourceSensor(coordinator),
             FbpPlanSensor(coordinator),
             FbpCurrentPlanSlotSensor(coordinator),
+            FbpActualHistorySensor(coordinator),
             FbpPlanExecutionSensor(coordinator),
             FbpPlannedLoadPowerSensor(coordinator),
             FbpStoragePolicySensor(coordinator),
@@ -552,6 +601,37 @@ class FbpPlanSensor(Fbp1200Entity, SensorEntity):
             )
             if plan
             else None,
+        }
+
+
+class FbpActualHistorySensor(Fbp1200Entity, SensorEntity):
+    """Expose what battery telemetry reports actually happened today."""
+
+    _attr_name = "Actual battery history"
+    _attr_icon = "mdi:timeline-check-outline"
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "actual_battery_history")
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.data.get("actual_history_date")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "date": self.coordinator.data.get("actual_history_date"),
+            "blocks": self.coordinator.data.get("actual_history_blocks", []),
+            "days_available": self.coordinator.data.get(
+                "actual_history_days_available", []
+            ),
+            "last_sample_at": self.coordinator.runtime.actual_history.last_sample_at,
+            "sample_count": self.coordinator.runtime.actual_history.sample_count,
+            "meaning": (
+                "Activity and SOC come from battery telemetry. Energy is estimated "
+                "by integrating reported charge/output power. This records physical "
+                "behavior rather than the commanded mode or optimization plan."
+            ),
         }
 
 
