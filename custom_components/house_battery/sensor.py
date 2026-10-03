@@ -399,6 +399,7 @@ async def async_setup_entry(
             FbpPlannedLoadPowerSensor(coordinator),
             FbpStoragePolicySensor(coordinator),
             FbpBatteryLearningSensor(coordinator),
+            FbpMeasuredRoundTripEfficiencySensor(coordinator),
             FbpPriceForecastAccuracySensor(coordinator),
             FbpDecisionHistorySensor(coordinator),
             *(
@@ -862,6 +863,51 @@ class FbpBatteryLearningSensor(Fbp1200Entity, SensorEntity):
             "learned_efficiency_pct",
         )
         return {key: self.coordinator.data.get(key) for key in keys}
+
+
+class FbpMeasuredRoundTripEfficiencySensor(Fbp1200Entity, SensorEntity):
+    """Report measured energy-out/in efficiency for user comparison only."""
+
+    _attr_name = "Measured round-trip efficiency"
+    _attr_icon = "mdi:battery-sync-outline"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_suggested_display_precision = 1
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = True
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "measured_round_trip_efficiency")
+
+    @property
+    def native_value(self) -> float | None:
+        summary = self.coordinator.data.get("measured_round_trip_efficiency", {})
+        value = summary.get("efficiency_pct") if isinstance(summary, dict) else None
+        return round(value, 1) if isinstance(value, (int, float)) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        summary = self.coordinator.data.get("measured_round_trip_efficiency", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        return {
+            "status": summary.get("status", "unavailable"),
+            "configured_fallback_efficiency_pct": summary.get(
+                "configured_efficiency_pct"
+            ),
+            "charge_energy_kwh": summary.get("charge_kwh"),
+            "discharge_energy_kwh": summary.get("discharge_kwh"),
+            "soc_start": summary.get("soc_start"),
+            "soc_end": summary.get("soc_end"),
+            "soc_change_pct_points": summary.get("soc_change_pct_points"),
+            "window_start": summary.get("window_start"),
+            "window_end": summary.get("window_end"),
+            "note": (
+                "Diagnostic only: discharge energy divided by charge energy over "
+                "the recent seven-day window, reported only when boundary SOC "
+                "differs by at most 5 percentage points. The planner does not use "
+                "this estimate."
+            ),
+        }
 
 
 class FbpPriceForecastAccuracySensor(Fbp1200Entity, SensorEntity):

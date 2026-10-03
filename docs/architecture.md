@@ -101,6 +101,11 @@ estimates. Balanced whole-house flow is still required for measured realized
 savings. Direct-local entries need both a CT meter and a whole-house load
 entity for that calculation; the CT meter alone enables export monitoring.
 
+The **Measured round-trip efficiency** diagnostic divides recent measured
+discharge energy by charge energy when the seven-day window starts and ends
+within five SOC percentage points. It is kept separate from the planner's
+efficiency input and exists only for comparison with the configured fallback.
+
 ### Zero export enforcement
 
 The control method depends on the available hardware feedback:

@@ -849,6 +849,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             else None
         )
         local_now = dt_util.as_local(now)
+        round_trip_summary = self.runtime.actual_history.round_trip_summary(local_now)
+        round_trip_summary["configured_efficiency_pct"] = self.runtime.settings[
+            "round_trip_efficiency"
+        ]
         actual_history_should_save = self.runtime.actual_history.record(
             local_now,
             soc,
@@ -1280,6 +1284,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             "actual_history_date": local_now.date().isoformat(),
             "actual_history_blocks": self.runtime.actual_history.today(local_now),
+            "measured_round_trip_efficiency": round_trip_summary,
             "actual_history_days_available": sorted(
                 self.runtime.actual_history.days
             ),

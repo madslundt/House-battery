@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import Any
 
@@ -107,6 +107,63 @@ class ActualDailyHistory:
         """Return a detached view of today's measured blocks."""
         return [dict(block) for block in self.days.get(now.date().isoformat(), [])]
 
+    def round_trip_summary(self, now: datetime) -> dict[str, Any]:
+        """Estimate AC-side round-trip efficiency over a SOC-balanced window.
+
+        The estimate uses measured charge and discharge telemetry from the last
+        seven calendar days. It is only reported when the window starts and
+        ends at nearly the same SOC, so a net change in stored energy does not
+        dominate the energy ratio.
+        """
+        first_day = (now.date() - timedelta(days=6)).isoformat()
+        recent_days = [
+            (day, blocks)
+            for day, blocks in sorted(self.days.items())
+            if first_day <= day <= now.date().isoformat() and blocks
+        ]
+        blocks = [block for _, day_blocks in recent_days for block in day_blocks]
+        charge_kwh = sum(_nonnegative(block.get("charge_kwh")) or 0 for block in blocks)
+        discharge_kwh = sum(
+            _nonnegative(block.get("discharge_kwh")) or 0 for block in blocks
+        )
+        start_soc = _optional_number(blocks[0].get("soc_start")) if blocks else None
+        end_soc = _optional_number(blocks[-1].get("soc_end")) if blocks else None
+        soc_change = (
+            end_soc - start_soc
+            if start_soc is not None and end_soc is not None
+            else None
+        )
+        efficiency = None
+        status = "insufficient_energy"
+        if not blocks:
+            status = "no_recent_measurements"
+        elif charge_kwh <= 0 or discharge_kwh <= 0:
+            status = "insufficient_energy"
+        elif soc_change is None:
+            status = "soc_unavailable"
+        elif abs(soc_change) > 5:
+            status = "soc_window_unbalanced"
+        else:
+            candidate = discharge_kwh / charge_kwh
+            if 0.5 <= candidate <= 1.0:
+                efficiency = candidate * 100
+                status = "ready"
+            else:
+                status = "outside_expected_range"
+        return {
+            "efficiency_pct": efficiency,
+            "charge_kwh": round(charge_kwh, 3),
+            "discharge_kwh": round(discharge_kwh, 3),
+            "soc_start": start_soc,
+            "soc_end": end_soc,
+            "soc_change_pct_points": (
+                round(soc_change, 2) if soc_change is not None else None
+            ),
+            "window_start": recent_days[0][0] if recent_days else None,
+            "window_end": recent_days[-1][0] if recent_days else None,
+            "status": status,
+        }
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ActualDailyHistory:
         """Restore a saved history while discarding malformed entries."""
@@ -153,3 +210,11 @@ def _activity(charge_w: float | None, discharge_w: float | None) -> str:
     if discharge_w >= 10:
         return "discharging"
     return "idle"
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if isfinite(number) else None

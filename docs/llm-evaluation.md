@@ -41,7 +41,7 @@ Keep the usual House Battery telemetry at a 1 to 15 minute cadence:
 | Plan and its inputs | **Operation plan**, **Current plan slot**, **Planned load power**, **Current electricity price**, **Extra storage policy**, **Effective charge target SOC** |
 | Physical outcome | **Battery state of charge**, **Connected load power**, **Grid import power**, **Battery charge power**, **Battery discharge power** |
 | Aggregate economics | **Expected plan savings**, all **Estimated realized savings** periods, battery charge/discharge counters, **Equivalent full cycles**, and **Estimated battery degradation** |
-| Model quality | **Load learning coverage**, **Load forecast mean absolute error**, **Battery learning**, **Learned usable capacity**, **Learned round-trip efficiency**, and **External price forecast accuracy** |
+| Model quality | **Load learning coverage**, **Load forecast mean absolute error**, **Battery learning**, **Learned usable capacity**, **Learned round-trip efficiency**, **Measured round-trip efficiency**, and **External price forecast accuracy** |
 
 Retain the attributes of **Current plan slot** and **Plan execution**. The
 former is the current planner action and identifies the information used for

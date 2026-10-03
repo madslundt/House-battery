@@ -62,6 +62,7 @@ known expensive window has enough forecast load to use the extra energy. With
 | **Estimated remaining capacity** | 100% minus the estimated degradation. |
 | **Learned usable capacity** | Capacity inferred from sufficiently stable charge/discharge observations. |
 | **Learned round-trip efficiency** | Measured energy-out versus energy-in estimate once enough stable samples exist. |
+| **Measured round-trip efficiency** | Read-only comparison estimate from measured charge and discharge energy over the recent seven-day window. It is shown only when the window begins and ends within 5 SOC percentage points; it does not affect planning. Its attributes include the configured fallback value and measurement details. |
 | **Battery learning** | `learning` until both capacity and efficiency are reliable; attributes show sample counts/readiness. |
 | **Load learning coverage** | Percentage of the 7-day, 15-minute demand profile with enough observations. Higher is better. |
 | **Load forecast mean absolute error** | Typical absolute load-forecast error in W. A persistent high value means inspect the load sensor scope or add scheduled loads. |
