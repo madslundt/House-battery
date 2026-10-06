@@ -76,8 +76,11 @@ class ActualDailyHistory:
             blocks.append(block)
 
         hours = elapsed / 3600
-        charge_kwh = charge * hours / 1000
-        discharge_kwh = discharge * hours / 1000
+        # Missing telemetry is recorded as an ``unknown`` activity block. Do
+        # not fail the coordinator refresh (and leave every HA entity stale)
+        # when a local TCP sample is unavailable; account only measured energy.
+        charge_kwh = charge * hours / 1000 if charge is not None else 0.0
+        discharge_kwh = discharge * hours / 1000 if discharge is not None else 0.0
         block["charge_kwh"] += charge_kwh
         block["discharge_kwh"] += discharge_kwh
         if price is not None:
