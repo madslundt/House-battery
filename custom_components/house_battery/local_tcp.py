@@ -220,13 +220,23 @@ class FbpLocalTcpClient:
         self._reader = self._writer = None
 
     async def async_snapshot(self) -> FbpLocalSnapshot:
-        """Read telemetry, retrying transient failures on fresh TCP sockets.
+        """Read telemetry over a fresh TCP session, retrying transient failures.
 
-        Some compatible firmware closes an idle or displaced local session.
-        Retrying this read-only operation is safe. Mutating control writes are
-        retried only if read-back proves that the first absolute update did not
-        apply; an ambiguous result is never blindly replayed.
+        Some firmware can leave an established session responsive while its
+        telemetry replies stop advancing. Starting each polling cycle on a new
+        socket gives the battery the same session reset as reloading the
+        integration. Retrying this read-only operation is safe. Mutating
+        control writes are retried only if read-back proves that the first
+        absolute update did not apply; an ambiguous result is never blindly
+        replayed.
         """
+        # A reload fixes the reported stale-state issue because unload closes
+        # this socket. Apply that recovery at the telemetry polling boundary
+        # too, rather than trusting a long-lived but potentially stale session.
+        if getattr(self, "_reader", None) is not None or getattr(
+            self, "_writer", None
+        ) is not None:
+            await self.async_close()
         return await self._async_read_with_retry(
             {"Get": "EnergyParameter"}, decode_energy_parameter
         )
