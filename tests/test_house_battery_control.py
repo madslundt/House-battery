@@ -34,6 +34,13 @@ from house_battery.models import Action
 from house_battery.runtime import RuntimeState
 
 
+@pytest.fixture(autouse=True)
+def short_confirmation_deadlines(monkeypatch) -> None:
+    """Keep rejected/unavailable control cases fast without weakening read-back."""
+    monkeypatch.setattr("house_battery.actuator._STATE_CONFIRM_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr("house_battery.actuator._STATE_CONFIRM_POLL_SECONDS", 0.001)
+
+
 class FakeStates:
     """Small HA-state facade with number bounds."""
 
@@ -305,11 +312,11 @@ def test_command_requires_soc_limit_readback_before_mode_change() -> None:
     assert not success
     assert "SOC limit read-back" in result
     assert not any(domain == "select" for domain, _, _ in services.calls)
-    assert hass.flushes > 0
+    assert hass.flushes == 0
     assert not state.execution_enabled
 
 
-def test_command_confirms_limits_then_mode_after_event_queue_drains() -> None:
+def test_command_confirms_limits_then_mode_without_global_task_drain() -> None:
     control, state, services, hass = adapter()
 
     success, result = asyncio.run(
@@ -320,7 +327,7 @@ def test_command_confirms_limits_then_mode_after_event_queue_drains() -> None:
     assert result == "command confirmed by Operating Mode entity"
     assert state.last_action == Action.CHARGE.value
     assert any(domain == "select" for domain, _, _ in services.calls)
-    assert hass.flushes >= 2
+    assert hass.flushes == 0
 
 
 def test_direct_tcp_command_uses_allowlisted_client_and_updates_commanded_mode() -> None:
@@ -475,6 +482,93 @@ def test_configured_grid_isolation_switch_brackets_battery_mode() -> None:
     ]
 
 
+@pytest.mark.parametrize("action", [Action.BATTERY, Action.GRID, Action.CHARGE])
+@pytest.mark.parametrize("state_delay", [0, 0.005])
+def test_command_completes_while_unrelated_home_assistant_work_is_pending(
+    action, state_delay
+) -> None:
+    """A mode transition must not freeze polling after the grid plug changes."""
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant, callback
+
+        hass = HomeAssistant("/tmp")
+        pending = asyncio.Event()
+        unrelated = hass.async_create_task(pending.wait(), "unrelated device update")
+        state = runtime()
+        calls = []
+
+        class DirectClient:
+            async def async_set_limits(self, minimum, maximum):
+                calls.append(("limits", minimum, maximum))
+
+            async def async_set_grid_idle(self, minimum, maximum):
+                calls.append(("idle", minimum, maximum))
+
+            async def async_set_mode(self, mode, power, **kwargs):
+                calls.append(("mode", mode, power))
+
+        @callback
+        def change_switch(call):
+            hass.loop.call_later(
+                state_delay, hass.states.async_set,
+                call.data["entity_id"], "on" if call.service == "turn_on" else "off"
+            )
+
+        @callback
+        def change_number(call):
+            entity_id = call.data["entity_id"]
+            current = hass.states.get(entity_id)
+            hass.loop.call_later(
+                state_delay, hass.states.async_set,
+                entity_id, call.data["value"], current.attributes,
+            )
+
+        @callback
+        def change_mode(call):
+            hass.loop.call_later(
+                state_delay, hass.states.async_set,
+                call.data["entity_id"], call.data["option"],
+            )
+
+        hass.services.async_register("switch", "turn_on", change_switch)
+        hass.services.async_register("switch", "turn_off", change_switch)
+        hass.services.async_register("number", "set_value", change_number)
+        hass.services.async_register("select", "select_option", change_mode)
+        hass.states.async_set("switch.fbp_grid_input", "on" if action is Action.BATTERY else "off")
+        hass.states.async_set("number.fbp_min_soc", "5", {"min": 0, "max": 100})
+        hass.states.async_set("number.fbp_max_soc", "90", {"min": 0, "max": 100})
+        hass.states.async_set("select.fbp_mode", "Idle")
+
+        async def save():
+            return None
+
+        configured = {**config(), CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input"}
+        control = LocalControlAdapter(
+            hass, lambda: configured, lambda: state, save,
+            (lambda: DirectClient()) if action is not Action.CHARGE else None,
+        )
+        try:
+            async with asyncio.timeout(0.2):
+                success, result = await control.async_command(
+                    action, datetime.now(UTC), target_soc=90, load_w=150
+                )
+            assert success, result
+            assert not unrelated.done()
+            if action is Action.BATTERY:
+                assert hass.states.get("switch.fbp_grid_input").state == "off"
+                assert calls[-1] == ("mode", "Discharge", 100)
+            elif action is Action.GRID:
+                assert hass.states.get("switch.fbp_grid_input").state == "on"
+                assert calls[-1] == ("idle", 20, 90)
+            else:
+                assert hass.states.get("select.fbp_mode").state == "Charge"
+        finally:
+            pending.set()
+            await unrelated
+
+    asyncio.run(scenario())
+
+
 def test_unavailable_grid_isolation_inhibits_battery_discharge_without_crashing() -> None:
     class DirectClient:
         def __init__(self) -> None:
@@ -518,6 +612,37 @@ def test_unavailable_grid_isolation_inhibits_battery_discharge_without_crashing(
     assert "discharge inhibited" in result
     assert direct.calls == [("grid_idle", 20, 90)]
     assert state.execution_enabled
+
+
+def test_hung_grid_switch_service_returns_failure_without_stalling_control() -> None:
+    class HungServices(FakeServices):
+        async def async_call(self, domain, service, data, **kwargs):
+            self.calls.append((domain, service, data))
+            await asyncio.Event().wait()
+
+    async def scenario() -> None:
+        states = FakeStates(
+            {"switch.fbp_grid_input": SimpleNamespace(state="on", attributes={})}
+        )
+        services = HungServices(states)
+        state = runtime()
+        state.execution_enabled = True
+
+        async def save():
+            return None
+
+        control = LocalControlAdapter(
+            FakeHass(states, services),
+            lambda: {CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input"},
+            lambda: state, save,
+        )
+        async with asyncio.timeout(1.5):
+            assert not await control.async_set_grid_isolation(False)
+        assert len(services.calls) == 3
+        assert states.get("switch.fbp_grid_input").state == "on"
+        assert state.execution_enabled
+
+    asyncio.run(scenario())
 
 
 def test_failed_battery_command_stops_output_and_restores_grid_path() -> None:

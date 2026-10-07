@@ -42,6 +42,8 @@ _SOC_CONTROL_KEYS = (CONF_MIN_SOC_CONTROL, CONF_MAX_SOC_CONTROL)
 _UNAVAILABLE_STATES = {"unknown", "unavailable", "none", ""}
 _GRID_SWITCH_ATTEMPTS = 3
 _GRID_SWITCH_RETRY_DELAY_SECONDS = 0.5
+_STATE_CONFIRM_TIMEOUT_SECONDS = 10.0
+_STATE_CONFIRM_POLL_SECONDS = 0.1
 
 # The local adapter commands fixed-power Charge and Discharge custom slots
 # ("1,00:00,23:59,{power},..."), which draws energy into the battery for the
@@ -135,6 +137,29 @@ class LocalControlAdapter:
         self._direct_client = direct_client
         self._direct_mode_changed = direct_mode_changed
 
+    async def _async_call_and_confirm_state(
+        self, domain: str, service: str, data: dict[str, Any],
+        matches: Callable[[str], bool],
+    ) -> bool:
+        """Wait only for this control's read-back, never all HA pending work.
+
+        A global task drain can stall the coordinator indefinitely after the
+        grid plug already changed, preventing telemetry and recovery updates.
+        Bound both the service call and delayed entity confirmation instead.
+        """
+        try:
+            async with asyncio.timeout(_STATE_CONFIRM_TIMEOUT_SECONDS):
+                await self._hass.services.async_call(
+                    domain, service, data, blocking=True
+                )
+                while True:
+                    state = self._hass.states.get(data["entity_id"])
+                    if state is not None and matches(state.state):
+                        return True
+                    await asyncio.sleep(_STATE_CONFIRM_POLL_SECONDS)
+        except TimeoutError:
+            return False
+
     async def async_set_grid_isolation(self, enabled: bool) -> bool:
         """Best-effort control of the optional grid input smart plug.
 
@@ -151,13 +176,13 @@ class LocalControlAdapter:
             if current is not None and current.state == desired:
                 return True
             try:
-                await self._hass.services.async_call(
+                if await self._async_call_and_confirm_state(
                     "switch",
                     "turn_on" if enabled else "turn_off",
                     {"entity_id": entity_id},
-                    blocking=True,
-                )
-                await self._hass.async_block_till_done()
+                    lambda state: state == desired,
+                ):
+                    return True
             except Exception as exc:
                 _LOGGER.warning(
                     "Could not turn %s grid isolation plug %s (attempt %d/%d): %s",
@@ -338,19 +363,21 @@ class LocalControlAdapter:
                 return
         except (TypeError, ValueError):
             pass
-        await self._hass.services.async_call(
+        def matches(state: str) -> bool:
+            try:
+                confirmed = float(state)
+            except (TypeError, ValueError):
+                return False
+            return math.isfinite(confirmed) and (
+                abs(confirmed - value) <= _readback_tolerance(step)
+            )
+
+        if not await self._async_call_and_confirm_state(
             "number",
             "set_value",
             {"entity_id": entity_id, "value": value},
-            blocking=True,
-        )
-        await self._hass.async_block_till_done()
-        readback = self._hass.states.get(entity_id)
-        try:
-            confirmed = float(readback.state) if readback else None
-        except (TypeError, ValueError):
-            confirmed = None
-        if confirmed is None or abs(confirmed - value) > _readback_tolerance(step):
+            matches,
+        ):
             raise ValueError(
                 f"SOC limit read-back did not confirm {entity_id}={value:g}"
             )
@@ -422,18 +449,16 @@ class LocalControlAdapter:
                     "limits confirmed" if limits_warning is None else limits_warning
                 )
                 return True, f"{detail}; already in requested mode"
-            await self._hass.services.async_call(
+            confirmed = await self._async_call_and_confirm_state(
                 "select",
                 "select_option",
                 {"entity_id": mode_entity, "option": mode},
-                blocking=True,
+                lambda state: state == mode,
             )
         except Exception as exc:  # Home Assistant service failures vary by adapter
             _LOGGER.exception("Battery command failed")
             return False, f"command failed: {exc}"
-        await self._hass.async_block_till_done()
-        readback = self._hass.states.get(mode_entity)
-        if readback is None or readback.state != mode:
+        if not confirmed:
             return False, f"mode read-back did not confirm {mode}"
         if runtime.last_action != action.value:
             runtime.last_action = action.value
