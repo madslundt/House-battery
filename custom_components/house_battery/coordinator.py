@@ -1013,6 +1013,35 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 published_slot = self.runtime.daily_plan.slot_at(now)
                 if published_slot is not None:
+                    if (
+                        published_slot.action is Action.CHARGE
+                        and self._override_action() is None
+                    ):
+                        # The ceiling belongs to the held action too. Otherwise
+                        # a fresh normal/grid recommendation can lower it to 90%
+                        # and stop a published full charge early (observed at 96%).
+                        # User opt-out/lower limits remain effective immediately;
+                        # manual overrides continue to use their normal target.
+                        allowed_target = (
+                            OPPORTUNISTIC_TARGET_SOC
+                            if self.runtime.opportunistic_charging_enabled
+                            else settings.target_soc
+                        )
+                        published_target = (
+                            published_slot.charge_target_soc
+                            if published_slot.charge_target_soc is not None
+                            else math.ceil(published_slot.soc_end)
+                        )
+                        held_target = min(allowed_target, published_target)
+                        if held_target > effective_settings.target_soc:
+                            effective_settings = replace(
+                                effective_settings, target_soc=held_target
+                            )
+                            opportunistic_active = held_target > settings.target_soc
+                            opportunistic_reason = (
+                                f"Published charge target {held_target:g}% remains in "
+                                f"force until {published_slot.end.isoformat()}"
+                            )
                     executable_slot = published_slot.as_dict()
                     executable_action = published_slot.action
                 self._daily_plan_dirty = True
@@ -1430,6 +1459,27 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_request_refresh()
 
     async def async_set_setting(self, key: str, value: float) -> None:
+        if key == "target_soc" and value < self.runtime.settings[key]:
+            # An explicit user reduction cancels old held ceilings. Keep past
+            # evidence intact; a newly justified opportunistic plan can still
+            # use its authorized higher target on the next economic replan.
+            now = datetime.now(UTC)
+            self.runtime.daily_plan = replace(
+                self.runtime.daily_plan,
+                slots=tuple(
+                    replace(
+                        slot,
+                        charge_target_soc=min(
+                            value,
+                            slot.charge_target_soc
+                            if slot.charge_target_soc is not None
+                            else math.ceil(slot.soc_end),
+                        ),
+                    )
+                    if slot.action is Action.CHARGE and slot.end > now else slot
+                    for slot in self.runtime.daily_plan.slots
+                ),
+            )
         self.runtime.settings[key] = value
         await self.store.save(self.runtime)
         await self.async_request_refresh()

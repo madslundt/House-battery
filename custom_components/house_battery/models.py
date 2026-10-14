@@ -110,6 +110,9 @@ class PlannedSlot:
     # evidence distinguish a known tariff from an uncertainty-buffered forecast.
     price_source: str = "known"
     price_uncertainty_dkk_per_kwh: float = 0.0
+    # Keep the executable ceiling with the published charge action. Economic
+    # replans can select a lower target before that tariff interval finishes.
+    charge_target_soc: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)

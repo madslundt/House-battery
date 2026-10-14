@@ -11,6 +11,7 @@ Covers the two coupled fixes:
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -81,6 +82,33 @@ def assert_invariants(daily: DailyPlan) -> None:
             current.end,
             current.action,
         )
+
+
+@pytest.mark.parametrize("stored_target", [None, 100])
+def test_same_action_replan_preserves_published_charge_ceiling_across_restart(
+    stored_target: float | None,
+) -> None:
+    start = datetime(2026, 10, 14, 4, 45, tzinfo=PLUS2)
+    end = start + timedelta(minutes=15)
+    cutoff = start + timedelta(minutes=5)
+    published = replace(
+        slot(start, end, Action.CHARGE, soc_start=88, soc_end=99.847),
+        charge_target_soc=stored_target,
+    )
+    fresh = replace(
+        slot(cutoff, end, Action.CHARGE, soc_start=88, soc_end=89.89),
+        charge_target_soc=90,
+    )
+    day_start, day_end = local_day_bounds(cutoff)
+    daily = reconcile_daily_plan(
+        DailyPlan(date="2026-10-14", slots=(published,)),
+        (fresh,), cutoff=cutoff, day_start=day_start, horizon_end=day_end,
+    )
+    restored = DailyPlan.from_dict(daily.as_dict())
+
+    assert restored.slot_at(cutoff).action is Action.CHARGE
+    assert restored.slot_at(cutoff).charge_target_soc == 100
+    assert restored.slot_at(cutoff).end == end
 
 
 def assert_within_horizon(

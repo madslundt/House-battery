@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from math import ceil
 from typing import Any
 
 from .models import Action, PlannedSlot
@@ -146,6 +147,10 @@ def _merge_slots(a: PlannedSlot, b: PlannedSlot) -> PlannedSlot:
         reason=a.reason,
         price_source=a.price_source,
         price_uncertainty_dkk_per_kwh=a.price_uncertainty_dkk_per_kwh,
+        charge_target_soc=max(
+            a.charge_target_soc or a.soc_end,
+            b.charge_target_soc or b.soc_end,
+        ) if a.action is Action.CHARGE else None,
     )
 
 
@@ -187,6 +192,12 @@ def _history_locked_at_price_boundaries(
         kept.sort(key=lambda s: s.start)
         return kept, cutoff
 
+    if straddling.action is Action.CHARGE and straddling.charge_target_soc is None:
+        # Older stored plans carry only the projected SOC. Capture the full
+        # interval's ceiling before proration replaces its end with the cutoff.
+        straddling = replace(
+            straddling, charge_target_soc=ceil(straddling.soc_end)
+        )
     frozen = _prorate_head(straddling, cutoff, day_start, horizon_end, tz)
     reopt_pieces = _reopt_current_interval(future_slots, cutoff, straddling.end)
     if not reopt_pieces:
@@ -428,6 +439,10 @@ def merge_adjacent_blocks(slots: tuple[PlannedSlot, ...]) -> list[PlannedSlot]:
                 reason=previous.reason,
                 price_source=slot.price_source,
                 price_uncertainty_dkk_per_kwh=slot.price_uncertainty_dkk_per_kwh,
+                charge_target_soc=max(
+                    previous.charge_target_soc or previous.soc_end,
+                    slot.charge_target_soc or slot.soc_end,
+                ) if previous.action is Action.CHARGE else None,
             )
         else:
             blocks.append(slot)
@@ -587,6 +602,10 @@ class DailyPlan:
                         price_source=raw.get("price_source", "known"),
                         price_uncertainty_dkk_per_kwh=float(
                             raw.get("price_uncertainty_dkk_per_kwh", 0.0)
+                        ),
+                        charge_target_soc=(
+                            float(raw["charge_target_soc"])
+                            if raw.get("charge_target_soc") is not None else None
                         ),
                     )
                 )

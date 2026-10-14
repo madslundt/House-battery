@@ -489,6 +489,9 @@ def optimize(
                 reason=reason,
                 price_source=slot.source,
                 price_uncertainty_dkk_per_kwh=slot.uncertainty_dkk_per_kwh,
+                charge_target_soc=(
+                    settings.target_soc if next_state.action is Action.CHARGE else None
+                ),
             )
         )
         previous_energy = next_energy

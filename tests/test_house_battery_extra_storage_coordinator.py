@@ -86,6 +86,10 @@ def test_coordinator_selects_full_charge_only_when_opted_in_and_profitable() -> 
     assert decision.active
     assert decision.settings.target_soc == 100
     assert max(slot.soc_end for slot in decision.plan.slots) > 99
+    assert all(
+        slot.charge_target_soc == 100
+        for slot in decision.plan.slots if slot.action is Action.CHARGE
+    )
 
 
 def test_plan_today_dict_filters_out_tomorrow() -> None:
@@ -193,8 +197,31 @@ class _StaticStore:
         self.state = state
 
 
+@pytest.mark.parametrize("lowered_target", [None, 80])
+@pytest.mark.parametrize(
+    (
+        "published_action", "opportunistic_enabled", "stored_target",
+        "override", "expected_action", "expected_target",
+    ),
+    [
+        (Action.BATTERY, False, None, "auto", Action.BATTERY, 90),
+        (Action.CHARGE, True, None, "auto", Action.CHARGE, 100),
+        (Action.CHARGE, True, 100, "auto", Action.CHARGE, 100),
+        (Action.CHARGE, True, 90, "auto", Action.CHARGE, 90),
+        (Action.CHARGE, False, 100, "auto", Action.CHARGE, 90),
+        (Action.CHARGE, True, 100, "charge", Action.CHARGE, 90),
+        (Action.CHARGE, True, 100, "grid", Action.GRID, 90),
+    ],
+)
 def test_coordinator_executes_published_action_until_price_boundary(
     monkeypatch: pytest.MonkeyPatch,
+    published_action: Action,
+    opportunistic_enabled: bool,
+    stored_target: float | None,
+    override: str,
+    expected_action: Action,
+    expected_target: float,
+    lowered_target: float | None,
 ) -> None:
     local = ZoneInfo("Europe/Copenhagen")
     fixed_now = NOW
@@ -222,18 +249,22 @@ def test_coordinator_executes_published_action_until_price_boundary(
             battery_charge_wh=0,
             battery_discharge_wh=50 if action is Action.BATTERY else 0,
             soc_start=65,
-            soc_end=64 if action is Action.BATTERY else 65,
+            soc_end=(
+                (89.89 if stored_target == 90 else 99.847) if action is Action.CHARGE
+                else 64 if action is Action.BATTERY else 65
+            ),
             interval_cost_dkk=0.1,
             baseline_cost_dkk=0.2,
             reason=f"{action.value} plan",
+            charge_target_soc=stored_target if action is Action.CHARGE else None,
         )
 
     published = DailyPlan(
         date="2026-09-21",
         slots=(
             planned_slot(day_start, interval_start, Action.GRID),
-            planned_slot(interval_start, interval_end, Action.BATTERY),
-            planned_slot(interval_end, day_end, Action.BATTERY),
+            planned_slot(interval_start, interval_end, published_action),
+            planned_slot(interval_end, day_end, published_action),
         ),
     )
     fresh_plan = _make_plan(
@@ -243,7 +274,7 @@ def test_coordinator_executes_published_action_until_price_boundary(
         )
     )
 
-    async def scenario() -> tuple[dict[str, object], list[Action]]:
+    async def scenario() -> tuple[dict[str, object], list[tuple[Action, float]]]:
         from homeassistant.core import HomeAssistant
 
         hass = HomeAssistant("/tmp")
@@ -262,9 +293,13 @@ def test_coordinator_executes_published_action_until_price_boundary(
         coordinator = Fbp1200Coordinator(hass, entry)
         coordinator.store = _StaticStore(coordinator.runtime)
         coordinator.runtime.execution_enabled = True
-        coordinator.runtime.daily_plan = published
+        coordinator.runtime.opportunistic_charging_enabled = opportunistic_enabled
+        coordinator.runtime.override_action = override
+        coordinator.runtime.daily_plan = DailyPlan.from_dict(published.as_dict())
         coordinator._startup_guard_passed = True
-        hass.states.async_set("sensor.soc", "65")
+        hass.states.async_set(
+            "sensor.soc", "96" if published_action is Action.CHARGE else "65"
+        )
         hass.states.async_set("sensor.load", "100")
         hass.states.async_set("sensor.grid_import", "100")
         hass.states.async_set("binary_sensor.grid", "on")
@@ -301,16 +336,28 @@ def test_coordinator_executes_published_action_until_price_boundary(
                 incremental_savings_dkk=0.0,
             )
         )
-        commanded: list[Action] = []
+        commanded: list[tuple[Action, float]] = []
 
         async def capture_command(
             action: Action, now: datetime, **kwargs
         ) -> tuple[bool, str]:  # noqa: ANN003
-            commanded.append(action)
+            commanded.append((action, kwargs["target_soc"]))
             return True, "command captured"
 
         coordinator.actuator.async_command = capture_command
-        return await coordinator._async_update_data(), commanded
+        if lowered_target is not None:
+            coordinator.async_request_refresh = no_observation
+            await coordinator.async_set_setting("target_soc", lowered_target)
+            # The explicit reduction must survive a restart before the refresh.
+            coordinator.runtime = RuntimeState.from_dict(
+                coordinator.store.state.as_dict()
+            )
+        data = await coordinator._async_update_data()
+        # The old charge ceiling must expire at the next tariff boundary.
+        nonlocal fixed_now
+        fixed_now = interval_end
+        await coordinator._async_update_data()
+        return data, commanded
 
     monkeypatch.setattr(dt_util, "DEFAULT_TIME_ZONE", local)
     monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
@@ -321,9 +368,18 @@ def test_coordinator_executes_published_action_until_price_boundary(
 
     assert data["system_state"] == "ACTIVE"
     assert data["plan"]["slots"][0]["action"] == "grid"
-    assert data["executable_slot"]["action"] == "battery"
-    assert data["reason"].startswith("Published battery action remains in force")
-    assert commanded == [Action.BATTERY]
+    assert data["executable_slot"]["action"] == published_action.value
+    assert data["reason"].startswith(
+        f"Published {published_action.value} action remains in force"
+    )
+    boundary_action = Action.CHARGE if override == "charge" else Action.GRID
+    if lowered_target is not None:
+        expected_target = lowered_target
+    boundary_target = lowered_target if lowered_target is not None else 90
+    assert commanded == [
+        (expected_action, expected_target), (boundary_action, boundary_target)
+    ]
+    assert data["effective_target_soc"] == expected_target
 
 
 def test_plan_view_spans_whole_local_day_at_utc_midnight(
