@@ -131,6 +131,32 @@ def test_dashboard_period_entities_are_available_with_measurement_units() -> Non
 
 
 @pytest.mark.parametrize(
+    ("period", "period_name"),
+    [("week", "this week"), ("last_week", "last week")],
+)
+def test_weekly_battery_discharge_is_exposed(period: str, period_name: str) -> None:
+    """Expose measured discharge for the same weekly periods as charge."""
+    descriptions = {item.key: item for item in SENSORS}
+    key = f"{period}_discharge_kwh"
+    assert key in descriptions
+    description = descriptions[key]
+    assert description.name == f"Battery discharge {period_name}"
+    assert description.icon == "mdi:battery-arrow-down"
+    assert description.unit is UnitOfEnergy.KILO_WATT_HOUR
+    assert description.precision == 3
+    assert (
+        description.enabled_by_default
+        is descriptions[f"{period}_charge_kwh"].enabled_by_default
+    )
+
+    sensor = SimpleNamespace(
+        coordinator=SimpleNamespace(data={period: {"discharge_kwh": 4.125}}),
+        description=description,
+    )
+    assert FbpValueSensor.native_value.fget(sensor) == 4.125
+
+
+@pytest.mark.parametrize(
     ("period", "period_name", "enabled"),
     [
         ("today", "today", True),

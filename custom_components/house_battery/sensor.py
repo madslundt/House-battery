@@ -219,6 +219,22 @@ SENSORS = (
         enabled_by_default=True,
     ),
     FbpSensorDescription(
+        key="week_discharge_kwh",
+        name="Battery discharge this week",
+        icon="mdi:battery-arrow-down",
+        unit=UnitOfEnergy.KILO_WATT_HOUR,
+        precision=3,
+        enabled_by_default=False,
+    ),
+    FbpSensorDescription(
+        key="last_week_discharge_kwh",
+        name="Battery discharge last week",
+        icon="mdi:battery-arrow-down",
+        unit=UnitOfEnergy.KILO_WATT_HOUR,
+        precision=3,
+        enabled_by_default=False,
+    ),
+    FbpSensorDescription(
         key="today_charge_price_dkk_per_kwh",
         name="Average battery charge price today",
         icon="mdi:cash-minus",
