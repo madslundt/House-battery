@@ -138,6 +138,7 @@ class Fbp1200ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure an optimizer entry with a local battery connection."""
 
     VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._connection: dict[str, Any] = {}

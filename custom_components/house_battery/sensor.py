@@ -20,7 +20,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import Fbp1200Coordinator
-from .entity import Fbp1200Entity
+from .entity import DEFAULT_ENTITY_KEYS, Fbp1200Entity
 from .models import POWER_SOURCE_STATES
 
 
@@ -33,7 +33,11 @@ class FbpSensorDescription:
     precision: int | None = None
     device_class: SensorDeviceClass | None = None
     state_class: SensorStateClass | None = None
-    enabled_by_default: bool = True
+
+    @property
+    def enabled_by_default(self) -> bool:
+        """Share the compact catalogue policy with upgrade migration."""
+        return self.key in DEFAULT_ENTITY_KEYS
 
 
 SENSORS = (
@@ -137,7 +141,6 @@ SENSORS = (
         icon="mdi:cash-check",
         unit="DKK",
         precision=2,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="week_net_savings_dkk",
@@ -145,7 +148,6 @@ SENSORS = (
         icon="mdi:cash-check",
         unit="DKK",
         precision=2,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="last_week_net_savings_dkk",
@@ -153,7 +155,6 @@ SENSORS = (
         icon="mdi:cash-check",
         unit="DKK",
         precision=2,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="month_net_savings_dkk",
@@ -161,7 +162,6 @@ SENSORS = (
         icon="mdi:calendar-check",
         unit="DKK",
         precision=2,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="last_month_net_savings_dkk",
@@ -169,7 +169,6 @@ SENSORS = (
         icon="mdi:calendar-check",
         unit="DKK",
         precision=2,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="lifetime_net_savings_dkk",
@@ -184,7 +183,6 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=True,
     ),
     FbpSensorDescription(
         key="yesterday_charge_kwh",
@@ -192,7 +190,6 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="week_charge_kwh",
@@ -200,7 +197,6 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="last_week_charge_kwh",
@@ -208,7 +204,6 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="today_discharge_kwh",
@@ -216,7 +211,6 @@ SENSORS = (
         icon="mdi:battery-arrow-down",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=True,
     ),
     FbpSensorDescription(
         key="week_discharge_kwh",
@@ -224,7 +218,6 @@ SENSORS = (
         icon="mdi:battery-arrow-down",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="last_week_discharge_kwh",
@@ -232,7 +225,6 @@ SENSORS = (
         icon="mdi:battery-arrow-down",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="today_charge_price_dkk_per_kwh",
@@ -240,7 +232,6 @@ SENSORS = (
         icon="mdi:cash-minus",
         unit="DKK/kWh",
         precision=3,
-        enabled_by_default=True,
     ),
     FbpSensorDescription(
         key="today_discharge_price_dkk_per_kwh",
@@ -248,7 +239,6 @@ SENSORS = (
         icon="mdi:cash-plus",
         unit="DKK/kWh",
         precision=3,
-        enabled_by_default=True,
     ),
     *(
         FbpSensorDescription(
@@ -264,16 +254,15 @@ SENSORS = (
             device_class=SensorDeviceClass.MONETARY,
             # Negative electricity prices can make any monetary total decrease.
             state_class=SensorStateClass.TOTAL,
-            enabled_by_default=enabled,
         )
-        for period, period_name, enabled in (
-            ("today", "today", True),
-            ("yesterday", "yesterday", False),
-            ("week", "this week", True),
-            ("last_week", "last week", False),
-            ("month", "this month", True),
-            ("last_month", "last month", False),
-            ("lifetime", "total", True),
+        for period, period_name in (
+            ("today", "today"),
+            ("yesterday", "yesterday"),
+            ("week", "this week"),
+            ("last_week", "last week"),
+            ("month", "this month"),
+            ("last_month", "last month"),
+            ("lifetime", "total"),
         )
         for metric, name, icon in (
             ("charge_cost_dkk", "Battery charge cost", "mdi:cash-minus"),
@@ -287,7 +276,6 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="last_month_charge_kwh",
@@ -295,7 +283,6 @@ SENSORS = (
         icon="mdi:battery-arrow-up",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="month_discharge_kwh",
@@ -303,7 +290,6 @@ SENSORS = (
         icon="mdi:battery-arrow-down",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="lifetime_charge_kwh",
@@ -330,7 +316,6 @@ SENSORS = (
         unit="cycles",
         precision=2,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="estimated_degradation_pct",
@@ -338,7 +323,6 @@ SENSORS = (
         icon="mdi:battery-heart-variant",
         unit=PERCENTAGE,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="estimated_remaining_capacity_pct",
@@ -346,7 +330,6 @@ SENSORS = (
         icon="mdi:battery-heart",
         unit=PERCENTAGE,
         precision=2,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="learned_capacity_kwh",
@@ -354,7 +337,6 @@ SENSORS = (
         icon="mdi:battery-high",
         unit=UnitOfEnergy.KILO_WATT_HOUR,
         precision=3,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="learned_efficiency_pct",
@@ -362,7 +344,6 @@ SENSORS = (
         icon="mdi:percent-circle",
         unit=PERCENTAGE,
         precision=1,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="load_learning_confidence_pct",
@@ -370,7 +351,6 @@ SENSORS = (
         icon="mdi:brain",
         unit=PERCENTAGE,
         precision=1,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="load_forecast_error_w",
@@ -378,7 +358,6 @@ SENSORS = (
         icon="mdi:chart-bell-curve",
         unit=UnitOfPower.WATT,
         precision=0,
-        enabled_by_default=False,
     ),
 )
 
@@ -1031,6 +1010,10 @@ class FbpLocalLoadDiagnosticsSensor(Fbp1200Entity, SensorEntity):
 
 
 class FbpValueSensor(Fbp1200Entity, SensorEntity):
+    # Value sensors have no explanatory payloads. Preserve all statistics
+    # metadata, including last_reset for signed calendar-period money totals.
+    _unrecorded_attributes = frozenset()
+
     def __init__(
         self, coordinator: Fbp1200Coordinator, description: FbpSensorDescription
     ) -> None:
@@ -1042,7 +1025,6 @@ class FbpValueSensor(Fbp1200Entity, SensorEntity):
         self._attr_suggested_display_precision = description.precision
         self._attr_device_class = description.device_class
         self._attr_state_class = description.state_class
-        self._attr_entity_registry_enabled_default = description.enabled_by_default
 
     @property
     def last_reset(self) -> datetime | None:

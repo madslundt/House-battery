@@ -11,6 +11,7 @@ from .price import normalize_price_rows_with_report
 
 _MAX_SAMPLES = 1_000
 _MAX_FORECAST_HORIZON = timedelta(days=3)
+FORECAST_EVIDENCE_MAX_AGE = timedelta(days=7)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +133,7 @@ def detect_extreme_price_movement(
         return {"is_extreme": False, "baseline": 0.0, "max_future": 0.0}
 
     # Baseline: average of the most recent 24 known-price slots
-    recent = known[-min(24, len(known)):]
+    recent = known[-min(24, len(known)) :]
     baseline = sum(s.price for s in recent) / len(recent)
 
     # Max future price (including forecast)
@@ -156,6 +157,25 @@ class ForecastAccuracy:
     outstanding: dict[str, dict[str, str | float]] = field(default_factory=dict)
     errors_dkk_per_kwh: list[float] = field(default_factory=list)
     within_uncertainty: list[bool] = field(default_factory=list)
+
+    def prune(self, now: datetime) -> None:
+        """Drop forecasts that can no longer be compared with recent prices."""
+        retained = {}
+        for key, forecast in self.outstanding.items():
+            try:
+                start = datetime.fromisoformat(str(forecast["start"]))
+                end = datetime.fromisoformat(str(forecast["end"]))
+                if (
+                    start.tzinfo is not None
+                    and end.tzinfo is not None
+                    and start < end
+                    and now - FORECAST_EVIDENCE_MAX_AGE < end
+                    and start <= now + _MAX_FORECAST_HORIZON
+                ):
+                    retained[key] = forecast
+            except (KeyError, TypeError, ValueError):
+                continue
+        self.outstanding = dict(list(retained.items())[-_MAX_SAMPLES:])
 
     def record_forecasts(self, slots: list[PriceSlot]) -> None:
         """Keep the first forecast seen for each interval for an honest score."""
@@ -280,7 +300,7 @@ class ForecastAccuracy:
                 except ValueError:
                     continue
         return cls(
-            outstanding=outstanding,
+            outstanding=dict(list(outstanding.items())[-_MAX_SAMPLES:]),
             errors_dkk_per_kwh=[
                 float(value) for value in data.get("errors_dkk_per_kwh", [])
             ][-_MAX_SAMPLES:],

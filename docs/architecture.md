@@ -174,6 +174,25 @@ groups adjacent identical actions into readable blocks. A bounded decision
 history stores changes in state/reason with timestamp, SOC, price, and command
 outcome.
 
+Retention runs on every refresh and storage load/save, including after offline
+gaps or when planning inputs are unavailable:
+
+| Data | Retention |
+| --- | --- |
+| Consumption model | At most 672 weekday/quarter-hour summaries, with a capped effective weight of 12 weekly observations so changing habits can replace old ones. Buckets unused for 90 days expire. Existing profiles are preserved on upgrade and start their expiry clock then. |
+| Recent consumption | Eight interval averages; discarded after 30 minutes without a fresh observation. No raw minute-by-minute consumption archive. |
+| Interval ledger | At most 5,952 intervals and 62 days, preserving current/previous calendar-period reporting. Lifetime counters survive detail pruning. |
+| Actual activity | Eight local calendar dates of coalesced blocks. |
+| Decisions / transitions | Seven days / 24 hours, also capped at 500 / 100 entries. |
+| Forecast comparisons | At most 1,000 pending intervals per source; unmatched intervals expire after seven days. Completed scores are capped at 1,000. Removed sources are discarded. |
+| Scheduled loads / daily plan | Expired scheduled loads are removed; only the current local day's plan persists. |
+
+Explanatory entity attributes remain available live but are excluded from Home
+Assistant Recorder, avoiding repeated copies of plans, timelines, and diagnostic
+payloads. Entity states and numeric statistics metadata remain recordable.
+Recorder's existing history and long-term statistics follow Home Assistant's
+own retention settings; this integration does not purge that shared database.
+
 Call `house_battery.export_data` to return the complete local evidence
 bundle:
 

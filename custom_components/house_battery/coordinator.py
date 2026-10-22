@@ -428,6 +428,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             source: accuracy.as_dict()
             for source, accuracy in self.runtime.forecast_accuracies.items()
         }
+        # A configured price feed may contain forecast rows. Keep its evidence
+        # during a temporary outage; only removing its binding retires it.
+        self.runtime.prune(
+            now,
+            forecast_sources=set(sources) | set(self.config.get(CONF_PRICE_ENTITIES, [])),
+        )
         # Score every outstanding prediction even when the source has gone
         # stale; actual prices arriving later must still close its comparison.
         for accuracy in self.runtime.forecast_accuracies.values():
@@ -785,6 +791,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         now = datetime.now(UTC)
+        self.runtime.prune(now)
         local_problem: str | None = None
         local_tcp_recovery_remaining: timedelta | None = None
         if self.local_client is not None:

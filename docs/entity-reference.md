@@ -3,6 +3,25 @@
 Home Assistant generates the exact entity IDs from your entry name. Use the
 entity picker; names below are the stable, user-facing names.
 
+The default entity set covers live battery/load power, SOC, current and planned
+operation, consumption-learning coverage, today's energy and net return,
+lifetime energy and net return, and safety. Grid-meter readings and export
+safety are enabled by default only with a configured meter; household realized
+savings additionally need a whole-house load binding on direct-local entries.
+The external-forecast switch defaults enabled only with a configured source.
+
+Everyday writable controls are Automatic control, Force safe mode, Allow
+opportunistic full charge, reserve/maximum SOC, charge/discharge power limits,
+and minimum required profit. Manual Operation mode, fallback battery settings,
+duplicate directional power readings, additional financial periods, and
+diagnostics are opt-in from the entity list. Disabling these entities does not
+disable consumption learning, safety checks, or internal accounting.
+
+On upgrade, untouched advanced entities are disabled once. Registry entries
+edited after registration, renamed, assigned an area/label, hidden, or explicitly
+disabled are preserved. Entity IDs remain stable; re-enable an optional entity
+when a dashboard or automation needs it. Subsequent reloads keep that choice.
+
 ## Live state and safety
 
 | Entity | What it means | How to use it |
@@ -55,9 +74,8 @@ prices and negative returns are preserved. A charge-only day can have negative
 net savings while the stored energy is used on a later day. Net savings excludes
 the value of energy still stored in the battery.
 
-Today, this week, this month, and total financial sensors are enabled by default
-for new entities. Previous-period sensors can be enabled from the integration's
-entity list. Existing disabled entities retain their Home Assistant settings.
+Today's and lifetime battery net savings are enabled by default; detailed
+cost/value and other calendar periods can be enabled from the entity list.
 Calendar periods use Home Assistant's local timezone and weeks start on Monday.
 Period history is retained for 62 days; lifetime totals survive history pruning
 and restarts. A percentage ROI requires dividing the monetary return by the
@@ -131,12 +149,11 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **External price forecast uncertainty** | Conservative error allowance for external price forecasts. Disabled by default. | Set 0.25 DKK/kWh if the forecast's MAE is about 0.20; forecast charging is evaluated 0.25 higher and discharge 0.25 lower. |
 
 The mode-switching penalty is an internal fixed cost of 0.05 DKK per action
-change. Opportunistic full-charge planning uses a fixed 100% target. Detailed
-throughput, learning, decision
-history, and local-load diagnostic entities are disabled by default; enable
-them from the entity registry when investigating behavior. These settings and
-diagnostics remain out of the default control surface because changing or
-watching them adds tuning surface without improving routine operation.
+change. Opportunistic full-charge planning uses a fixed 100% target. Fallback
+capacity/efficiency, emergency SOC, wear cost, cycle life, and forecast
+uncertainty controls are disabled by default; enable them when tuning the
+installation. Consumption learning and accounting run independently of whether
+their diagnostic entities are enabled.
 
 Change one number at a time. Observe at least several similar tariff days, then
 compare **realized savings**, **equivalent cycles**, forecast error, and the

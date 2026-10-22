@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+
+from homeassistant.core import HomeAssistant
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
+from house_battery.accounting import EnergyLedger, IntervalAccumulator
+from house_battery.actual_history import ActualDailyHistory
+from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.dailyplan import DailyPlan
+from house_battery.forecast import ForecastAccuracy
 from house_battery.models import Action, PlannedSlot
 from house_battery.runtime import RuntimeState
 
@@ -59,8 +67,7 @@ def test_recent_action_changes_remain_diagnostics_only() -> None:
     first = datetime(2026, 9, 21, 16, tzinfo=UTC)
     runtime = RuntimeState(
         transitions=[
-            (first + timedelta(minutes=minute)).isoformat()
-            for minute in range(4)
+            (first + timedelta(minutes=minute)).isoformat() for minute in range(4)
         ]
     )
 
@@ -74,7 +81,10 @@ def test_schema_v2_payload_is_round_tripped_untouched() -> None:
         {
             "schema_version": 2,
             "settings": {"reserve_soc": 20.0},
-            "battery_learner": {"capacity_samples_wh": [100.0], "efficiency_samples": []},
+            "battery_learner": {
+                "capacity_samples_wh": [100.0],
+                "efficiency_samples": [],
+            },
             "ledger": {"total_discharge_kwh": 3.5, "total_export_kwh": 0.1},
             "flow_model_started_at": "2026-09-22T00:19:00+00:00",
         }
@@ -84,7 +94,7 @@ def test_schema_v2_payload_is_round_tripped_untouched() -> None:
     assert runtime.ledger.total_export_kwh == 0.1
     assert runtime.flow_model_started_at == "2026-09-22T00:19:00+00:00"
     # The marker is re-emitted so a second load is treated as v2, not legacy.
-    assert runtime.as_dict()["schema_version"] == 2
+    assert runtime.as_dict()["schema_version"] == 3
     assert runtime.as_dict()["flow_model_started_at"] == "2026-09-22T00:19:00+00:00"
 
 
@@ -120,3 +130,114 @@ def test_legacy_payload_resets_batterylearning_and_ledger_only() -> None:
     assert "sensor.forecast" in runtime.forecast_accuracies
     # The upgrade stamps the moment the new model began.
     assert runtime.flow_model_started_at is not None
+
+
+def test_runtime_prunes_by_age_after_offline_gap_and_keeps_lifetime_totals() -> None:
+    now = datetime(2026, 10, 22, 10, tzinfo=UTC)
+    ledger = EnergyLedger(total_discharge_kwh=12, total_discharge_value_dkk=20)
+    ledger.close(IntervalAccumulator(now - timedelta(days=70)), 0)
+    ledger.close(IntervalAccumulator(now - timedelta(days=2)), 0)
+    runtime = RuntimeState(
+        ledger=ledger,
+        decisions=[
+            {"timestamp": (now - timedelta(days=8)).isoformat()},
+            {"timestamp": now.isoformat()},
+            {"timestamp": "invalid"},
+            {"timestamp": "2026-10-22T09:00:00"},
+        ],
+        scheduled_loads=[
+            {"end": (now - timedelta(hours=1)).isoformat()},
+            {"end": (now + timedelta(hours=1)).isoformat()},
+        ],
+        forecast_accuracies={"kept": ForecastAccuracy(), "removed": ForecastAccuracy()},
+    )
+    runtime.prune(now, forecast_sources={"kept"})
+
+    assert len(runtime.ledger.intervals) == 1
+    assert runtime.ledger.total_discharge_kwh == 12
+    assert runtime.ledger.total_discharge_value_dkk == 20
+    assert runtime.decisions == [{"timestamp": now.isoformat()}]
+    assert len(runtime.scheduled_loads) == 1
+    assert set(runtime.forecast_accuracies) == {"kept"}
+    # A long outage must expire all detail even if no new ledger interval closed.
+    runtime.prune(now + timedelta(days=90))
+    assert not runtime.ledger.intervals
+    assert runtime.ledger.total_discharge_kwh == 12
+
+
+def test_runtime_history_retention_uses_local_calendar_date() -> None:
+    runtime = RuntimeState(
+        actual_history=ActualDailyHistory(
+            days={
+                "2026-10-14": [],
+                "2026-10-15": [],
+                "2026-10-22": [],
+            }
+        )
+    )
+    runtime.load_learner.bucket_timezone = "Europe/Copenhagen"
+    # Copenhagen is already October 22 while UTC is still October 21.
+    runtime.prune(datetime(2026, 10, 21, 22, 30, tzinfo=UTC))
+    assert set(runtime.actual_history.days) == {"2026-10-15", "2026-10-22"}
+
+
+def test_runtime_expires_yesterdays_plan_but_preserves_current_local_day() -> None:
+    runtime = RuntimeState(daily_plan=_daily_plan())
+    runtime.load_learner.bucket_timezone = "Europe/Copenhagen"
+    runtime.prune(datetime(2026, 9, 20, 21, 59, tzinfo=UTC))
+    assert runtime.daily_plan.date == "2026-09-20"
+    runtime.prune(datetime(2026, 9, 20, 22, 0, tzinfo=UTC))
+    assert runtime.daily_plan.date == ""
+
+
+def test_pending_forecasts_expire_without_erasing_bounded_accuracy_scores() -> None:
+    now = datetime(2026, 10, 22, 10, tzinfo=UTC)
+    accuracy = ForecastAccuracy(errors_dkk_per_kwh=[0.2], within_uncertainty=[True])
+    for name, offset in (("old", -8), ("recent", -1), ("future", 4)):
+        start = now + timedelta(days=offset)
+        accuracy.outstanding[name] = {
+            "start": start.isoformat(),
+            "end": (start + timedelta(minutes=15)).isoformat(),
+            "price": 1.5,
+        }
+    accuracy.prune(now)
+    assert set(accuracy.outstanding) == {"recent"}
+    assert accuracy.mean_absolute_error_dkk_per_kwh == 0.2
+
+
+def test_coordinator_retires_removed_feeds_but_keeps_configured_unavailable_feeds() -> (
+    None
+):
+    async def check() -> None:
+        now = datetime(2026, 10, 22, 10, tzinfo=UTC)
+        entry = SimpleNamespace(
+            entry_id="retention-test",
+            title="Battery",
+            options={},
+            async_on_unload=lambda callback: None,
+            data={
+                "price_entities": ["sensor.attached_forecast"],
+                "price_forecast_entities": ["sensor.forecast"],
+            },
+        )
+        coordinator = Fbp1200Coordinator(HomeAssistant("/tmp"), entry)
+        coordinator.runtime.forecast_accuracies = {
+            source: ForecastAccuracy(errors_dkk_per_kwh=[0.2])
+            for source in (
+                "sensor.attached_forecast",
+                "sensor.forecast",
+                "sensor.removed",
+            )
+        }
+        # No source currently exists in the state machine (for example startup).
+        coordinator._price_slots(now)
+        assert set(coordinator.runtime.forecast_accuracies) == {
+            "sensor.attached_forecast",
+            "sensor.forecast",
+        }
+        assert coordinator.runtime.forecast_accuracies["sensor.forecast"].samples == 1
+        entry.data = {"price_entities": [], "price_forecast_entities": []}
+        coordinator._price_slots(now)
+        assert coordinator.runtime.forecast_accuracies == {}
+
+    asyncio.run(check())

@@ -5,12 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from homeassistant.helpers.storage import Store
 
-from .actual_history import ActualDailyHistory
 from .accounting import EnergyLedger
-from .const import DEFAULT_SETTINGS, DOMAIN, STORAGE_KEY, STORAGE_VERSION
+from .actual_history import ActualDailyHistory
+from .const import (
+    DECISION_HISTORY_LIMIT,
+    DEFAULT_SETTINGS,
+    DOMAIN,
+    STORAGE_KEY,
+    STORAGE_VERSION,
+)
 from .dailyplan import DailyPlan
 from .forecast import ForecastAccuracy
 from .learning import BatteryLearner, LoadLearner
@@ -51,6 +58,43 @@ class RuntimeState:
     # only ever updated by reconciling a fresh optimization on top of the
     # immutable published past.
     daily_plan: DailyPlan = field(default_factory=lambda: DailyPlan(date=""))
+
+    def prune(self, now: datetime, forecast_sources: set[str] | None = None) -> None:
+        """Apply age limits independently of new samples or successful planning."""
+        if now.tzinfo is None:
+            raise ValueError("Runtime retention requires an aware timestamp")
+        self.load_learner.prune(now)
+        self.ledger.prune(now)
+        try:
+            local_now = now.astimezone(
+                ZoneInfo(self.load_learner.bucket_timezone or "UTC")
+            )
+        except (ZoneInfoNotFoundError, ValueError):
+            local_now = now
+        self.actual_history.prune(local_now)
+        if self.daily_plan.date and self.daily_plan.date != local_now.date().isoformat():
+            self.daily_plan = DailyPlan(date="")
+        cutoff = now - timedelta(days=7)
+        self.decisions = [
+            item
+            for item in self.decisions
+            if isinstance(item, dict)
+            and _is_recent_timestamp(item.get("timestamp"), cutoff)
+        ][-DECISION_HISTORY_LIMIT:]
+        self.transitions_used(now)
+        self.scheduled_loads = [
+            item
+            for item in self.scheduled_loads
+            if isinstance(item, dict) and _is_recent_timestamp(item.get("end"), now)
+        ]
+        if forecast_sources is not None:
+            self.forecast_accuracies = {
+                source: accuracy
+                for source, accuracy in self.forecast_accuracies.items()
+                if source in forecast_sources
+            }
+        for accuracy in self.forecast_accuracies.values():
+            accuracy.prune(now)
 
     def forecast_accuracy_for(self, source: str) -> ForecastAccuracy:
         """Return the independent accuracy history for one forecast entity."""
@@ -206,19 +250,24 @@ class RuntimeStore:
             hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry_id}"
         )
 
-    async def load(self) -> RuntimeState:
-        return RuntimeState.from_dict(await self._store.async_load() or {})
+    async def load(self, now: datetime | None = None) -> RuntimeState:
+        state = RuntimeState.from_dict(await self._store.async_load() or {})
+        state.prune(now or datetime.now(UTC))
+        return state
 
-    async def save(self, state: RuntimeState) -> None:
+    async def save(self, state: RuntimeState, now: datetime | None = None) -> None:
+        state.prune(now or datetime.now(UTC))
         await self._store.async_save(state.as_dict())
 
 
-def _is_recent_timestamp(value: str, cutoff: datetime) -> bool:
+def _is_recent_timestamp(value: str | None, cutoff: datetime) -> bool:
     timestamp = _parse_timestamp(value)
-    return timestamp is not None and timestamp >= cutoff
+    return (
+        timestamp is not None and timestamp.tzinfo is not None and timestamp >= cutoff
+    )
 
 
-def _parse_timestamp(value: str) -> datetime | None:
+def _parse_timestamp(value: str | None) -> datetime | None:
     try:
         return datetime.fromisoformat(value)
     except (TypeError, ValueError):

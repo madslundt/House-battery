@@ -27,9 +27,7 @@ def test_load_prediction_blends_live_and_historical_usage_by_horizon() -> None:
     now = datetime(2026, 9, 21, 10, 0, tzinfo=UTC)
     for offset_hours in (1, 18):
         for week in range(12):
-            learner.observe(
-                now + timedelta(hours=offset_hours, weeks=-week), 500
-            )
+            learner.observe(now + timedelta(hours=offset_hours, weeks=-week), 500)
     learner.recent_w.clear()
     learner.recent_w.extend([100] * 8)
 
@@ -47,6 +45,53 @@ def test_load_model_round_trips_through_persistence() -> None:
     learner.observe(when, 420)
     restored = LoadLearner.from_dict(learner.as_dict())
     assert restored.as_dict() == learner.as_dict()
+
+
+def test_load_learning_expires_stale_inputs_without_erasing_recent_habits() -> None:
+    learner = LoadLearner()
+    now = datetime(2026, 10, 22, 10, tzinfo=UTC)
+    learner.observe(now - timedelta(days=91), 900)
+    stale_key = learner.key(now - timedelta(days=91))
+    learner.observe(now - timedelta(days=1), 400)
+    recent_key = learner.key(now - timedelta(days=1))
+
+    learner.prune(now)
+
+    assert stale_key not in learner.buckets
+    assert learner.buckets[recent_key].mean_w == 400
+    assert not learner.recent_w
+    assert learner.predict_w(now, fallback_w=150) == 150
+
+
+def test_load_profile_adapts_after_a_long_established_consumption_pattern() -> None:
+    learner = LoadLearner()
+    now = datetime(2026, 10, 22, 10, tzinfo=UTC)
+    for _ in range(10000):
+        learner.observe(now, 100)
+    for _ in range(12):
+        learner.observe(now, 1000)
+
+    bucket = learner.buckets[learner.key(now)]
+    assert bucket.count == 12
+    assert bucket.mean_w > 650
+
+
+def test_legacy_profile_is_preserved_on_migration_then_expires() -> None:
+    learner = LoadLearner.from_dict(
+        {
+            "buckets": {"0:40": {"count": 10000, "mean_w": 400, "m2": 100}},
+            "recent_w": [999],
+        }
+    )
+    now = datetime(2026, 10, 22, 10, tzinfo=UTC)
+
+    learner.prune(now)
+    assert learner.buckets["0:40"].mean_w == 400
+    assert learner.buckets["0:40"].count == 12
+    assert not learner.recent_w
+
+    learner.prune(now + timedelta(days=91))
+    assert not learner.buckets
 
 
 def test_load_profile_uses_configured_local_time_across_dst_offsets() -> None:

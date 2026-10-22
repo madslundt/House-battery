@@ -1,23 +1,22 @@
 """Tests for the public optimizer sensor catalogue."""
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfEnergy, UnitOfPower
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.sensor import FbpValueSensor, SENSORS, daily_plan_blocks
+from house_battery.sensor import SENSORS, FbpValueSensor, daily_plan_blocks
 
 
 def _fake_daily_plan() -> dict[str, Any]:
-    day = datetime(2026, 9, 20, tzinfo=timezone.utc)
+    day = datetime(2026, 9, 20, tzinfo=UTC)
     return {
         "date": "2026-09-20",
         "created_at": None,
@@ -65,15 +64,15 @@ def test_daily_plan_blocks_covers_the_complete_local_day() -> None:
     blocks = daily_plan_blocks(data)
     assert blocks, "blocks must not be empty"
     # First block starts at the local day start, last ends at midnight.
-    assert blocks[0]["start"] == datetime(2026, 9, 20, tzinfo=timezone.utc).isoformat()
+    assert blocks[0]["start"] == datetime(2026, 9, 20, tzinfo=UTC).isoformat()
     assert (
-        blocks[-1]["end"] == datetime(2026, 9, 21, tzinfo=timezone.utc).isoformat()
+        blocks[-1]["end"] == datetime(2026, 9, 21, tzinfo=UTC).isoformat()
     )
     # Observed SOC is surfaced at the top level (requirement #9), not bound to
     # the midnight block, so its timestamp is reported explicitly.
     assert data["daily_plan"]["actual_soc"] == 100.0
     assert data["daily_plan"]["actual_soc_at"] == datetime(
-        2026, 9, 20, tzinfo=timezone.utc
+        2026, 9, 20, tzinfo=UTC
     ).isoformat()
 
 
@@ -157,15 +156,15 @@ def test_weekly_battery_discharge_is_exposed(period: str, period_name: str) -> N
 
 
 @pytest.mark.parametrize(
-    ("period", "period_name", "enabled"),
+    ("period", "period_name"),
     [
-        ("today", "today", True),
-        ("yesterday", "yesterday", False),
-        ("week", "this week", True),
-        ("last_week", "last week", False),
-        ("month", "this month", True),
-        ("last_month", "last month", False),
-        ("lifetime", "total", True),
+        ("today", "today"),
+        ("yesterday", "yesterday"),
+        ("week", "this week"),
+        ("last_week", "last week"),
+        ("month", "this month"),
+        ("last_month", "last month"),
+        ("lifetime", "total"),
     ],
 )
 @pytest.mark.parametrize(
@@ -179,7 +178,6 @@ def test_weekly_battery_discharge_is_exposed(period: str, period_name: str) -> N
 def test_battery_finances_cover_every_dashboard_period(
     period: str,
     period_name: str,
-    enabled: bool,
     metric: str,
     metric_name: str,
     amount: float,
@@ -197,7 +195,9 @@ def test_battery_finances_cover_every_dashboard_period(
     assert description.precision == 2
     assert description.device_class is SensorDeviceClass.MONETARY
     assert description.state_class is SensorStateClass.TOTAL
-    assert description.enabled_by_default is enabled
+    assert description.enabled_by_default is (
+        metric == "battery_net_savings_dkk" and period in {"today", "lifetime"}
+    )
 
     data = {key: amount} if period == "lifetime" else {period: {metric: amount}}
     sensor = SimpleNamespace(

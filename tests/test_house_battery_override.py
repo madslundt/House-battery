@@ -101,6 +101,7 @@ def test_override_action_is_none_for_auto() -> None:
 
 def test_set_override_action_persists_and_requests_refresh() -> None:
     coordinator = make_coordinator()
+    coordinator.runtime.execution_enabled = True
     store = StaticStore(RuntimeState())
     coordinator.runtime.override_action = OVERRIDE_AUTO
     coordinator.store = store
@@ -185,6 +186,7 @@ def test_override_select_exposes_the_four_modes_and_current_choice() -> None:
 
 def test_override_select_commands_the_coordinator() -> None:
     coordinator = make_coordinator()
+    coordinator.runtime.execution_enabled = True
     coordinator.runtime.override_action = OVERRIDE_AUTO
     coordinator.store = StaticStore(RuntimeState())
     select = FbpOperatingModeSelect(coordinator)

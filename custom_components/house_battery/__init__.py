@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .const import CONF_COMMISSIONED, DOMAIN, PLATFORMS
 from .coordinator import Fbp1200Coordinator
+from .entity import enabled_by_default
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -93,6 +96,41 @@ def _parse_datetime(value: str) -> datetime:
     if parsed is None or parsed.tzinfo is None:
         raise vol.Invalid("start and end must be ISO 8601 timestamps with an offset")
     return parsed
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Apply the compact catalogue once, preserving customized registry rows."""
+    if entry.version > 1:
+        return False
+    if entry.minor_version < 2:
+        config = {**entry.data, **entry.options}
+        registry = er.async_get(hass)
+        prefix = f"{entry.entry_id}_"
+        for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
+            if entity.platform != DOMAIN or not entity.unique_id.startswith(prefix):
+                continue
+            # HA timestamps creation and modification separately. Allow the
+            # creation-time gap, but conservatively preserve rows edited later
+            # (including explicitly re-enabled entities).
+            if (
+                entity.disabled_by is not None
+                or entity.modified_at - entity.created_at > timedelta(seconds=1)
+                or entity.name is not None
+                or entity.icon is not None
+                or entity.area_id is not None
+                or entity.hidden_by is not None
+                or entity.labels
+            ):
+                continue
+            key = entity.unique_id.removeprefix(prefix)
+            if not enabled_by_default(
+                key, config, direct_local=bool(config.get(CONF_HOST))
+            ):
+                registry.async_update_entity(
+                    entity.entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+                )
+        hass.config_entries.async_update_entry(entry, minor_version=2)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

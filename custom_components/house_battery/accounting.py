@@ -126,6 +126,19 @@ class EnergyLedger:
     charge_cost_intervals: int = 0
     discharge_value_intervals: int = 0
 
+    def prune(self, now: datetime) -> None:
+        """Expire interval evidence without changing lifetime financial totals."""
+        cutoff = now - timedelta(days=62)
+        retained = []
+        for interval in self.intervals:
+            try:
+                end = datetime.fromisoformat(interval.end)
+                if end.tzinfo is not None and cutoff < end <= now:
+                    retained.append(interval)
+            except (TypeError, ValueError):
+                continue
+        self.intervals = retained[-LEDGER_HISTORY_LIMIT:]
+
     @property
     def total_battery_net_savings_dkk(self) -> float | None:
         """Recorded tariff return, independent of household-flow accounting."""
@@ -145,9 +158,7 @@ class EnergyLedger:
         quality = (
             "good"
             if (
-                coverage >= 0.75
-                and accumulator.flow_samples >= 2
-                and price is not None
+                coverage >= 0.75 and accumulator.flow_samples >= 2 and price is not None
             )
             else "incomplete"
         )
@@ -167,11 +178,7 @@ class EnergyLedger:
         # Export is reported, never credited: we do not value exported energy as
         # avoided import (there is no export contract to settle against), so it
         # must not reduce the measured import cost.
-        actual = (
-            import_kwh * price
-            if price is not None and quality == "good"
-            else None
-        )
+        actual = import_kwh * price if price is not None and quality == "good" else None
         savings = (
             baseline - actual - degradation
             if baseline is not None and actual is not None
@@ -211,6 +218,7 @@ class EnergyLedger:
             discharge_value_dkk=discharge_value,
         )
         self.intervals = (self.intervals + [interval])[-LEDGER_HISTORY_LIMIT:]
+        self.prune(accumulator.start + timedelta(minutes=15))
         if battery_quality == "good":
             self.total_charge_kwh += charge_kwh
             self.total_discharge_kwh += discharge_kwh

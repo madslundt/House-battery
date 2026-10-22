@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from math import isfinite
 from typing import Any
 
@@ -15,6 +15,28 @@ class ActualDailyHistory:
     days: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     last_sample_at: str | None = None
     sample_count: int = 0
+
+    def prune(self, now: datetime) -> None:
+        """Retain eight local calendar days, including after offline gaps."""
+        first_day = now.date() - timedelta(days=7)
+        retained = {}
+        for key, blocks in self.days.items():
+            try:
+                if first_day <= date.fromisoformat(key) <= now.date():
+                    retained[key] = blocks
+            except (TypeError, ValueError):
+                continue
+        self.days = dict(sorted(retained.items()))
+        if self.last_sample_at:
+            try:
+                timestamp = datetime.fromisoformat(self.last_sample_at)
+                if (
+                    timestamp.tzinfo is None
+                    or not first_day <= timestamp.date() <= now.date()
+                ):
+                    self.last_sample_at = None
+            except (TypeError, ValueError):
+                self.last_sample_at = None
 
     def record(
         self,
@@ -28,12 +50,11 @@ class ActualDailyHistory:
         if now.tzinfo is None:
             raise ValueError("Actual battery history requires an aware timestamp")
         timestamp = now.isoformat()
+        self.prune(now)
         day = now.date().isoformat()
         had_day = day in self.days
         prior_timestamp = (
-            datetime.fromisoformat(self.last_sample_at)
-            if self.last_sample_at
-            else None
+            datetime.fromisoformat(self.last_sample_at) if self.last_sample_at else None
         )
         elapsed = 0.0
         if prior_timestamp is not None and prior_timestamp.date() == now.date():

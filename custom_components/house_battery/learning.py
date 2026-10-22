@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from math import isfinite, sqrt
 from statistics import median
 from typing import Any
@@ -12,6 +12,12 @@ from typing import Any
 BUCKETS_PER_DAY = 96
 MIN_HISTORY_WEIGHT_COUNT = 4
 FULL_HISTORY_WEIGHT_COUNT = 12
+# EvidenceCollector contributes one quarter-hour average each week to a
+# weekday bucket. Twelve effective observations track roughly three months.
+MAX_BUCKET_WEIGHT = FULL_HISTORY_WEIGHT_COUNT
+LOAD_PROFILE_MAX_AGE = timedelta(days=90)
+RECENT_LOAD_MAX_AGE = timedelta(minutes=30)
+_VALID_BUCKET_KEYS = {f"{day}:{slot}" for day in range(7) for slot in range(96)}
 
 # Horizon-dependent load blending.  The weight given to the historical
 # weekday/time-of-day profile grows with how far ahead the prediction reaches:
@@ -39,12 +45,10 @@ def _distance_history_weight(hours_ahead: float) -> float:
         return NEAR_HISTORY_WEIGHT
     if hours_ahead >= LONG_HORIZON_HOURS:
         return LONG_HISTORY_WEIGHT
-    fraction = (
-        hours_ahead - NEAR_HORIZON_HOURS
-    ) / (LONG_HORIZON_HOURS - NEAR_HORIZON_HOURS)
-    return NEAR_HISTORY_WEIGHT + (
-        LONG_HISTORY_WEIGHT - NEAR_HISTORY_WEIGHT
-    ) * fraction
+    fraction = (hours_ahead - NEAR_HORIZON_HOURS) / (
+        LONG_HORIZON_HOURS - NEAR_HORIZON_HOURS
+    )
+    return NEAR_HISTORY_WEIGHT + (LONG_HISTORY_WEIGHT - NEAR_HISTORY_WEIGHT) * fraction
 
 
 @dataclass(slots=True)
@@ -54,8 +58,14 @@ class LoadBucket:
     count: int = 0
     mean_w: float = 0.0
     m2: float = 0.0
+    last_seen: str | None = None
 
     def observe(self, watts: float) -> None:
+        # Keep a bounded effective sample weight so old habits cannot drown
+        # out changes in consumption forever. No raw history is needed.
+        if self.count >= MAX_BUCKET_WEIGHT:
+            self.m2 *= (MAX_BUCKET_WEIGHT - 2) / max(1, self.count - 1)
+            self.count = MAX_BUCKET_WEIGHT - 1
         self.count += 1
         delta = watts - self.mean_w
         self.mean_w += delta / self.count
@@ -77,6 +87,7 @@ class LoadLearner:
     error_observations: int = 0
     time_zone: tzinfo = field(default=UTC, repr=False, compare=False)
     bucket_timezone: str | None = None
+    recent_at: str | None = None
 
     def __post_init__(self) -> None:
         if self.bucket_timezone is None:
@@ -89,8 +100,27 @@ class LoadLearner:
             self.buckets.clear()
             self.observations = 0
             self.absolute_error_sum_w = 0.0
+            self.error_observations = 0
+            self.recent_w.clear()
+            self.recent_at = None
             self.bucket_timezone = name
         self.time_zone = time_zone
+
+    def prune(self, now: datetime) -> None:
+        """Expire stale inputs while retaining compact weekly consumption habits."""
+        cutoff = now - LOAD_PROFILE_MAX_AGE
+        for key, bucket in list(self.buckets.items()):
+            # Older versions had no timestamps. Start their expiry clock on
+            # migration instead of discarding the household's learned profile.
+            if bucket.last_seen is None:
+                bucket.last_seen = now.isoformat()
+            elif not _timestamp_after(bucket.last_seen, cutoff):
+                self.buckets.pop(key)
+        if self.recent_w and not _timestamp_after(
+            self.recent_at, now - RECENT_LOAD_MAX_AGE
+        ):
+            self.recent_w.clear()
+            self.recent_at = None
 
     def key(self, when: datetime) -> str:
         """Return the configured local weekday/quarter-hour bucket."""
@@ -100,7 +130,10 @@ class LoadLearner:
         return f"{local.weekday()}:{local.hour * 4 + local.minute // 15}"
 
     def predict_w(
-        self, when: datetime, fallback_w: float | None = None, now: datetime | None = None
+        self,
+        when: datetime,
+        fallback_w: float | None = None,
+        now: datetime | None = None,
     ) -> float | None:
         """Predict load watts at ``when``.
 
@@ -137,9 +170,10 @@ class LoadLearner:
             / (FULL_HISTORY_WEIGHT_COUNT - MIN_HISTORY_WEIGHT_COUNT + 1),
         )
         distance_weight = _distance_history_weight(hours_ahead)
-        history_weight = NEAR_HISTORY_WEIGHT + (
-            distance_weight - NEAR_HISTORY_WEIGHT
-        ) * evidence_factor
+        history_weight = (
+            NEAR_HISTORY_WEIGHT
+            + (distance_weight - NEAR_HISTORY_WEIGHT) * evidence_factor
+        )
         if recent is None:
             return bucket.mean_w
         return recent * (1 - history_weight) + bucket.mean_w * history_weight
@@ -154,7 +188,9 @@ class LoadLearner:
             self.error_observations += 1
         bucket = self.buckets.setdefault(self.key(when), LoadBucket())
         bucket.observe(watts)
+        bucket.last_seen = when.isoformat()
         self.recent_w.append(watts)
+        self.recent_at = when.isoformat()
         self.observations += 1
 
     @property
@@ -182,27 +218,42 @@ class LoadLearner:
             "absolute_error_sum_w": self.absolute_error_sum_w,
             "error_observations": self.error_observations,
             "bucket_timezone": self.bucket_timezone,
+            "recent_at": self.recent_at,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LoadLearner:
         learner = cls()
         for key, value in data.get("buckets", {}).items():
+            if key not in _VALID_BUCKET_KEYS:
+                continue
+            count = max(0, int(value.get("count", 0)))
             learner.buckets[key] = LoadBucket(
-                count=int(value.get("count", 0)),
+                count=min(MAX_BUCKET_WEIGHT, count),
                 mean_w=float(value.get("mean_w", 0)),
-                m2=float(value.get("m2", 0)),
+                m2=float(value.get("m2", 0))
+                * min(1, (MAX_BUCKET_WEIGHT - 1) / max(1, count - 1)),
+                last_seen=value.get("last_seen"),
             )
         learner.recent_w.extend(float(value) for value in data.get("recent_w", []))
         learner.observations = int(data.get("observations", 0))
         learner.absolute_error_sum_w = float(data.get("absolute_error_sum_w", 0))
         learner.error_observations = int(data.get("error_observations", 0))
         learner.bucket_timezone = str(data.get("bucket_timezone", "UTC"))
+        learner.recent_at = data.get("recent_at")
         return learner
 
 
 def _timezone_name(time_zone: tzinfo) -> str:
     return getattr(time_zone, "key", str(time_zone))
+
+
+def _timestamp_after(value: str | None, cutoff: datetime) -> bool:
+    try:
+        timestamp = datetime.fromisoformat(value)
+        return timestamp.tzinfo is not None and timestamp >= cutoff
+    except (TypeError, ValueError):
+        return False
 
 
 @dataclass(slots=True)
