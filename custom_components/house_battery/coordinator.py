@@ -78,6 +78,7 @@ from .models import (
     Action,
     Plan,
     PlannerSettings,
+    PlannedSlot,
     PowerFlowSnapshot,
     PriceSlot,
     derive_power_flow,
@@ -653,6 +654,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc: float,
         settings: PlannerSettings,
         current_action: Action,
+        committed_slot: PlannedSlot | None = None,
     ) -> OpportunisticPlanDecision:
         """Compare the normal plan with an opt-in higher-target candidate."""
         normal_plan = optimize(
@@ -661,6 +663,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             soc=soc,
             settings=settings,
             current_action=current_action,
+            committed_slot=committed_slot,
         )
         opportunistic_settings = replace(
             settings,
@@ -683,6 +686,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             soc=soc,
             settings=opportunistic_settings,
             current_action=current_action,
+            committed_slot=committed_slot,
         )
         return select_opportunistic_plan(
             normal_plan,
@@ -957,12 +961,34 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 settings = self._settings()
                 settings = apply_storage_policy(settings)
                 current_action = action if action is not Action.SAFE else Action.GRID
+                committed_slot = (
+                    self.runtime.daily_plan.slot_at(now)
+                    if self._override_action() is None else None
+                )
+                if committed_slot is not None and committed_slot.action is Action.CHARGE:
+                    # Plan from the same mode and ceiling that execution holds
+                    # until the tariff boundary, including after a disconnect.
+                    allowed_target = (
+                        OPPORTUNISTIC_TARGET_SOC
+                        if self.runtime.opportunistic_charging_enabled
+                        else settings.target_soc
+                    )
+                    committed_slot = replace(
+                        committed_slot,
+                        charge_target_soc=min(
+                            allowed_target,
+                            committed_slot.charge_target_soc
+                            if committed_slot.charge_target_soc is not None
+                            else math.ceil(committed_slot.soc_end),
+                        ),
+                    )
                 storage_decision = self._optimize_with_storage_policy(
                     slots,
                     now=now,
                     soc=soc,
                     settings=settings,
                     current_action=current_action,
+                    committed_slot=committed_slot,
                 )
                 self.plan = storage_decision.plan
                 effective_settings = storage_decision.settings
@@ -1017,9 +1043,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         published_slot.action is Action.CHARGE
                         and self._override_action() is None
                     ):
-                        # The ceiling belongs to the held action too. Otherwise
-                        # a fresh normal/grid recommendation can lower it to 90%
-                        # and stop a published full charge early (observed at 96%).
+                        # Execution owns this interval's ceiling in both
+                        # directions. A future 100% opportunity must not raise
+                        # a held 90% slot, or lower a held full charge early.
                         # User opt-out/lower limits remain effective immediately;
                         # manual overrides continue to use their normal target.
                         allowed_target = (
@@ -1033,7 +1059,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                             else math.ceil(published_slot.soc_end)
                         )
                         held_target = min(allowed_target, published_target)
-                        if held_target > effective_settings.target_soc:
+                        if held_target != effective_settings.target_soc:
                             effective_settings = replace(
                                 effective_settings, target_soc=held_target
                             )

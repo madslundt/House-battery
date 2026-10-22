@@ -33,7 +33,10 @@ CONTROL_REGISTERS = (
     REG_CUSTOM_MODE,
 )
 _READ_TIMEOUT_SECONDS = 10
-_READ_RETRY_DELAYS_SECONDS = (0.25, 0.75)
+# Cover brief device/network outages with four seconds of bounded backoff.
+# Only idempotent reads receive this retry window; writes still require a
+# successful read-back proving a non-apply before they may be repeated.
+_READ_RETRY_DELAYS_SECONDS = (0.25, 0.75, 1.0, 2.0)
 _MAX_CONFIRMED_WRITE_ATTEMPTS = 2
 _MAX_FRAME_BYTES = 256 * 1024
 _MODE_VERIFY_DELAY_SECONDS = 0.5
@@ -256,7 +259,7 @@ class FbpLocalTcpClient:
         command: dict[str, Any],
         decoder: Callable[[dict[str, Any]], Any],
     ) -> Any:
-        """Retry idempotent reads three times, reconnecting between attempts."""
+        """Retry idempotent reads with bounded backoff and fresh connections."""
         attempts = len(_READ_RETRY_DELAYS_SECONDS) + 1
         for attempt in range(attempts):
             try:

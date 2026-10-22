@@ -242,6 +242,10 @@ def _reopt_current_interval(
     for slot in future_slots:
         if slot.end <= cutoff:
             continue
+        if slot.start >= interval_end:
+            # The following tariff's ceiling must not enter this tail via a
+            # zero-duration piece and get merged into the held current slot.
+            break
         if slot.start < cutoff:
             slot = replace(slot, start=cutoff)
         if slot.end <= interval_end:

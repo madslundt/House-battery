@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.models import Action, PlannerSettings, PriceSlot
+from house_battery.models import Action, PlannedSlot, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 
 BASE = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
@@ -344,6 +344,90 @@ def test_current_partial_price_interval_keeps_the_observed_action() -> None:
     assert plan.slots[0].end == BASE + timedelta(minutes=15)
     assert plan.slots[0].action is Action.GRID
     assert Action.BATTERY in [item.action for item in plan.slots[1:]]
+
+
+@pytest.mark.parametrize("action", [Action.CHARGE, Action.BATTERY])
+def test_last_seconds_preserve_mode_when_movement_rounds_to_zero(action: Action) -> None:
+    plan = optimize(
+        slots([1.1, 1.15, 4.0, 4.0], load_w=250),
+        now=BASE + timedelta(minutes=15, seconds=-4),
+        soc=60,
+        settings=settings(),
+        current_action=action,
+    )
+
+    assert plan.slots[0].action is action
+    assert plan.slots[0].soc_end == plan.slots[0].soc_start
+    assert plan.slots[0].battery_charge_wh == 0
+    assert plan.slots[0].battery_discharge_wh == 0
+
+
+@pytest.mark.parametrize("action,soc", [(Action.CHARGE, 90), (Action.BATTERY, 20)])
+def test_last_seconds_still_release_mode_at_physical_limit(action: Action, soc: float) -> None:
+    plan = optimize(
+        slots([1.0, 1.0], load_w=250),
+        now=BASE + timedelta(minutes=15, seconds=-4),
+        soc=soc,
+        settings=settings(),
+        current_action=action,
+    )
+
+    assert plan.slots[0].action is Action.GRID
+
+
+@pytest.mark.parametrize("action,load_w", [(Action.CHARGE, 1200), (Action.BATTERY, 0)])
+def test_last_seconds_release_mode_without_available_power(action: Action, load_w: float) -> None:
+    plan = optimize(
+        slots([1.0, 1.0], load_w=load_w),
+        now=BASE + timedelta(minutes=15, seconds=-4),
+        soc=60, settings=settings(), current_action=action,
+    )
+
+    assert plan.slots[0].action is Action.GRID
+
+
+@pytest.mark.parametrize("action", [Action.CHARGE, Action.GRID])
+def test_future_soc_uses_committed_interval_instead_of_observed_mode(action: Action) -> None:
+    now = BASE + timedelta(minutes=5)
+    committed = PlannedSlot(
+        start=BASE, end=BASE + timedelta(minutes=15), action=action,
+        price=1.0, expected_load_wh=62.5, grid_import_wh=62.5,
+        battery_charge_wh=0, battery_discharge_wh=0,
+        soc_start=95, soc_end=100 if action is Action.CHARGE else 95,
+        interval_cost_dkk=0, baseline_cost_dkk=0, reason="published",
+        charge_target_soc=100 if action is Action.CHARGE else None,
+    )
+    plan = optimize(
+        slots([1.0, 1.0, 4.0, 4.0], load_w=250), now=now, soc=95,
+        settings=settings(),
+        current_action=Action.GRID if action is Action.CHARGE else Action.CHARGE,
+        committed_slot=committed,
+    )
+
+    assert plan.slots[0].action is action
+    if action is Action.CHARGE:
+        assert plan.slots[0].soc_end > 99
+        assert plan.slots[0].charge_target_soc == 100
+    else:
+        assert plan.slots[0].soc_end == plan.slots[0].soc_start
+    assert plan.slots[1].soc_start == plan.slots[0].soc_end
+
+
+@pytest.mark.parametrize("end_minutes", [0, 30])
+def test_expired_or_different_tariff_commitment_is_ignored(end_minutes: int) -> None:
+    committed = PlannedSlot(
+        start=BASE - timedelta(minutes=15), end=BASE + timedelta(minutes=end_minutes),
+        action=Action.GRID, price=1.0, expected_load_wh=0, grid_import_wh=0,
+        battery_charge_wh=0, battery_discharge_wh=0, soc_start=60, soc_end=60,
+        interval_cost_dkk=0, baseline_cost_dkk=0, reason="stale commitment",
+    )
+    plan = optimize(
+        slots([1.0, 4.0], load_w=250), now=BASE + timedelta(minutes=5),
+        soc=60, settings=settings(), current_action=Action.CHARGE,
+        committed_slot=committed,
+    )
+
+    assert plan.slots[0].action is Action.CHARGE
 
 
 def test_planner_is_reproducible() -> None:

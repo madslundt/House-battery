@@ -84,6 +84,30 @@ def assert_invariants(daily: DailyPlan) -> None:
         )
 
 
+def test_next_charge_interval_cannot_raise_the_current_interval_ceiling() -> None:
+    start = datetime(2026, 10, 22, 4, 45, tzinfo=PLUS2)
+    end = start + timedelta(minutes=15)
+    cutoff = end - timedelta(seconds=4)
+    published = replace(
+        slot(start, end, Action.CHARGE, soc_start=80, soc_end=90),
+        charge_target_soc=90,
+    )
+    tail = replace(published, start=cutoff, soc_start=87)
+    following = replace(
+        published, start=end, end=end + timedelta(minutes=15),
+        soc_start=90, soc_end=100, charge_target_soc=100,
+    )
+    day_start, day_end = local_day_bounds(start)
+    reconciled = reconcile_daily_plan(
+        DailyPlan(date="2026-10-22", slots=(published,)), (tail, following),
+        cutoff=cutoff, day_start=day_start, horizon_end=day_end,
+    )
+
+    assert reconciled.slot_at(cutoff).charge_target_soc == 90
+    assert reconciled.slot_at(end).charge_target_soc == 100
+    assert_invariants(reconciled)
+
+
 @pytest.mark.parametrize("stored_target", [None, 100])
 def test_same_action_replan_preserves_published_charge_ceiling_across_restart(
     stored_target: float | None,

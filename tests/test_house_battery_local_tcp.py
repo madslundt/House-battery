@@ -147,7 +147,53 @@ def test_retries_the_read_only_startup_snapshot_after_stale_sockets() -> None:
     assert client.closes == 2
 
 
-def test_retries_control_reads_after_timeout_but_preserves_last_error() -> None:
+@pytest.mark.parametrize("operation", ["async_snapshot", "async_read_controls"])
+def test_read_recovers_from_a_three_second_device_outage(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    elapsed = 0.0
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        nonlocal elapsed
+        delays.append(delay)
+        elapsed += delay
+
+    class RecoveringClient(FbpLocalTcpClient):
+        def __init__(self) -> None:
+            self.requests = 0
+            self.closes = 0
+
+        async def _request(self, command: dict):
+            self.requests += 1
+            if elapsed < 3:
+                raise LocalProtocolError("battery temporarily unavailable")
+            if command["Get"] == "EnergyParameter":
+                return {"SSumInfoList": [{"AverageBatteryAverageSOC": 89}]}
+            return {"ControlInfo": {REG_MIN_SOC: 10, REG_MAX_SOC: 100}}
+
+        async def async_close(self) -> None:
+            self.closes += 1
+
+    monkeypatch.setattr("house_battery.local_tcp.asyncio.sleep", sleep)
+    import asyncio
+
+    client = RecoveringClient()
+    result = asyncio.run(getattr(client, operation)())
+
+    if operation == "async_snapshot":
+        assert result.soc == 89
+    else:
+        assert result == {REG_MIN_SOC: "10", REG_MAX_SOC: "100"}
+    assert elapsed == 4
+    assert delays == [0.25, 0.75, 1, 2]
+    assert client.requests == 5
+    assert client.closes == 4
+
+
+def test_retries_control_reads_after_timeout_but_preserves_last_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class RetryingClient(FbpLocalTcpClient):
         def __init__(self, failures: int) -> None:
             self.requests = 0
@@ -163,6 +209,12 @@ def test_retries_control_reads_after_timeout_but_preserves_last_error() -> None:
         async def async_close(self) -> None:
             self.closes += 1
 
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("house_battery.local_tcp.asyncio.sleep", sleep)
     import asyncio
 
     recovered = RetryingClient(failures=2)
@@ -173,11 +225,44 @@ def test_retries_control_reads_after_timeout_but_preserves_last_error() -> None:
     assert recovered.requests == 3
     assert recovered.closes == 2
 
-    unavailable = RetryingClient(failures=3)
+    delays.clear()
+    unavailable = RetryingClient(failures=5)
     with pytest.raises(LocalProtocolError, match="read timed out"):
         asyncio.run(unavailable.async_read_controls())
-    assert unavailable.requests == 3
-    assert unavailable.closes == 3
+    assert unavailable.requests == 5
+    assert unavailable.closes == 5
+    assert sum(delays) == 4
+
+
+def test_ambiguous_write_is_not_replayed_when_all_readback_retries_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnavailableReadbackClient(FbpLocalTcpClient):
+        def __init__(self) -> None:
+            self.writes = 0
+            self.reads = 0
+
+        async def _request(self, command: dict):
+            if "Set" in command:
+                self.writes += 1
+                raise LocalProtocolError("write response timed out")
+            self.reads += 1
+            raise LocalProtocolError("readback unavailable")
+
+        async def async_close(self) -> None:
+            pass
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    monkeypatch.setattr("house_battery.local_tcp.asyncio.sleep", sleep)
+    import asyncio
+
+    client = UnavailableReadbackClient()
+    with pytest.raises(LocalProtocolError, match="write response timed out"):
+        asyncio.run(client.async_set_mode("Charge", 500, min_soc=10, max_soc=100))
+    assert client.writes == 1
+    assert client.reads == 5
 
 
 def test_timed_out_mode_write_is_not_retried_when_readback_confirms_it_landed(

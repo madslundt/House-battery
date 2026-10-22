@@ -135,6 +135,8 @@ def _slot_transition(
     settings: PlannerSettings,
     minimum_step: int,
     maximum_step: int,
+    *,
+    allow_substep_continuation: bool = False,
 ) -> tuple[_State, tuple[float, float, float, float, float, str], float] | None:
     energy_wh = state.energy_step * settings.energy_step_wh
     load_wh = max(0.0, slot.expected_load_wh)
@@ -146,6 +148,7 @@ def _slot_transition(
     grid_wh = load_wh
     charged_wh = 0.0
     discharged_wh = 0.0
+    can_move = False
     reason = "Grid supplies forecast load while energy is held for a better interval"
 
     if action is Action.CHARGE:
@@ -156,6 +159,7 @@ def _slot_transition(
             available_charge_input_w * slot.hours,
             headroom_wh / charge_efficiency,
         )
+        can_move = input_wh > 0
         if input_wh > settings.energy_step_wh / 4:
             # Never charge on a forecast price that is above the discharge
             # floor.  Forecasts are uncertain hints — charging on a forecast
@@ -190,6 +194,7 @@ def _slot_transition(
             settings.discharge_power_w * slot.hours,
             available_wh * discharge_efficiency,
         )
+        can_move = deliverable_wh > 0
         if deliverable_wh > settings.energy_step_wh / 4:
             discharged_wh = deliverable_wh / discharge_efficiency
             grid_wh -= deliverable_wh
@@ -212,10 +217,21 @@ def _slot_transition(
     # reserve/target boundary the requested mode can otherwise do nothing;
     # retaining BATTERY there merely avoids a switch penalty while publishing a
     # misleading action for hours. Let GRID represent those idle intervals.
-    if action is Action.BATTERY and actual_delta_wh >= 0:
+    # The current tariff tail is different: a few seconds of real movement
+    # may round to zero without reaching a physical limit. Preserve its mode
+    # without inventing energy or a switch that execution will never make.
+    substep_continuation = (
+        allow_substep_continuation and can_move and actual_delta_wh == 0
+    )
+    if action is Action.BATTERY and actual_delta_wh >= 0 and not substep_continuation:
         return None
-    if action is Action.CHARGE and actual_delta_wh <= 0:
+    if action is Action.CHARGE and actual_delta_wh <= 0 and not substep_continuation:
         return None
+    if substep_continuation:
+        reason = (
+            f"Continue {action.value} mode through the price boundary; "
+            "remaining energy is below planning resolution"
+        )
     if action is Action.CHARGE:
         charged_wh = max(0.0, actual_delta_wh)
         input_wh = charged_wh / charge_efficiency
@@ -302,8 +318,13 @@ def optimize(
     soc: float,
     settings: PlannerSettings,
     current_action: Action = Action.GRID,
+    committed_slot: PlannedSlot | None = None,
 ) -> Plan:
-    """Return the least-cost executable plan across every known price slot."""
+    """Plan future intervals from observed SOC and an optional held current slot.
+
+    The coordinator supplies the already-published action and permitted charge
+    ceiling. They constrain only the remainder of that same tariff interval.
+    """
     settings.validate()
     source_slots = tuple(slots)
     first_slot_is_partial = any(slot.start < now < slot.end for slot in source_slots)
@@ -323,6 +344,11 @@ def optimize(
         return Plan(
             now, (), 0, 0, 0, 0, 0, "No complete contiguous future price intervals"
         )
+    if committed_slot is not None and not (
+        committed_slot.start < now < committed_slot.end
+        and committed_slot.end == valid[0].end
+    ):
+        committed_slot = None
     if not 0 <= soc <= 100:
         return Plan(now, (), 0, 0, 0, 0, 0, "Battery SOC is invalid")
 
@@ -348,6 +374,9 @@ def optimize(
     initial = _State(initial_step, current_action)
     layers: list[dict[_State, _Node]] = [{initial: _Node(0.0, 0.0, None, None)}]
     for slot_index, slot in enumerate(valid):
+        holding_interval = slot_index == 0 and (
+            first_slot_is_partial or committed_slot is not None
+        )
         previous_layer = layers[-1]
         layer: dict[_State, _Node] = {}
         for state in sorted(
@@ -359,23 +388,36 @@ def optimize(
         ):
             node = previous_layer[state]
             actions = _allowed_actions()
-            if slot_index == 0 and first_slot_is_partial:
+            interval_maximum_step = maximum_step
+            continuing_action = state.action
+            if slot_index == 0 and committed_slot is not None:
+                continuing_action = committed_slot.action
+                if (
+                    continuing_action is Action.CHARGE
+                    and committed_slot.charge_target_soc is not None
+                ):
+                    interval_maximum_step = int(
+                        settings.capacity_wh * committed_slot.charge_target_soc
+                        / 100 // step_wh
+                    )
+            if holding_interval:
                 # The electricity price is constant for the whole source slot.
-                # Keep the already-observed physical action until that tariff
+                # Keep the committed (or observed) action until that tariff
                 # boundary instead of allowing every minute-level refresh to
                 # create a new economic block. If the action can no longer move
                 # energy (BATTERY at reserve or CHARGE at the ceiling), fall
                 # back to the normal candidates so physical limits still win.
                 continuing = _slot_transition(
                     state,
-                    state.action,
+                    continuing_action,
                     slot,
                     settings,
                     minimum_step,
-                    maximum_step,
+                    interval_maximum_step,
+                    allow_substep_continuation=True,
                 )
                 if continuing is not None:
-                    actions = (state.action,)
+                    actions = (continuing_action,)
             for action in actions:
                 result = _slot_transition(
                     state,
@@ -383,7 +425,11 @@ def optimize(
                     slot,
                     settings,
                     minimum_step,
-                    maximum_step,
+                    interval_maximum_step,
+                    allow_substep_continuation=(
+                        holding_interval
+                        and action is continuing_action
+                    ),
                 )
                 if result is None:
                     continue
@@ -472,6 +518,14 @@ def optimize(
         )
         next_energy = next_state.energy_step * step_wh
         baseline = max(0.0, slot.expected_load_wh) / 1000 * slot.price
+        charge_target = None
+        if next_state.action is Action.CHARGE:
+            charge_target = settings.target_soc
+            if (
+                not planned and committed_slot is not None
+                and committed_slot.charge_target_soc is not None
+            ):
+                charge_target = committed_slot.charge_target_soc
         planned.append(
             PlannedSlot(
                 start=slot.start,
@@ -489,9 +543,7 @@ def optimize(
                 reason=reason,
                 price_source=slot.source,
                 price_uncertainty_dkk_per_kwh=slot.uncertainty_dkk_per_kwh,
-                charge_target_soc=(
-                    settings.target_soc if next_state.action is Action.CHARGE else None
-                ),
+                charge_target_soc=charge_target,
             )
         )
         previous_energy = next_energy

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,8 +30,9 @@ from house_battery.const import (
     CONF_SOC,
 )
 from house_battery.coordinator import Fbp1200Coordinator
+from house_battery.dailyplan import DailyPlan
 from house_battery.local_tcp import FbpLocalSnapshot, LocalProtocolError
-from house_battery.models import Action
+from house_battery.models import Action, PlannedSlot, PriceSlot
 from house_battery.runtime import RuntimeState
 
 
@@ -1169,6 +1171,106 @@ def test_transient_local_tcp_loss_pauses_writes_without_disabling_control() -> N
         assert degraded["execution_enabled"]
         assert len(safe_calls) == 1
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("published_target", [90, 100])
+def test_charge_plan_resumes_after_disconnect_across_price_boundary(
+    monkeypatch, published_target: float,
+) -> None:
+    """A missed poll must retain the full-charge commitment and resume fresh."""
+    import house_battery.coordinator as coordinator_module
+
+    boundary = datetime(2026, 10, 22, 3, tzinfo=UTC)
+    fixed_now = boundary - timedelta(seconds=4)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.astimezone(tz) if tz else fixed_now.replace(tzinfo=None)
+
+    class FlakyClient:
+        unavailable = False
+
+        async def async_snapshot(self) -> FbpLocalSnapshot:
+            if self.unavailable:
+                raise LocalProtocolError("temporary disconnect")
+            return replace(_snapshot(1100, 0, 250), soc=87)
+
+        async def async_read_controls(self) -> dict[str, str]:
+            # The device can reconnect in idle; the held plan still owns this interval.
+            return {
+                "3000": "1", "3003": "1,0,0,0", "3030": "1",
+                "3023": "10", "3024": "100",
+            }
+
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        coordinator = Fbp1200Coordinator(hass, Entry({
+            "host": "192.168.30.90", "commissioned": True,
+            CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
+        }))
+        coordinator.store = StaticStore(coordinator.runtime)
+        coordinator._startup_guard_passed = True
+        coordinator.runtime.execution_enabled = True
+        coordinator.runtime.opportunistic_charging_enabled = True
+        coordinator.runtime.settings.update({"reserve_soc": 10, "absolute_min_soc": 5})
+        client = FlakyClient()
+        coordinator.local_client = client
+        hass.states.async_set("binary_sensor.grid_available", "on")
+        prices = [1.1, 1.15, 1.2] + [4.0] * 8
+        price_slots = [PriceSlot(
+            boundary + timedelta(minutes=15 * (index - 1)),
+            boundary + timedelta(minutes=15 * index), price,
+            expected_load_wh=62.5 if index < 3 else 200,
+        ) for index, price in enumerate(prices)]
+        coordinator._price_slots = lambda now: price_slots
+        coordinator._extreme_price_ratio = 0.0
+        coordinator._extreme_price_is_extreme = False
+        published = tuple(PlannedSlot(
+            start=s.start, end=s.end, action=Action.CHARGE,
+            price=s.price, expected_load_wh=62.5, grid_import_wh=250,
+            battery_charge_wh=150, battery_discharge_wh=0,
+            soc_start=87, soc_end=100, interval_cost_dkk=.2,
+            baseline_cost_dkk=.1, reason="published charge",
+            charge_target_soc=published_target,
+        ) for s in price_slots[:2])
+        coordinator.runtime.daily_plan = DailyPlan(date="2026-10-22", slots=published)
+        commands = []
+
+        async def capture_command(action, now, **kwargs):
+            commands.append((action, kwargs["target_soc"]))
+            return True, "acknowledged"
+
+        coordinator.actuator.async_command = capture_command
+        active = await coordinator._async_update_data()
+        assert active["executable_slot"]["action"] == "charge"
+        assert commands == [(Action.CHARGE, published_target)]
+        saved = coordinator.runtime.daily_plan.as_dict()
+
+        nonlocal fixed_now
+        fixed_now = boundary + timedelta(seconds=1)
+        client.unavailable = True
+        recovering = await coordinator._async_update_data()
+        assert recovering["system_state"] == "RECOVERING"
+        assert recovering["soc"] is None
+        assert recovering["execution_enabled"]
+        assert coordinator.runtime.daily_plan.as_dict() == saved
+        assert len(commands) == 1
+
+        fixed_now = boundary + timedelta(seconds=8)
+        client.unavailable = False
+        resumed = await coordinator._async_update_data()
+        assert resumed["system_state"] == "ACTIVE"
+        assert resumed["healthy"]
+        assert resumed["executable_slot"]["action"] == "charge"
+        assert resumed["plan"]["slots"][0]["action"] == "charge"
+        assert resumed["plan"]["slots"][0]["soc_end"] > 90
+        assert commands == [(Action.CHARGE, published_target), (Action.CHARGE, 100)]
+
+    monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
     asyncio.run(scenario())
 
 
