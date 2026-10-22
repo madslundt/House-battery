@@ -25,6 +25,7 @@ from .const import (
     CONF_COMMISSIONED,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
+    CONF_GRID_ISOLATION_SWITCH,
     CONF_LOAD_POWER,
     CONF_OPERATING_MODE,
     CONF_PRICE_ENTITIES,
@@ -744,6 +745,24 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return f"{result}; writes resume automatically when health recovers"
         return result
 
+    async def _restore_grid_during_pause(self, result: str) -> str:
+        """Restore mains independently of unavailable/paused inverter controls."""
+        if (
+            not self.is_direct_local
+            or not self.runtime.execution_enabled
+            or not self.config.get(CONF_GRID_ISOLATION_SWITCH)
+        ):
+            return result
+        restored = await self.actuator.async_set_grid_isolation(True)
+        detail = (
+            "grid input confirmed on"
+            if restored
+            else "grid input could not be restored; will retry"
+        )
+        if not restored:
+            self._record_command_result(False, detail)
+        return f"{result}; {detail}"
+
     def _record_command_result(self, success: bool, result: str) -> None:
         """Count failed writes and schedule bounded integration recovery."""
         if success:
@@ -941,7 +960,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Awaiting fresh post-restart telemetry and control validation: "
                 + "; ".join(problems or ["grid availability is not confirmed"])
             )
-            command_result = "startup gate is inhibiting writes"
+            command_result = await self._restore_grid_during_pause(
+                "startup gate is inhibiting writes"
+            )
         elif grid_available is False:
             self.plan = None
             state = "OUTAGE"
@@ -956,7 +977,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"paused for up to {LOCAL_TCP_RECOVERY_GRACE.seconds // 60} minutes "
                 f"({remaining_seconds} seconds remaining): {local_problem}"
             )
-            command_result = (
+            command_result = await self._restore_grid_during_pause(
                 "automatic writes paused during local TCP recovery grace period"
             )
         elif problems:
@@ -1015,7 +1036,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "automatic writes: "
                         + (self.plan.reason if self.plan else "; ".join(problems))
                     )
-                    command_result = "startup gate is inhibiting writes"
+                    command_result = await self._restore_grid_during_pause(
+                        "startup gate is inhibiting writes"
+                    )
                 else:
                     state = "DEGRADED"
                     reason = self.plan.reason if self.plan else "; ".join(problems)
@@ -1096,7 +1119,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                 if not self._startup_guard_passed:
                     self._startup_guard_passed = True
-                    command_result = (
+                    command_result = await self._restore_grid_during_pause(
                         "startup freshness gate passed; no write on first refresh"
                     )
                 elif state == "ACTIVE":
@@ -1113,6 +1136,19 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if override_action is not None
                         else executable_action or self.plan.current_action
                     )
+                    reserve_exit = (
+                        requested_action is Action.BATTERY
+                        and soc <= effective_settings.reserve_soc
+                    )
+                    if reserve_exit:
+                        # Native discharge limits do not reconnect an isolated
+                        # grid input. Actual SOC must override a held tariff
+                        # slot and a manual battery override immediately.
+                        requested_action = Action.GRID
+                        reason = (
+                            f"Actual SOC {soc:g}% is at or below reserve "
+                            f"{effective_settings.reserve_soc:g}%; restoring grid"
+                        )
                     # Direct-local units have no CT/grid-flow signal, so cap a
                     # manual discharge slot below the fresh connected-load
                     # reading. Missing load telemetry fails closed to 0 W.
@@ -1122,6 +1158,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         target_soc=effective_settings.target_soc,
                         load_w=self._load_power(),
                     )
+                    if reserve_exit:
+                        command_result = f"reserve SOC protection: {command_result}"
                     self._record_command_result(command_ok, command_result)
 
         decision_key = (state, reason)

@@ -10,24 +10,25 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from house_battery.actuator import LocalControlAdapter
 from house_battery.config_flow import _direct_schema, _schema
 from house_battery.const import (
     CONF_BATTERY_CHARGE_POWER,
-    DIRECT_LOAD_SOURCE,
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
     CONF_GRID_AVAILABLE,
-    CONF_GRID_ISOLATION_SWITCH,
     CONF_GRID_IMPORT_POWER,
+    CONF_GRID_ISOLATION_SWITCH,
     CONF_LOAD_POWER,
     CONF_MAX_SOC_CONTROL,
     CONF_MIN_SOC_CONTROL,
     CONF_OPERATING_MODE,
     CONF_PRICE_ENTITIES,
     CONF_SOC,
+    DIRECT_LOAD_SOURCE,
 )
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.dailyplan import DailyPlan
@@ -824,6 +825,9 @@ def test_direct_battery_fails_closed_without_load_telemetry() -> None:
         async def async_set_limits(self, minimum: int, maximum: int) -> None:
             del minimum, maximum
 
+        async def async_set_grid_idle(self, minimum: int, maximum: int) -> None:
+            self.calls.append(("grid_idle", minimum, maximum))
+
         async def async_set_mode(self, mode, power, *, min_soc, max_soc) -> None:
             self.calls.append((mode, power))
 
@@ -846,7 +850,7 @@ def test_direct_battery_fails_closed_without_load_telemetry() -> None:
     )
 
     assert success
-    assert direct.calls == [("Idle", 0)]
+    assert direct.calls == [("grid_idle", 20, 90)]
 
 
 def test_failed_grid_exit_keeps_the_native_reserve_protected() -> None:
@@ -1300,6 +1304,295 @@ def test_direct_load_history_is_reset_when_migrating_legacy_source() -> None:
         assert not coordinator.runtime.load_learner.recent_w
         assert store.saved
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "soc,load_w,can_discharge",
+    [(0, 0, False), (10, 250, False), (20, 250, False), (50, 0, False), (21, 250, True)],
+)
+@pytest.mark.parametrize("override", ["auto", "battery"])
+def test_unusable_battery_restores_grid_despite_published_discharge(
+    monkeypatch, soc: float, load_w: float, can_discharge: bool, override: str,
+) -> None:
+    """Physical reserve/no-output limits must beat held and forced battery mode."""
+    import house_battery.coordinator as coordinator_module
+
+    fixed_now = datetime(2026, 10, 22, 12, 5, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.astimezone(tz) if tz else fixed_now.replace(tzinfo=None)
+
+    class DirectClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def async_snapshot(self):
+            return replace(_snapshot(0, 0, load_w), soc=soc)
+
+        async def async_read_controls(self):
+            return {
+                "3000": "1", "3003": "1,0,0,0", "3030": "1",
+                "3023": "20", "3024": "90",
+            }
+
+        async def async_set_limits(self, minimum, maximum):
+            self.calls.append(("limits", minimum, maximum))
+
+        async def async_set_grid_idle(self, minimum, maximum):
+            self.calls.append(("grid_idle", minimum, maximum))
+
+        async def async_set_mode(self, mode, power, **kwargs):
+            self.calls.append(("mode", mode, power))
+
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant, callback
+
+        hass = HomeAssistant("/tmp")
+
+        @callback
+        def change_switch(call):
+            hass.states.async_set(
+                call.data["entity_id"], "on" if call.service == "turn_on" else "off"
+            )
+
+        hass.services.async_register("switch", "turn_on", change_switch)
+        hass.services.async_register("switch", "turn_off", change_switch)
+        hass.states.async_set("switch.fbp_grid_input", "off")
+        hass.states.async_set("binary_sensor.grid_available", "on")
+        coordinator = Fbp1200Coordinator(hass, Entry({
+            "host": "192.168.30.90", "commissioned": True,
+            CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
+            CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input",
+        }))
+        coordinator.store = StaticStore(coordinator.runtime)
+        coordinator._startup_guard_passed = True
+        coordinator.runtime.execution_enabled = True
+        coordinator.runtime.override_action = override
+        coordinator.runtime.settings.update({"reserve_soc": 20, "absolute_min_soc": 5})
+        client = DirectClient()
+        coordinator.local_client = client
+        # A confirmed empty battery is valid telemetry after the initial warmup.
+        coordinator._local_telemetry_validator.validate(
+            await client.async_snapshot(), fixed_now - timedelta(minutes=1)
+        )
+        start = fixed_now.replace(minute=0)
+        prices = [PriceSlot(
+            start + timedelta(minutes=15 * index),
+            start + timedelta(minutes=15 * (index + 1)), price,
+            expected_load_wh=62.5,
+        ) for index, price in enumerate([4.0, 4.0, 1.0, 1.0])]
+        coordinator._price_slots = lambda now: prices
+        coordinator._extreme_price_ratio = 0.0
+        coordinator._extreme_price_is_extreme = False
+        published = PlannedSlot(
+            start=start, end=start + timedelta(minutes=15), action=Action.BATTERY,
+            price=4, expected_load_wh=62.5, grid_import_wh=0,
+            battery_charge_wh=0, battery_discharge_wh=62.5,
+            soc_start=30, soc_end=20, interval_cost_dkk=0,
+            baseline_cost_dkk=.25, reason="published battery interval",
+        )
+        coordinator.runtime.daily_plan = DailyPlan(date="2026-10-22", slots=(published,))
+
+        status = await coordinator._async_update_data()
+
+        assert status["system_state"] == "ACTIVE"
+        assert status["healthy"]
+        assert hass.states.get("switch.fbp_grid_input").state == (
+            "off" if can_discharge else "on"
+        ), (
+            f"SOC={soc}, load={load_w}, override={override}: grid remains isolated; "
+            f"commands={client.calls}, executable={status['executable_slot']}"
+        )
+        assert any(
+            call[:2] == ("mode", "Discharge") for call in client.calls
+        ) is can_discharge
+        assert coordinator.runtime.execution_enabled
+
+    monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("load_w", [None, 0, 25, 50, float("nan"), float("inf")])
+@pytest.mark.parametrize("initial_grid_state", ["off", "on"])
+def test_unusable_discharge_load_restores_grid_without_isolating_it(
+    load_w: float | None, initial_grid_state: str,
+) -> None:
+    """An Idle/0 W fallback must leave the connected load supplied by mains."""
+    class DirectClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def async_set_limits(self, minimum, maximum):
+            self.calls.append(("limits", minimum, maximum))
+
+        async def async_set_grid_idle(self, minimum, maximum):
+            self.calls.append(("grid_idle", minimum, maximum))
+
+        async def async_set_mode(self, mode, power, **kwargs):
+            self.calls.append(("mode", mode, power))
+
+    states = FakeStates({
+        "switch.fbp_grid_input": SimpleNamespace(state=initial_grid_state, attributes={}),
+    })
+    services = FakeServices(states)
+    state = runtime()
+    state.execution_enabled = True
+    direct = DirectClient()
+
+    async def save():
+        return None
+
+    configured = {**config(), CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input"}
+    control = LocalControlAdapter(
+        FakeHass(states, services), lambda: configured, lambda: state, save,
+        lambda: direct,
+    )
+
+    success, result = asyncio.run(control.async_command(
+        Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=load_w,
+    ))
+
+    assert success, result
+    assert states.get("switch.fbp_grid_input").state == "on"
+    assert direct.calls == [("grid_idle", 20, 90)]
+    assert not any(service == "turn_off" for _, service, _ in services.calls)
+    assert state.last_action == Action.GRID.value
+    assert state.execution_enabled
+
+
+def test_unusable_discharge_reports_failed_grid_restore_and_keeps_retrying(
+    monkeypatch,
+) -> None:
+    """An unavailable plug must not report a successful zero-output handoff."""
+    monkeypatch.setattr("house_battery.actuator._GRID_SWITCH_RETRY_DELAY_SECONDS", 0)
+    states = FakeStates({
+        "switch.fbp_grid_input": SimpleNamespace(state="off", attributes={}),
+    })
+    services = FakeServices(states, apply_updates=False)
+    state = runtime()
+    state.execution_enabled = True
+    calls = []
+
+    class DirectClient:
+        async def async_set_grid_idle(self, minimum, maximum):
+            calls.append(("grid_idle", minimum, maximum))
+
+    async def save():
+        return None
+
+    configured = {**config(), CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input"}
+    control = LocalControlAdapter(
+        FakeHass(states, services), lambda: configured, lambda: state, save,
+        DirectClient,
+    )
+
+    async def scenario():
+        success, result = await control.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=0,
+        )
+        assert not success
+        assert "did not confirm on" in result
+        assert calls == [("grid_idle", 20, 90)]
+        assert len(services.calls) == 3
+        assert state.execution_enabled
+
+        # Once the grid plug recovers, the same authorization restores supply.
+        services.apply_updates = True
+        success, result = await control.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90, load_w=0,
+        )
+        assert success, result
+        assert states.get("switch.fbp_grid_input").state == "on"
+        assert calls == [("grid_idle", 20, 90), ("grid_idle", 20, 90)]
+        assert state.execution_enabled
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "pause", ["local_tcp_recovering", "startup_waiting", "first_refresh_low_soc"],
+)
+def test_paused_inverter_writes_still_restore_grid_supply(monkeypatch, pause) -> None:
+    """Pausing inverter writes must not leave an empty battery's mains isolated."""
+    import house_battery.coordinator as coordinator_module
+
+    fixed_now = datetime(2026, 10, 22, 12, 5, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.astimezone(tz) if tz else fixed_now.replace(tzinfo=None)
+
+    class DirectClient:
+        async def async_snapshot(self):
+            if pause == "local_tcp_recovering":
+                raise LocalProtocolError("battery no longer reachable")
+            return replace(_snapshot(0, 0, 250), soc=10)
+
+        async def async_read_controls(self):
+            return {
+                "3000": "1", "3003": "1,0,0,0", "3030": "1",
+                "3023": "20", "3024": "90",
+            }
+
+    async def scenario():
+        from homeassistant.core import HomeAssistant, callback
+
+        hass = HomeAssistant("/tmp")
+
+        @callback
+        def change_switch(call):
+            hass.states.async_set(
+                call.data["entity_id"], "on" if call.service == "turn_on" else "off"
+            )
+
+        hass.services.async_register("switch", "turn_on", change_switch)
+        hass.states.async_set("switch.fbp_grid_input", "off")
+        hass.states.async_set(
+            "binary_sensor.grid_available", "unknown" if pause == "startup_waiting" else "on"
+        )
+        coordinator = Fbp1200Coordinator(hass, Entry({
+            "host": "192.168.30.90", "commissioned": True,
+            CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
+            CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input",
+        }))
+        coordinator.local_client = DirectClient()
+        coordinator.store = StaticStore(coordinator.runtime)
+        coordinator.runtime.execution_enabled = True
+        coordinator.runtime.settings.update({"reserve_soc": 20, "absolute_min_soc": 5})
+        if pause == "startup_waiting":
+            coordinator._startup_control_gate_reason = "post-restart validation pending"
+        start = fixed_now.replace(minute=0)
+        prices = [PriceSlot(
+            start + timedelta(minutes=15 * index),
+            start + timedelta(minutes=15 * (index + 1)), price,
+            expected_load_wh=62.5,
+        ) for index, price in enumerate([4.0, 4.0, 1.0, 1.0])]
+        coordinator._price_slots = lambda now: prices
+        coordinator._extreme_price_ratio = 0.0
+        coordinator._extreme_price_is_extreme = False
+        commands = []
+
+        async def capture_inverter_command(action, now, **kwargs):
+            commands.append(action)
+            return True, "unexpected inverter write"
+
+        coordinator.actuator.async_command = capture_inverter_command
+
+        status = await coordinator._async_update_data()
+
+        assert hass.states.get("switch.fbp_grid_input").state == "on", pause
+        assert not commands, "inverter writes must remain paused"
+        assert status["execution_enabled"]
+        if pause == "local_tcp_recovering":
+            assert status["system_state"] == "RECOVERING"
+        elif pause == "startup_waiting":
+            assert status["system_state"] == "BOOTSTRAP"
+
+    monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
     asyncio.run(scenario())
 
 

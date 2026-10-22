@@ -220,6 +220,18 @@ class LocalControlAdapter:
             return None
         runtime = self._runtime()
         requested_action = action
+        power_w = round(
+            clamp_setpoint_to_device(
+                discharge_setpoint_below_load(
+                    runtime.settings["discharge_power_w"], load_w
+                )
+            )
+        )
+        discharge_inhibited = action is Action.BATTERY and power_w == 0
+        if discharge_inhibited:
+            # Idle cannot supply an isolated load. Reconnect the grid before
+            # stopping output, including when a depleted inverter reports 0 W.
+            action = Action.GRID
         isolation_confirmed = False
         grid_restore_confirmed = True
         if action is not Action.BATTERY:
@@ -262,14 +274,7 @@ class LocalControlAdapter:
                     await client.async_set_grid_idle(minimum, maximum)
                 else:
                     await client.async_set_limits(minimum, maximum)
-                    power_w = round(
-                        clamp_setpoint_to_device(
-                            discharge_setpoint_below_load(
-                                runtime.settings["discharge_power_w"], load_w
-                            )
-                        )
-                    )
-                    direct_command_mode = "Discharge" if power_w else "Idle"
+                    direct_command_mode = "Discharge"
                     await client.async_set_mode(
                         direct_command_mode,
                         power_w,
@@ -323,6 +328,11 @@ class LocalControlAdapter:
                 "automatic control remains armed and will retry"
             )
             return False, result
+        if discharge_inhibited:
+            return True, (
+                "no usable discharge setpoint for connected load; "
+                "grid restored and Grid/Idle commanded"
+            )
         if requested_action is Action.BATTERY and not isolation_confirmed:
             result = (
                 "grid isolation plug unavailable or not confirmed off; battery "
