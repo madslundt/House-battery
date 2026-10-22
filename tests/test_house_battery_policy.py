@@ -130,5 +130,9 @@ def test_opportunistic_policy_rejects_a_worse_risk_adjusted_objective() -> None:
 
 def test_grid_availability_is_parsed_only_from_its_explicit_state() -> None:
     assert parse_grid_available("on") is True
+    assert parse_grid_available("off") is False
     assert parse_grid_available("disconnected") is False
     assert parse_grid_available("3.7") is None
+    assert parse_grid_available("unavailable") is None
+    assert parse_grid_available("unknown") is None
+    assert parse_grid_available(None) is None

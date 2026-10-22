@@ -181,11 +181,19 @@ absolute emergency SOC ≤ arbitrage reserve SOC
   < maximum charge SOC ≤ 100%
 ```
 
-- **Absolute emergency SOC**: device-level lower SOC value written through the
-  required native minimum-SOC control during automatic commands. It is below
-  the normal economic reserve, preserving a last-resort buffer.
-- **Arbitrage reserve SOC**: planning floor. The optimizer never schedules a
-  battery discharge below this value.
+- **Absolute emergency SOC**: lower SOC value selected only for a confirmed
+  physical grid outage. Safe/outage commands write it to the native minimum
+  and the custom slot. Register read-back does not prove that the separate
+  off-grid AC output obeys this floor; verify that behavior during commissioning.
+- **Arbitrage reserve SOC**: normal planning and commanded discharge floor.
+  Measured SOC at or below this value overrides held battery slots and manual
+  battery overrides, requests mains reconnection, and commands Grid/Idle.
+  Faults, missing prices, and unknown grid availability preserve this reserve;
+  they do not release the emergency buffer.
+- Direct-local mode commands disable all fifteen unused schedule slots and
+  require read-back of the complete sixteen-slot bank. An incomplete read-back
+  is a failure, not permission to replay an ambiguous write. This prevents a
+  leftover vendor schedule from silently retaining a different SOC floor.
 - **Maximum charge SOC**: normal planning and hardware ceiling.
 - **Opportunistic full charge**: the opt-in policy always targets 100%. It is
   used only when **Allow opportunistic full charge** is enabled and a complete
@@ -202,9 +210,9 @@ verified at the physical device.
 | `BOOTSTRAP` | Awaiting usable telemetry/price horizon. | No economic command. |
 | `SHADOW` | Plan is valid but commissioning or automatic control is off. | Plan only; no writes. |
 | `ACTIVE` | Commissioned and automatic control is on. | Writes local limits/mode with read-back. |
-| `RECOVERING` | The direct local TCP connection has been unavailable for less than two minutes. | Pauses all automatic writes and retains the automatic-control switch. A fresh, valid local frame resumes `ACTIVE`; two minutes of loss becomes `DEGRADED`. |
+| `RECOVERING` | The direct local TCP connection has been unavailable for less than two minutes. | Pauses inverter writes, restores the configured mains-input plug, and retains the automatic-control switch. A fresh, valid local frame resumes `ACTIVE`; two minutes of loss becomes `DEGRADED`. |
 | `DEGRADED` | A required input is stale, invalid, faulted, offline, or prices cannot yield a plan. | Requests safe mode and retries on each refresh. Automatic control stays armed and resumes after health recovers. |
-| `OUTAGE` | Physical grid signal is unavailable. | Clears the plan, requests safe mode, and automatically resumes after grid availability returns. |
+| `OUTAGE` | Physical grid signal explicitly reports no mains. | Clears the plan and requests safe mode with the absolute emergency floor. Unknown grid availability is a fault and preserves the arbitrage reserve. |
 
 `Force safe mode` immediately turns off automatic control and requests the
 adapter's safe local mode. System errors pause writes without changing the

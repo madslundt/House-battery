@@ -1312,12 +1312,15 @@ def test_direct_load_history_is_reset_when_migrating_legacy_source() -> None:
     [(0, 0, False), (10, 250, False), (20, 250, False), (50, 0, False), (21, 250, True)],
 )
 @pytest.mark.parametrize("override", ["auto", "battery"])
+@pytest.mark.parametrize("reserve_soc,emergency_soc", [(10, 5), (20, 10), (60, 40)])
 def test_unusable_battery_restores_grid_despite_published_discharge(
     monkeypatch, soc: float, load_w: float, can_discharge: bool, override: str,
+    reserve_soc: float, emergency_soc: float,
 ) -> None:
     """Physical reserve/no-output limits must beat held and forced battery mode."""
     import house_battery.coordinator as coordinator_module
 
+    soc = min(100, max(0, soc + reserve_soc - 20))
     fixed_now = datetime(2026, 10, 22, 12, 5, tzinfo=UTC)
 
     class FrozenDatetime(datetime):
@@ -1371,7 +1374,9 @@ def test_unusable_battery_restores_grid_despite_published_discharge(
         coordinator._startup_guard_passed = True
         coordinator.runtime.execution_enabled = True
         coordinator.runtime.override_action = override
-        coordinator.runtime.settings.update({"reserve_soc": 20, "absolute_min_soc": 5})
+        coordinator.runtime.settings.update({
+            "reserve_soc": reserve_soc, "absolute_min_soc": emergency_soc,
+        })
         client = DirectClient()
         coordinator.local_client = client
         # A confirmed empty battery is valid telemetry after the initial warmup.
@@ -1515,7 +1520,10 @@ def test_unusable_discharge_reports_failed_grid_restore_and_keeps_retrying(
 @pytest.mark.parametrize(
     "pause", ["local_tcp_recovering", "startup_waiting", "first_refresh_low_soc"],
 )
-def test_paused_inverter_writes_still_restore_grid_supply(monkeypatch, pause) -> None:
+@pytest.mark.parametrize("reserve_soc,emergency_soc", [(10, 5), (20, 5), (60, 40)])
+def test_paused_inverter_writes_still_restore_grid_supply(
+    monkeypatch, pause, reserve_soc: float, emergency_soc: float,
+) -> None:
     """Pausing inverter writes must not leave an empty battery's mains isolated."""
     import house_battery.coordinator as coordinator_module
 
@@ -1562,7 +1570,9 @@ def test_paused_inverter_writes_still_restore_grid_supply(monkeypatch, pause) ->
         coordinator.local_client = DirectClient()
         coordinator.store = StaticStore(coordinator.runtime)
         coordinator.runtime.execution_enabled = True
-        coordinator.runtime.settings.update({"reserve_soc": 20, "absolute_min_soc": 5})
+        coordinator.runtime.settings.update({
+            "reserve_soc": reserve_soc, "absolute_min_soc": emergency_soc,
+        })
         if pause == "startup_waiting":
             coordinator._startup_control_gate_reason = "post-restart validation pending"
         start = fixed_now.replace(minute=0)
@@ -1593,6 +1603,80 @@ def test_paused_inverter_writes_still_restore_grid_supply(monkeypatch, pause) ->
             assert status["system_state"] == "BOOTSTRAP"
 
     monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("reserve_soc,emergency_soc", [(10, 5), (20, 10), (60, 40)])
+@pytest.mark.parametrize("grid_state", ["on", "off", "unknown", "unavailable"])
+@pytest.mark.parametrize("failure", ["missing_prices", "battery_fault"])
+@pytest.mark.parametrize("soc_offset", [-1, 0, 1])
+@pytest.mark.parametrize("override", ["auto", "battery"])
+def test_safety_floor_is_emergency_only_during_confirmed_outage(
+    reserve_soc: float, emergency_soc: float, grid_state: str,
+    failure: str, soc_offset: float, override: str,
+) -> None:
+    """Data failures must not release the emergency reserve for ordinary use."""
+    class DirectClient:
+        def __init__(self):
+            self.calls = []
+
+        async def async_snapshot(self):
+            return replace(_snapshot(0, 0, 250), soc=emergency_soc + soc_offset)
+
+        async def async_read_controls(self):
+            return {
+                "3000": "1", "3003": "1,0,0,0", "3030": "1",
+                "3023": "10", "3024": "90",
+            }
+
+        async def async_set_grid_idle(self, minimum, maximum):
+            self.calls.append(("grid_idle", minimum, maximum))
+
+    async def scenario():
+        from homeassistant.core import HomeAssistant, callback
+
+        hass = HomeAssistant("/tmp")
+
+        @callback
+        def change_switch(call):
+            hass.states.async_set(call.data["entity_id"], "on")
+
+        hass.services.async_register("switch", "turn_on", change_switch)
+        hass.states.async_set("switch.fbp_grid_input", "off")
+        hass.states.async_set("binary_sensor.grid_available", grid_state)
+        hass.states.async_set(
+            "binary_sensor.battery_fault", "on" if failure == "battery_fault" else "off"
+        )
+        coordinator = Fbp1200Coordinator(hass, Entry({
+            "host": "192.168.30.90", "commissioned": True,
+            CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
+            CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input",
+            "fault_entity": "binary_sensor.battery_fault",
+        }))
+        coordinator.store = StaticStore(coordinator.runtime)
+        coordinator._startup_guard_passed = True
+        coordinator.runtime.execution_enabled = True
+        coordinator.runtime.override_action = override
+        coordinator.runtime.settings.update({
+            "reserve_soc": reserve_soc, "absolute_min_soc": emergency_soc,
+        })
+        client = DirectClient()
+        coordinator.local_client = client
+        coordinator._price_slots = lambda now: []
+        coordinator._extreme_price_ratio = 0.0
+        coordinator._extreme_price_is_extreme = False
+
+        status = await coordinator._async_update_data()
+
+        assert hass.states.get("switch.fbp_grid_input").state == "on"
+        expected_minimum = emergency_soc if grid_state == "off" else reserve_soc
+        assert client.calls == [("grid_idle", expected_minimum, 90)], (
+            f"grid={grid_state}, failure={failure}, actual SOC={emergency_soc + soc_offset}: "
+            f"safety command exposed the wrong reserve: {client.calls}"
+        )
+        assert status["system_state"] == ("OUTAGE" if grid_state == "off" else "DEGRADED")
+        assert coordinator.runtime.execution_enabled
+
     asyncio.run(scenario())
 
 

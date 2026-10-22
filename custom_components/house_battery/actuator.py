@@ -213,6 +213,7 @@ class LocalControlAdapter:
         now: datetime,
         target_soc: float | None,
         load_w: float | None = None,
+        grid_available: bool | None = None,
     ) -> tuple[bool, str] | None:
         """Use the built-in TCP adapter when this is a direct-local entry."""
         client = self._direct_client() if self._direct_client else None
@@ -238,7 +239,7 @@ class LocalControlAdapter:
             # Restore the grid path before leaving Battery mode, so the FBP can
             # hand the load back to Grid or begin charging from the mains.
             grid_restore_confirmed = await self.async_set_grid_isolation(True)
-        minimum = round(self._minimum_soc_for(action))
+        minimum = round(self._minimum_soc_for(action, grid_available=grid_available))
         maximum = round(
             target_soc if target_soc is not None else runtime.settings["target_soc"]
         )
@@ -392,7 +393,9 @@ class LocalControlAdapter:
                 f"SOC limit read-back did not confirm {entity_id}={value:g}"
             )
 
-    def _minimum_soc_for(self, action: Action) -> float:
+    def _minimum_soc_for(
+        self, action: Action, *, grid_available: bool | None = None
+    ) -> float:
         """Return the native lower SOC bound required by an operating action.
 
         The optimizer models ``reserve_soc`` as unavailable for arbitrage.  A
@@ -401,11 +404,16 @@ class LocalControlAdapter:
         still physically drain down to the emergency minimum.
         """
         runtime = self._runtime()
-        if action is Action.SAFE:
+        # A data fault is not an outage. Only a confirmed physical outage may
+        # release the buffer between the economic and emergency floors.
+        if action is Action.SAFE and grid_available is False:
             return runtime.settings["absolute_min_soc"]
         return runtime.settings["reserve_soc"]
 
-    async def _apply_limits(self, action: Action, target_soc: float | None) -> None:
+    async def _apply_limits(
+        self, action: Action, target_soc: float | None,
+        *, grid_available: bool | None = None,
+    ) -> None:
         runtime = self._runtime()
         await self._set_number(
             CONF_CHARGE_POWER_CONTROL, runtime.settings["charge_power_w"]
@@ -414,7 +422,9 @@ class LocalControlAdapter:
             CONF_DISCHARGE_POWER_CONTROL, runtime.settings["discharge_power_w"]
         )
         await self._set_number(
-            CONF_MIN_SOC_CONTROL, self._minimum_soc_for(action), required=True
+            CONF_MIN_SOC_CONTROL,
+            self._minimum_soc_for(action, grid_available=grid_available),
+            required=True,
         )
         await self._set_number(
             CONF_MAX_SOC_CONTROL,
@@ -429,6 +439,7 @@ class LocalControlAdapter:
         *,
         target_soc: float | None = None,
         load_w: float | None = None,
+        grid_available: bool | None = None,
     ) -> tuple[bool, str]:
         """Apply limits, issue one mode change, and require immediate read-back.
 
@@ -436,7 +447,7 @@ class LocalControlAdapter:
         load telemetry fails closed to an Idle slot.
         """
         direct_result = await self._async_direct_command(
-            action, now, target_soc, load_w
+            action, now, target_soc, load_w, grid_available
         )
         if direct_result is not None:
             return direct_result
@@ -445,7 +456,9 @@ class LocalControlAdapter:
         runtime = self._runtime()
         limits_warning: str | None = None
         try:
-            await self._apply_limits(action, target_soc)
+            await self._apply_limits(
+                action, target_soc, grid_available=grid_available
+            )
         except Exception as exc:  # The safety command must remain available.
             if action is not Action.SAFE:
                 _LOGGER.exception("Battery SOC limit command failed")

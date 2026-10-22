@@ -1,8 +1,8 @@
-# Commissioning: verifying the never-export invariant
+# Commissioning: verifying export and SOC limits
 
-The single hard requirement for this integration is that the battery must never
-export to the grid. This is enforced in every layer (see `docs/architecture.md`)
-and must be verified physically after install, not only trusted from the code.
+Automatic control requires physical verification of zero export and both SOC
+limits. Command read-back and automated tests verify the requested settings;
+they do not establish the physical behavior of the separate off-grid AC output.
 
 ## The three protection layers
 
@@ -39,13 +39,49 @@ actuator's second, real-time cap is deliberately independent of that forecast.
 - [ ] **Native SOC controls read back** (minimum / maximum) with valid, sane
       bounds. Automatic control stays off until they are commissioned.
 - [ ] **`Absolute emergency SOC` ≤ `Reserve SOC` < `Maximum charge SOC` ≤ 100%**
-      and all sit inside the native bounds. The reserve is raised to the
-      inverter's native minimum during discharge, so a failed mode command cannot
-      expose stored reserve.
+      and all sit inside the native bounds. Normal commands preserve the reserve;
+      only confirmed outages select the emergency floor. Verify physical cutoff
+      at elevated thresholds using the procedure below.
 - [ ] **Connected load power** is available. Direct-local entries use the
       complete per-storage off-grid telemetry; legacy entries bind a `Load
       power` sensor. The flow model and `Power source` sensor depend on it.
 - [ ] **Commission** is toggled on *after* the above are satisfied.
+
+## Safely verifying both SOC limits
+
+Keep Home Assistant, the control network, and recovery controls on an independent
+power source. Use a small noncritical test load on the battery output, with
+someone at the physical AC-output button. The FBP1200 output may latch off and
+require that button to restore it. A downstream UPS gives time to recover but
+does not prove automatic AC-output recovery.
+
+1. Save the original SOC settings, automatic-control/override state, native
+   controls, and all schedule slots. Record actual SOC, battery charge/output
+   power, output voltage or test-load power, and UPS state. Pause economic
+   control so it cannot compete with the test.
+2. Use thresholds near the current SOC, well above the real low-charge range.
+   Preserve emergency SOC ≤ reserve SOC < maximum SOC. Do not discharge the
+   battery down to its ordinary emergency minimum for this test.
+3. For the normal reserve, raise it above the observed SOC and verify that a
+   requested battery override is refused in favor of mains/Grid/Idle. Confirm
+   actual battery discharge stops and the test load remains powered; a mode
+   label or register read-back alone is insufficient.
+4. For the emergency floor, use a supervised test isolated from critical loads.
+   Keep the tested native and slot floor above observed SOC and apply the
+   confirmed-outage command path. Observe whether actual off-grid battery
+   discharge stops. Do not spoof a shared grid-status entity or disconnect the
+   home's supply. If discharge continues below the test floor, abort and restore
+   mains; treat emergency protection as unverified and leave economic discharge
+   disabled.
+5. Restore mains and the original settings in every outcome. Confirm load power,
+   native/slot limits, and UPS online state. If AC output latched off, restore it
+   physically before considering the test complete. Resume automatic control
+   only after both physical behaviors have passed.
+
+Record software command tests separately from physical results. An unavailable
+device, a failed read-back, or a skipped physical test is not a passing cutoff
+test. Software running on Home Assistant cannot enforce a limit while its host
+or connection is unavailable; autonomous cutoff must be verified at the device.
 
 ## Physically verifying zero export
 

@@ -10,8 +10,10 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from house_battery.local_tcp import (
     CONTROL_REGISTERS,
+    REG_CONTROL_TIME_SLOTS,
     REG_MAX_SOC,
     REG_MIN_SOC,
+    SLOT_DISABLED,
     FbpLocalSnapshot,
     FbpLocalTcpClient,
     FbpTelemetryValidator,
@@ -187,7 +189,7 @@ def test_read_recovers_from_a_three_second_device_outage(
         assert result == {REG_MIN_SOC: "10", REG_MAX_SOC: "100"}
     assert elapsed == 4
     assert delays == [0.25, 0.75, 1, 2]
-    assert client.requests == 5
+    assert client.requests == (5 if operation == "async_snapshot" else 8)
     assert client.closes == 4
 
 
@@ -222,7 +224,7 @@ def test_retries_control_reads_after_timeout_but_preserves_last_error(
         REG_MIN_SOC: "10",
         REG_MAX_SOC: "90",
     }
-    assert recovered.requests == 3
+    assert recovered.requests == 6
     assert recovered.closes == 2
 
     delays.clear()
@@ -307,6 +309,7 @@ def test_retries_mode_write_only_after_readback_proves_it_was_not_applied(
                 "3023": "10",
                 "3024": "90",
                 "3030": "1",
+                **{key: SLOT_DISABLED for key in REG_CONTROL_TIME_SLOTS[1:]},
             }
 
         async def _request(self, command: dict):
@@ -349,6 +352,105 @@ def test_idle_command_writes_an_active_zero_power_slot(
     values = client.command["SetControlInfo"]
     assert values["3003"] == "1,00:00,23:59,0,0,6,5,0,0,90,10"
     assert operating_mode_from_controls(values) == "Idle"
+
+
+@pytest.mark.parametrize("mode,power_w", [("Charge", 200), ("Discharge", 200), ("Idle", 0)])
+def test_mode_command_clears_stale_schedules_across_the_whole_bank(
+    monkeypatch: pytest.MonkeyPatch, mode: str, power_w: int
+) -> None:
+    class ScheduledClient(FbpLocalTcpClient):
+        def __init__(self) -> None:
+            self.controls = {
+                "3023": "30",
+                "3024": "90",
+                "3004": "1,18:00,20:00,500,0,6,5,0,0,90,0",
+                "3018": "1,20:00,23:59,500,0,6,5,0,0,90,0",
+            }
+            self.read_addresses: list[int] = []
+            self.read_batch_sizes: list[int] = []
+
+        async def _request(self, command: dict):
+            if "Set" in command:
+                self.controls.update(command["SetControlInfo"])
+                return {}
+            self.read_addresses.extend(command["RegControlAddr"])
+            self.read_batch_sizes.append(len(command["RegControlAddr"]))
+            return {"ControlInfo": self.controls}
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    monkeypatch.setattr("house_battery.local_tcp.asyncio.sleep", sleep)
+    import asyncio
+
+    client = ScheduledClient()
+    asyncio.run(client.async_set_mode(mode, power_w, min_soc=30, max_soc=90))
+
+    assert set(range(3003, 3019)) <= set(client.read_addresses)
+    assert max(client.read_batch_sizes) <= 8
+    for address in range(3004, 3019):
+        assert client.controls[str(address)].split(",")[0] == "0"
+
+
+@pytest.mark.parametrize("stale_register", ["3004", "3018"])
+@pytest.mark.parametrize("readback", ["stale", "missing", "wrong_floor"])
+def test_mode_command_rejects_unconfirmed_unused_schedule_clear(
+    monkeypatch: pytest.MonkeyPatch, stale_register: str, readback: str
+) -> None:
+    class UnconfirmedScheduleClient(FbpLocalTcpClient):
+        def __init__(self) -> None:
+            self.controls = {"3023": "30", "3024": "90"}
+            self.writes = 0
+
+        async def _request(self, command: dict):
+            if "Set" in command:
+                self.writes += 1
+                self.controls.update(command["SetControlInfo"])
+                return {}
+            observed = dict(self.controls)
+            if readback == "missing":
+                observed.pop(stale_register, None)
+            elif readback == "wrong_floor":
+                observed[stale_register] = "0,00:00,00:00,0,0,0,0,0,0,100,0"
+            else:
+                observed[stale_register] = "1,18:00,23:59,500,0,6,5,0,0,90,0"
+            return {"ControlInfo": observed}
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    monkeypatch.setattr("house_battery.local_tcp.asyncio.sleep", sleep)
+    import asyncio
+
+    client = UnconfirmedScheduleClient()
+    with pytest.raises(LocalProtocolError, match="mode control read-back (mismatch|incomplete)"):
+        asyncio.run(client.async_set_mode("Idle", 0, min_soc=30, max_soc=90))
+    assert client.writes == (1 if readback == "missing" else 2)
+
+
+def test_timed_out_mode_write_is_not_replayed_with_a_missing_schedule_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class IncompleteReadbackClient(FbpLocalTcpClient):
+        def __init__(self) -> None:
+            self.controls: dict[str, str] = {}
+            self.writes = 0
+
+        async def _request(self, command: dict):
+            self.writes += 1
+            self.controls = dict(command["SetControlInfo"])
+            self.controls.pop("3018", None)
+            raise LocalProtocolError("write response timed out")
+
+        async def async_read_controls(self) -> dict[str, str]:
+            return self.controls
+
+    import asyncio
+
+    client = IncompleteReadbackClient()
+    with pytest.raises(LocalProtocolError, match="write response timed out"):
+        asyncio.run(client.async_set_mode("Idle", 0, min_soc=30, max_soc=90))
+    assert client.writes == 1
 
 
 def test_grid_idle_cancels_active_power_under_a_100_percent_floor() -> None:
@@ -414,7 +516,10 @@ def test_grid_idle_cancels_active_power_under_a_100_percent_floor() -> None:
     assert client.controls["3024"] == "90"
 
 
-def test_grid_idle_skips_writes_when_mode_limits_and_physical_power_match() -> None:
+@pytest.mark.parametrize("unused_schedule", ["disabled", "active", "missing"])
+def test_grid_idle_skips_writes_only_when_all_schedules_are_confirmed_idle(
+    unused_schedule: str,
+) -> None:
     class AlreadyIdleClient(FbpLocalTcpClient):
         def __init__(self) -> None:
             self.controls = {
@@ -426,7 +531,12 @@ def test_grid_idle_skips_writes_when_mode_limits_and_physical_power_match() -> N
                 "3023": "10",
                 "3024": "90",
                 "3030": "1",
+                **{key: SLOT_DISABLED for key in REG_CONTROL_TIME_SLOTS[1:]},
             }
+            if unused_schedule == "active":
+                self.controls["3018"] = "1,20:00,23:59,500,0,6,5,0,0,90,0"
+            elif unused_schedule == "missing":
+                self.controls.pop("3018")
             self.writes: list[str] = []
 
         async def async_read_controls(self) -> dict[str, str]:
@@ -448,7 +558,7 @@ def test_grid_idle_skips_writes_when_mode_limits_and_physical_power_match() -> N
     client = AlreadyIdleClient()
     asyncio.run(client.async_set_grid_idle(10, 90))
 
-    assert client.writes == []
+    assert client.writes == ([] if unused_schedule == "disabled" else ["limits", "mode"])
 
 
 def test_extracts_only_complete_soc_control_readback() -> None:
@@ -473,6 +583,7 @@ def test_decodes_the_complete_allowlisted_control_state() -> None:
                 "3024": 90,
                 "3030": 1,
                 "9999": "not allowlisted",
+                **{key: SLOT_DISABLED for key in REG_CONTROL_TIME_SLOTS[1:]},
             }
         }
     )
@@ -486,6 +597,7 @@ def test_decodes_the_complete_allowlisted_control_state() -> None:
         "3023": "10",
         "3024": "90",
         "3030": "1",
+        **{key: SLOT_DISABLED for key in REG_CONTROL_TIME_SLOTS[1:]},
     }
     assert set(controls) == set(CONTROL_REGISTERS)
 
@@ -530,7 +642,8 @@ def test_self_consumption_command_is_verified_and_limited_to_known_registers(
 
     values = client.command["SetControlInfo"]
     assert client.command["Set"] == "Energycontrolparameters"
-    assert set(values) == {"3000", "3020", "3021", "3022", "3030", "3003"}
+    assert set(values) == {"3000", "3020", "3021", "3022", "3030", *REG_CONTROL_TIME_SLOTS}
+    assert all(values[key] == SLOT_DISABLED for key in REG_CONTROL_TIME_SLOTS)
     # Self-consumption requires both native AI flags.  The FBP1200 accepts and
     # reads back schedule mode 3 with only AI discharge enabled, but remains
     # physically idle under load in that state.
@@ -552,7 +665,7 @@ def test_mode_command_rejects_a_control_readback_mismatch(
             return {"3023": "10", "3024": "90"}
 
     monkeypatch.setattr("house_battery.local_tcp._MODE_VERIFY_DELAY_SECONDS", 0)
-    with pytest.raises(LocalProtocolError, match="mode control read-back mismatch"):
+    with pytest.raises(LocalProtocolError, match="mode control read-back incomplete"):
         import asyncio
 
         asyncio.run(
@@ -573,8 +686,13 @@ def test_mode_command_accepts_equivalent_normalized_slot_readback(
 
         async def async_read_controls(self) -> dict[str, str]:
             values = dict(self.command["SetControlInfo"])
-            values["3003"] = values["3003"].replace(",6,5,0,0,", ",6,4,0,0,"
-            )
+            values["3003"] = values["3003"].replace(",6,5,0,0,", ",6,4,0,0,")
+            # Firmware can normalize vendor-specific fields in disabled slots
+            # as well; their enabled bit, time, power and SOC must still match.
+            for key in REG_CONTROL_TIME_SLOTS[1:]:
+                fields = values[key].split(",")
+                fields[6] = "4"
+                values[key] = ",".join(fields)
             return values
 
     monkeypatch.setattr("house_battery.local_tcp._MODE_VERIFY_DELAY_SECONDS", 0)

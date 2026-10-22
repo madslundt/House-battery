@@ -9,9 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 DEFAULT_PORT = 8080
 REG_MIN_SOC = "3023"
@@ -22,9 +23,13 @@ REG_AI_SMART_CHARGE = "3021"
 REG_AI_SMART_DISCHARGE = "3022"
 REG_CUSTOM_MODE = "3030"
 REG_CONTROL_TIME_1 = "3003"
+# The device retains sixteen independent schedules. Clearing only the first
+# leaves vendor/cloud schedules able to apply a different discharge SOC floor.
+REG_CONTROL_TIME_SLOTS = tuple(str(address) for address in range(3003, 3019))
+SLOT_DISABLED = "0,00:00,00:00,0,0,0,0,0,0,100,10"
 CONTROL_REGISTERS = (
     REG_EMS_ENABLE,
-    REG_CONTROL_TIME_1,
+    *REG_CONTROL_TIME_SLOTS,
     REG_SCHEDULE_MODE,
     REG_AI_SMART_CHARGE,
     REG_AI_SMART_DISCHARGE,
@@ -245,14 +250,33 @@ class FbpLocalTcpClient:
         )
 
     async def async_read_controls(self) -> dict[str, str]:
-        """Read control state, reconnecting and retrying transient failures."""
-        return await self._async_read_with_retry(
-            {
-                "Get": "Energycontrolparameters",
-                "RegControlAddr": [int(register) for register in CONTROL_REGISTERS],
-            },
-            decode_controls,
+        """Read the complete bank in requests no larger than the proven eight.
+
+        Repeat the SOC anchors in each request so every reply can be decoded
+        independently. Missing schedules remain missing: writes must never be
+        confirmed from inferred disabled defaults.
+        """
+        soc_keys = (REG_MIN_SOC, REG_MAX_SOC)
+        other_keys = tuple(
+            key for key in CONTROL_REGISTERS if key not in soc_keys
         )
+        controls: dict[str, str] = {}
+        for offset in range(0, len(other_keys), 6):
+            requested = (*soc_keys, *other_keys[offset:offset + 6])
+            observed = await self._async_read_with_retry(
+                {
+                    "Get": "Energycontrolparameters",
+                    "RegControlAddr": [int(key) for key in requested],
+                },
+                decode_controls,
+            )
+            if any(
+                key in controls and controls[key] != observed[key]
+                for key in soc_keys
+            ):
+                raise LocalProtocolError("SOC controls changed during batched read-back")
+            controls.update({key: observed[key] for key in requested if key in observed})
+        return controls
 
     async def _async_read_with_retry(
         self,
@@ -300,6 +324,7 @@ class FbpLocalTcpClient:
                 REG_AI_SMART_DISCHARGE: "0",
                 REG_CUSTOM_MODE: "1",
                 REG_CONTROL_TIME_1: slot,
+                **{key: SLOT_DISABLED for key in REG_CONTROL_TIME_SLOTS[1:]},
             },
             label="mode",
         )
@@ -321,7 +346,7 @@ class FbpLocalTcpClient:
                 REG_AI_SMART_CHARGE: "1",
                 REG_AI_SMART_DISCHARGE: "1",
                 REG_CUSTOM_MODE: "0",
-                REG_CONTROL_TIME_1: "0,00:00,00:00,0,0,0,0,0,0,100,10",
+                **{key: SLOT_DISABLED for key in REG_CONTROL_TIME_SLOTS},
             },
             label="self-consumption mode",
         )
@@ -362,6 +387,7 @@ class FbpLocalTcpClient:
                 REG_MIN_SOC: str(minimum_soc),
                 REG_MAX_SOC: str(maximum_soc),
                 REG_CUSTOM_MODE: "1",
+                **{key: SLOT_DISABLED for key in REG_CONTROL_TIME_SLOTS[1:]},
             }
             if _controls_match(expected, controls):
                 return
@@ -465,15 +491,19 @@ class FbpLocalTcpClient:
                     observed = await self.async_read_controls()
                 except LocalProtocolError:
                     raise write_error
+                if not values.keys() <= observed.keys():
+                    raise
                 if _controls_match(values, observed):
                     return
                 if attempt + 1 == _MAX_CONFIRMED_WRITE_ATTEMPTS:
-                    raise write_error
+                    raise
                 await asyncio.sleep(_READ_RETRY_DELAYS_SECONDS[attempt])
                 continue
 
             await asyncio.sleep(_MODE_VERIFY_DELAY_SECONDS)
             observed = await self.async_read_controls()
+            if not values.keys() <= observed.keys():
+                raise LocalProtocolError(f"native {label} control read-back incomplete")
             if _controls_match(values, observed):
                 return
             last_mismatch = True
@@ -634,7 +664,7 @@ def _storage_entries(response: dict[str, Any]) -> list[dict[str, Any] | None]:
 
 def _control_value_matches(key: str, expected: str, observed: str | None) -> bool:
     """Compare slot state semantically but all other controls exactly."""
-    if key != REG_CONTROL_TIME_1:
+    if key not in REG_CONTROL_TIME_SLOTS:
         return observed == expected
     expected_slot = _slot_safety_fields(expected)
     observed_slot = _slot_safety_fields(observed)

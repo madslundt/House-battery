@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from .models import Action, Plan, PlannerSettings
 
 _GRID_AVAILABLE = {"1", "on", "available", "grid", "on_grid", "connected", "true"}
-_GRID_UNAVAILABLE = {"0", "off", "unavailable", "no_grid", "disconnected", "false"}
+_GRID_UNAVAILABLE = {"0", "off", "no_grid", "disconnected", "false"}
 
 
 def parse_grid_available(value: str | None) -> bool | None:

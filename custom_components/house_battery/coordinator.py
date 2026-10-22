@@ -739,7 +739,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _force_safe_if_needed(self, now: datetime) -> str:
         if not self.runtime.execution_enabled:
             return "automatic writes disabled"
-        success, result = await self.actuator.async_command(Action.SAFE, now)
+        success, result = await self.actuator.async_command(
+            Action.SAFE, now, grid_available=self._grid_available()
+        )
         self._record_command_result(success, result)
         if success:
             return f"{result}; writes resume automatically when health recovers"
