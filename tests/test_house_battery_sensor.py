@@ -3,14 +3,17 @@
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import UnitOfEnergy, UnitOfPower
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.sensor import SENSORS, daily_plan_blocks
+from house_battery.sensor import FbpValueSensor, SENSORS, daily_plan_blocks
 
 
 def _fake_daily_plan() -> dict[str, Any]:
@@ -125,6 +128,122 @@ def test_dashboard_period_entities_are_available_with_measurement_units() -> Non
     assert savings_keys <= descriptions.keys()
     assert all(descriptions[key].unit is UnitOfEnergy.KILO_WATT_HOUR for key in charge_keys)
     assert all(descriptions[key].unit == "DKK" for key in savings_keys)
+
+
+@pytest.mark.parametrize(
+    ("period", "period_name", "enabled"),
+    [
+        ("today", "today", True),
+        ("yesterday", "yesterday", False),
+        ("week", "this week", True),
+        ("last_week", "last week", False),
+        ("month", "this month", True),
+        ("last_month", "last month", False),
+        ("lifetime", "total", True),
+    ],
+)
+@pytest.mark.parametrize(
+    ("metric", "metric_name", "amount"),
+    [
+        ("charge_cost_dkk", "Battery charge cost", -1.25),
+        ("discharge_value_dkk", "Battery discharge value", 2.50),
+        ("battery_net_savings_dkk", "Battery net savings", 3.75),
+    ],
+)
+def test_battery_finances_cover_every_dashboard_period(
+    period: str,
+    period_name: str,
+    enabled: bool,
+    metric: str,
+    metric_name: str,
+    amount: float,
+) -> None:
+    """Expose signed cost, discharge value, and net return for each energy period."""
+    descriptions = {item.key: item for item in SENSORS}
+    key = f"{period}_{metric}"
+    assert key in descriptions
+    description = descriptions[key]
+    expected_name = f"{metric_name} {period_name}"
+    if period == "lifetime" and metric != "battery_net_savings_dkk":
+        expected_name = f"Recorded {expected_name.lower()}"
+    assert description.name == expected_name
+    assert description.unit == "DKK"
+    assert description.precision == 2
+    assert description.device_class is SensorDeviceClass.MONETARY
+    assert description.state_class is SensorStateClass.TOTAL
+    assert description.enabled_by_default is enabled
+
+    data = {key: amount} if period == "lifetime" else {period: {metric: amount}}
+    sensor = SimpleNamespace(
+        coordinator=SimpleNamespace(data=data),
+        description=description,
+    )
+    assert FbpValueSensor.native_value.fget(sensor) == amount
+
+
+@pytest.mark.parametrize(
+    ("period", "start"),
+    [
+        ("today", "2026-10-22T00:00:00+02:00"),
+        ("yesterday", "2026-10-21T00:00:00+02:00"),
+        ("week", "2026-10-19T00:00:00+02:00"),
+        ("last_week", "2026-10-12T00:00:00+02:00"),
+        ("month", "2026-10-01T00:00:00+02:00"),
+        ("last_month", "2026-09-01T00:00:00+02:00"),
+    ],
+)
+@pytest.mark.parametrize(
+    "metric", ["charge_cost_dkk", "discharge_value_dkk", "battery_net_savings_dkk"]
+)
+def test_period_money_resets_at_its_accounting_boundary(
+    period: str,
+    start: str,
+    metric: str,
+) -> None:
+    descriptions = {item.key: item for item in SENSORS}
+    sensor = SimpleNamespace(
+        coordinator=SimpleNamespace(
+            data={"accounting_period_starts": {period: start}}
+        ),
+        description=descriptions[f"{period}_{metric}"],
+    )
+    assert FbpValueSensor.last_reset.fget(sensor) == datetime.fromisoformat(start)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "lifetime_charge_cost_dkk",
+        "lifetime_discharge_value_dkk",
+        "lifetime_battery_net_savings_dkk",
+        "today_charge_kwh",
+        "today_net_savings_dkk",
+        "soc",
+    ],
+)
+def test_lifetime_and_non_accumulator_sensors_have_no_calendar_reset(key: str) -> None:
+    descriptions = {item.key: item for item in SENSORS}
+    sensor = SimpleNamespace(
+        coordinator=SimpleNamespace(
+            data={
+                "accounting_period_starts": {
+                    "today": "2026-10-22T00:00:00+02:00",
+                    "lifetime": "2026-01-01T00:00:00+01:00",
+                }
+            }
+        ),
+        description=descriptions[key],
+    )
+    assert FbpValueSensor.last_reset.fget(sensor) is None
+
+
+def test_period_money_has_no_reset_without_an_accounting_boundary() -> None:
+    descriptions = {item.key: item for item in SENSORS}
+    sensor = SimpleNamespace(
+        coordinator=SimpleNamespace(data={}),
+        description=descriptions["today_charge_cost_dkk"],
+    )
+    assert FbpValueSensor.last_reset.fget(sensor) is None
 
 
 # The two daily-plan tests above are the functional coverage for the plan

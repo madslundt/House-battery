@@ -234,21 +234,36 @@ SENSORS = (
         precision=3,
         enabled_by_default=True,
     ),
-    FbpSensorDescription(
-        key="today_charge_cost_dkk",
-        name="Battery charge cost today",
-        icon="mdi:cash-minus",
-        unit="DKK",
-        precision=2,
-        enabled_by_default=True,
-    ),
-    FbpSensorDescription(
-        key="today_discharge_value_dkk",
-        name="Battery discharge value today",
-        icon="mdi:cash-plus",
-        unit="DKK",
-        precision=2,
-        enabled_by_default=True,
+    *(
+        FbpSensorDescription(
+            key=f"{period}_{metric}",
+            name=(
+                f"Recorded {name.lower()} {period_name}"
+                if period == "lifetime" and metric != "battery_net_savings_dkk"
+                else f"{name} {period_name}"
+            ),
+            icon=icon,
+            unit="DKK",
+            precision=2,
+            device_class=SensorDeviceClass.MONETARY,
+            # Negative electricity prices can make any monetary total decrease.
+            state_class=SensorStateClass.TOTAL,
+            enabled_by_default=enabled,
+        )
+        for period, period_name, enabled in (
+            ("today", "today", True),
+            ("yesterday", "yesterday", False),
+            ("week", "this week", True),
+            ("last_week", "last week", False),
+            ("month", "this month", True),
+            ("last_month", "last month", False),
+            ("lifetime", "total", True),
+        )
+        for metric, name, icon in (
+            ("charge_cost_dkk", "Battery charge cost", "mdi:cash-minus"),
+            ("discharge_value_dkk", "Battery discharge value", "mdi:cash-plus"),
+            ("battery_net_savings_dkk", "Battery net savings", "mdi:cash-check"),
+        )
     ),
     FbpSensorDescription(
         key="month_charge_kwh",
@@ -291,22 +306,6 @@ SENSORS = (
         precision=3,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    FbpSensorDescription(
-        key="lifetime_charge_cost_dkk",
-        name="Recorded battery charge cost total",
-        icon="mdi:cash-minus",
-        unit="DKK",
-        precision=2,
-        enabled_by_default=False,
-    ),
-    FbpSensorDescription(
-        key="lifetime_discharge_value_dkk",
-        name="Recorded battery discharge value total",
-        icon="mdi:cash-plus",
-        unit="DKK",
-        precision=2,
-        enabled_by_default=False,
     ),
     FbpSensorDescription(
         key="equivalent_full_cycles",
@@ -1028,6 +1027,29 @@ class FbpValueSensor(Fbp1200Entity, SensorEntity):
         self._attr_device_class = description.device_class
         self._attr_state_class = description.state_class
         self._attr_entity_registry_enabled_default = description.enabled_by_default
+
+    @property
+    def last_reset(self) -> datetime | None:
+        """Separate calendar rollovers from genuine negative monetary changes."""
+        if (
+            self.description.device_class is not SensorDeviceClass.MONETARY
+            or self.description.state_class is not SensorStateClass.TOTAL
+        ):
+            return None
+        for period in (
+            "today",
+            "yesterday",
+            "week",
+            "last_week",
+            "month",
+            "last_month",
+        ):
+            if self.description.key.startswith(f"{period}_"):
+                start = self.coordinator.data.get("accounting_period_starts", {}).get(
+                    period
+                )
+                return datetime.fromisoformat(start) if start else None
+        return None
 
     @property
     def native_value(self) -> Any:

@@ -41,10 +41,27 @@ local TCP or command failures.
 | **Expected plan savings** | Forecast saving across the current planning horizon (known prices plus any enabled, valid extension) versus buying expected load from grid. It is a forecast, not cash earned. |
 | **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Direct-local FBP1200 entries need both a CT meter and whole-house load sensor for balanced grid/battery savings. Compare matching tariff periods, not one unusual day. |
 | **Average charge price / discharge value** | Energy-weighted known tariff for charge/discharge energy estimated by integrating reported battery power. Corresponding DKK cost/value totals are available. These are battery-energy tariff estimates, not a complete household bill calculation. |
+| **Battery charge cost / discharge value** | Recorded charge energy × tariff paid and discharge energy × tariff avoided, summed for today, yesterday, this/last week, this/last month, and total. Works from battery telemetry and known prices without a CT meter or whole-house load sensor. |
+| **Battery net savings** | Discharge value minus charge cost in DKK for the same periods. This is the battery's recorded monetary return before wear and purchase cost; it is separate from the balanced household **Estimated realized savings** estimate. |
 | **Known price spread** | Highest minus lowest price in the known future horizon. |
 | **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before battery cycling is worthwhile. |
 | **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary opportunistic ceiling. |
 | **Extra storage policy** | `normal` or `active`, with the effective target and explanation in attributes. It becomes active only when the opt-in higher-target plan completes an additional profitable cycle using known prices and returns below the normal target within that horizon. |
+
+Battery financial totals update after each completed 15-minute ledger interval
+with sufficient telemetry. Only energy with known prices contributes to the
+cost/value totals; missing historic prices are not reconstructed. Negative
+prices and negative returns are preserved. A charge-only day can have negative
+net savings while the stored energy is used on a later day. Net savings excludes
+the value of energy still stored in the battery.
+
+Today, this week, this month, and total financial sensors are enabled by default
+for new entities. Previous-period sensors can be enabled from the integration's
+entity list. Existing disabled entities retain their Home Assistant settings.
+Calendar periods use Home Assistant's local timezone and weeks start on Monday.
+Period history is retained for 62 days; lifetime totals survive history pruning
+and restarts. A percentage ROI requires dividing the monetary return by the
+battery's installed purchase cost separately.
 
 Example: with prices of 0.20 and 4.00 DKK/kWh, 85% efficiency, and 0.35
 DKK/kWh degradation cost, effective margin is about 3.41 DKK/kWh. If the

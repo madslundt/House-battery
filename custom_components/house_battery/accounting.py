@@ -123,6 +123,15 @@ class EnergyLedger:
     total_export_kwh: float = 0.0
     total_net_savings_dkk: float = 0.0
     savings_intervals: int = 0
+    charge_cost_intervals: int = 0
+    discharge_value_intervals: int = 0
+
+    @property
+    def total_battery_net_savings_dkk(self) -> float | None:
+        """Recorded tariff return, independent of household-flow accounting."""
+        if not self.charge_cost_intervals or not self.discharge_value_intervals:
+            return None
+        return self.total_discharge_value_dkk - self.total_charge_cost_dkk
 
     def close(
         self, accumulator: IntervalAccumulator, degradation_cost: float
@@ -207,8 +216,10 @@ class EnergyLedger:
             self.total_discharge_kwh += discharge_kwh
             if charge_cost is not None:
                 self.total_charge_cost_dkk += charge_cost
+                self.charge_cost_intervals += 1
             if discharge_value is not None:
                 self.total_discharge_value_dkk += discharge_value
+                self.discharge_value_intervals += 1
         self.total_export_kwh += export_kwh
         if savings is not None:
             self.total_net_savings_dkk += savings
@@ -254,6 +265,11 @@ class EnergyLedger:
             "discharge_kwh": discharge_kwh,
             "charge_cost_dkk": charge_cost if priced_charge else None,
             "discharge_value_dkk": discharge_value if priced_discharge else None,
+            "battery_net_savings_dkk": (
+                discharge_value - charge_cost
+                if priced_charge and priced_discharge
+                else None
+            ),
             "charge_price_dkk_per_kwh": (
                 charge_cost / priced_charge_kwh if priced_charge_kwh > 0 else None
             ),
@@ -294,6 +310,8 @@ class EnergyLedger:
             "total_export_kwh": self.total_export_kwh,
             "total_net_savings_dkk": self.total_net_savings_dkk,
             "savings_intervals": self.savings_intervals,
+            "charge_cost_intervals": self.charge_cost_intervals,
+            "discharge_value_intervals": self.discharge_value_intervals,
         }
 
     @classmethod
@@ -312,12 +330,46 @@ class EnergyLedger:
             interval.setdefault("discharge_value_dkk", None)
             intervals.append(LedgerInterval(**interval))
         total_net_savings = float(data.get("total_net_savings_dkk", 0))
+        total_charge_cost = float(
+            data.get(
+                "total_charge_cost_dkk",
+                sum(item.charge_cost_dkk or 0 for item in intervals),
+            )
+        )
+        total_discharge_value = float(
+            data.get(
+                "total_discharge_value_dkk",
+                sum(item.discharge_value_dkk or 0 for item in intervals),
+            )
+        )
+        # Older runtime payloads predate the evidence counters. Preserve known
+        # zero-price evidence as well as totals whose intervals were pruned.
+        charge_cost_intervals = int(
+            data.get(
+                "charge_cost_intervals",
+                max(
+                    sum(item.charge_cost_dkk is not None for item in intervals),
+                    int(total_charge_cost != 0),
+                ),
+            )
+        )
+        discharge_value_intervals = int(
+            data.get(
+                "discharge_value_intervals",
+                max(
+                    sum(item.discharge_value_dkk is not None for item in intervals),
+                    int(total_discharge_value != 0),
+                ),
+            )
+        )
         return cls(
             intervals=intervals[-LEDGER_HISTORY_LIMIT:],
             total_charge_kwh=float(data.get("total_charge_kwh", 0)),
             total_discharge_kwh=float(data.get("total_discharge_kwh", 0)),
-            total_charge_cost_dkk=float(data.get("total_charge_cost_dkk", 0)),
-            total_discharge_value_dkk=float(data.get("total_discharge_value_dkk", 0)),
+            total_charge_cost_dkk=total_charge_cost,
+            total_discharge_value_dkk=total_discharge_value,
+            charge_cost_intervals=max(0, charge_cost_intervals),
+            discharge_value_intervals=max(0, discharge_value_intervals),
             total_export_kwh=float(data.get("total_export_kwh", 0)),
             total_net_savings_dkk=total_net_savings,
             savings_intervals=max(

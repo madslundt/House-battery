@@ -1148,11 +1148,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.store.save(self.runtime)
             self._daily_plan_dirty = False
 
+        period_bounds = calendar_period_bounds(local_now)
         periods = {
             name: self.runtime.ledger.totals_between(
                 start.astimezone(UTC), end.astimezone(UTC)
             )
-            for name, (start, end) in calendar_period_bounds(local_now).items()
+            for name, (start, end) in period_bounds.items()
         }
         capacity_kwh = self._settings().capacity_wh / 1000
         nominal_capacity_kwh = self.runtime.settings["capacity_kwh"]
@@ -1344,11 +1345,23 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.runtime.actual_history.days
             ),
             **periods,
+            "accounting_period_starts": {
+                name: start.isoformat() for name, (start, _) in period_bounds.items()
+            },
             "lifetime_charge_kwh": self.runtime.ledger.total_charge_kwh,
             "lifetime_discharge_kwh": self.runtime.ledger.total_discharge_kwh,
-            "lifetime_charge_cost_dkk": self.runtime.ledger.total_charge_cost_dkk,
+            "lifetime_charge_cost_dkk": (
+                self.runtime.ledger.total_charge_cost_dkk
+                if self.runtime.ledger.charge_cost_intervals
+                else None
+            ),
             "lifetime_discharge_value_dkk": (
                 self.runtime.ledger.total_discharge_value_dkk
+                if self.runtime.ledger.discharge_value_intervals
+                else None
+            ),
+            "lifetime_battery_net_savings_dkk": (
+                self.runtime.ledger.total_battery_net_savings_dkk
             ),
             "lifetime_net_savings_dkk": (
                 self.runtime.ledger.total_net_savings_dkk
