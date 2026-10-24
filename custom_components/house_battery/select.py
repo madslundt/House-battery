@@ -46,8 +46,7 @@ class FbpOperatingModeSelect(Fbp1200Entity, SelectEntity):
 
     - ``charge`` raises the native ceiling to the maximum charge SOC and never
       charges above it.
-    - ``battery`` requests the arbitrage reserve SOC floor and requires
-      independent physical verification of the backup-output cutoff.
+    - ``battery`` requests the arbitrage reserve SOC floor.
     - ``grid`` holds the inverter idle.
 
     The override only changes the commanded action; it never bypasses the
@@ -84,6 +83,6 @@ class FbpOperatingModeSelect(Fbp1200Entity, SelectEntity):
             "note": (
                 "auto follows the plan; forced modes command the native "
                 "Battery Operating Mode with the configured SOC limits. "
-                "Battery discharge requires physically verified backup cutoff."
+                "Backup-cutoff verification is reported separately."
             ),
         }

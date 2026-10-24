@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from statistics import median
 from typing import Any
@@ -23,7 +23,11 @@ class PriceNormalization:
 
 def _datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
-        return value
+        # Native provider timestamps can share a ZoneInfo object across a
+        # repeated DST hour. Python then compares/subtracts wall times, which
+        # collapses the two folds and mistakes 02:45 -> 02:00 for midnight.
+        # Normalize aware datetimes before deduplication and interval math.
+        return value.astimezone(UTC) if value.tzinfo is not None else value
     if not isinstance(value, str):
         return None
     try:

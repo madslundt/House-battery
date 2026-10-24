@@ -70,9 +70,12 @@ def _clip_to_window(
 
 
 def _to_zone(value: datetime, tz: timezone) -> datetime:
-    """Return ``value`` in ``tz`` without changing the underlying instant."""
+    """Keep the local offset while comparing intervals by their instants."""
 
-    return value.astimezone(tz)
+    # Distinct folds sharing one ZoneInfo compare by wall time in Python.
+    # Fixed offsets retain the display time and make both 02:00 hours distinct,
+    # matching the timestamps reconstructed from the persisted ISO strings.
+    return datetime.fromisoformat(value.astimezone(tz).isoformat())
 
 
 def _prorate_head(

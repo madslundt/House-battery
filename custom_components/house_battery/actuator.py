@@ -12,7 +12,6 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from .const import (
-    BACKUP_CUTOFF_UNVERIFIED_REASON,
     CONF_CHARGE_POWER_CONTROL,
     CONF_DISCHARGE_POWER_CONTROL,
     CONF_GRID_ISOLATION_SWITCH,
@@ -222,12 +221,6 @@ class LocalControlAdapter:
             return None
         runtime = self._runtime()
         requested_action = action
-        backup_cutoff_blocked = (
-            action is Action.BATTERY and not runtime.backup_cutoff_verified
-        )
-        if backup_cutoff_blocked:
-            # Never isolate the load while autonomous backup cutoff is unproven.
-            action = Action.GRID
         power_w = round(
             clamp_setpoint_to_device(
                 discharge_setpoint_below_load(
@@ -341,8 +334,6 @@ class LocalControlAdapter:
                 "no usable discharge setpoint for connected load; "
                 "grid restored and Grid/Idle commanded"
             )
-        if backup_cutoff_blocked:
-            return True, f"{BACKUP_CUTOFF_UNVERIFIED_REASON}; Grid/Idle commanded"
         if requested_action is Action.BATTERY and not isolation_confirmed:
             result = (
                 "grid isolation plug unavailable or not confirmed off; battery "

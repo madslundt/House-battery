@@ -38,6 +38,7 @@ class RuntimeState:
     execution_enabled: bool = False
     # Native SOC read-back cannot prove the separate backup output cuts off.
     # This remains false until independent physical verification is recorded.
+    # It is diagnostic evidence, not an authorization gate for normal control.
     backup_cutoff_verified: bool = False
     export_safety_fault_latched: bool = False
     last_action: str = "safe"

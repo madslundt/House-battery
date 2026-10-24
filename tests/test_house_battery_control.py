@@ -267,8 +267,7 @@ def test_direct_setup_requires_only_grid_and_price_sources() -> None:
 
 
 def runtime() -> RuntimeState:
-    # These actuator fixtures model hardware whose cutoff was already verified.
-    state = RuntimeState(backup_cutoff_verified=True)
+    state = RuntimeState()
     state.settings.update({"absolute_min_soc": 10, "target_soc": 90})
     return state
 
@@ -1221,7 +1220,6 @@ def test_charge_plan_resumes_after_disconnect_across_price_boundary(
         coordinator._startup_guard_passed = True
         coordinator.runtime.execution_enabled = True
         coordinator.runtime.opportunistic_charging_enabled = True
-        coordinator.runtime.backup_cutoff_verified = True
         coordinator.runtime.settings.update({"reserve_soc": 10, "absolute_min_soc": 5})
         client = FlakyClient()
         coordinator.local_client = client
@@ -1376,7 +1374,6 @@ def test_unusable_battery_restores_grid_despite_published_discharge(
         coordinator._startup_guard_passed = True
         coordinator.runtime.execution_enabled = True
         coordinator.runtime.override_action = override
-        coordinator.runtime.backup_cutoff_verified = True
         coordinator.runtime.settings.update({
             "reserve_soc": reserve_soc, "absolute_min_soc": emergency_soc,
         })

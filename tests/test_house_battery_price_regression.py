@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -21,7 +23,8 @@ from house_battery.const import (
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.dailyplan import merge_adjacent_blocks
 from house_battery.models import Action, PlannerSettings, PriceSlot
-from house_battery.planner import optimize
+from house_battery.planner import _future_slots, optimize
+from house_battery.price import normalize_price_rows_with_report
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "prices_2026-09-25_26.json"
@@ -203,3 +206,72 @@ def test_enabled_forecast_extends_optimizer_with_uncertainty() -> None:
         Action.CHARGE,
         Action.BATTERY,
     }
+
+
+def _fall_back_price_rows(*, explicit_ends: bool) -> list[dict]:
+    """Match native HA datetimes on Copenhagen's 25-hour autumn day."""
+    local = ZoneInfo("Europe/Copenhagen")
+    start = datetime(2026, 10, 25, tzinfo=local).astimezone(UTC)
+    rows = []
+    for index in range(100):
+        interval_start = (start + timedelta(minutes=15 * index)).astimezone(local)
+        interval_end = (start + timedelta(minutes=15 * (index + 1))).astimezone(local)
+        hour = interval_start.hour
+        price = .3 if hour < 6 else 4.0 if 17 <= hour < 21 else .5
+        row = {"start": interval_start, "price": price}
+        if explicit_ends:
+            row["end"] = interval_end
+        rows.append(row)
+    return rows
+
+
+@pytest.mark.parametrize("explicit_ends", [False, True])
+def test_native_fall_back_prices_preserve_both_folds_and_quarter_hours(explicit_ends):
+    report = normalize_price_rows_with_report(
+        _fall_back_price_rows(explicit_ends=explicit_ends)
+    )
+    assert report.source_rows == 100
+    assert report.invalid_rows == 0
+    assert len(report.slots) == 100
+    assert all(slot.hours == .25 for slot in report.slots)
+    assert all(
+        previous.end == current.start
+        for previous, current in zip(report.slots, report.slots[1:])
+    )
+    local = ZoneInfo("Europe/Copenhagen")
+    repeated_hour = [
+        slot.start.astimezone(local)
+        for slot in report.slots
+        if slot.start.astimezone(local).hour == 2
+    ]
+    assert [start.fold for start in repeated_hour] == [0] * 4 + [1] * 4
+    assert len({start.timestamp() for start in repeated_hour}) == 8
+
+
+def test_native_fall_back_horizon_reaches_peak_and_plans_cheap_charging():
+    rows = _fall_back_price_rows(explicit_ends=True)
+    report = normalize_price_rows_with_report(rows)
+    slots = [replace(slot, expected_load_wh=222 * .25) for slot in report.slots]
+    now = datetime(2026, 10, 24, 22, tzinfo=UTC)
+    horizon_end = datetime(2026, 10, 25, 23, tzinfo=UTC)
+    future = _future_slots(slots, now)
+    assert len(future) == 100
+    assert future[-1].end == horizon_end
+
+    plan = optimize(
+        slots, now=now, soc=19,
+        settings=_settings(reserve_soc=10), current_action=Action.GRID,
+    )
+    assert len(plan.slots) == 100
+    assert plan.slots[-1].end == horizon_end
+    cheap_charges = [
+        slot for slot in plan.slots
+        if slot.action is Action.CHARGE and slot.price == .3
+    ]
+    peak_discharges = [
+        slot for slot in plan.slots
+        if slot.action is Action.BATTERY and slot.price == 4.0
+    ]
+    assert cheap_charges
+    assert peak_discharges
+    assert cheap_charges[-1].end < peak_discharges[0].start

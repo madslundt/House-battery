@@ -845,6 +845,35 @@ def test_reconcile_across_fall_back_transition_is_contiguous() -> None:
     assert any(s.start.utcoffset() == timedelta(hours=1) for s in result.slots)
 
 
+def test_reconcile_fall_back_preserves_all_hundred_quarter_hours() -> None:
+    day_start = datetime(2026, 10, 25, tzinfo=COPENHAGEN)
+    cutoff = day_start.astimezone(UTC)
+    horizon_end = datetime(2026, 10, 26, tzinfo=COPENHAGEN).astimezone(UTC)
+    future = tuple(
+        slot(
+            cutoff + timedelta(minutes=15 * index),
+            cutoff + timedelta(minutes=15 * (index + 1)),
+            Action.GRID,
+        )
+        for index in range(100)
+    )
+    result = reconcile_daily_plan(
+        None, future, cutoff=cutoff, day_start=day_start, horizon_end=horizon_end
+    )
+    assert len(result.slots) == 100
+    cursor = cutoff
+    for interval in result.slots:
+        start = interval.start.astimezone(UTC)
+        end = interval.end.astimezone(UTC)
+        assert start == cursor
+        assert end - start == timedelta(minutes=15)
+        cursor = end
+    assert cursor == horizon_end
+    assert {interval.start.utcoffset() for interval in result.slots} == {
+        timedelta(hours=1), timedelta(hours=2),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Variable price interval durations
 # --------------------------------------------------------------------------- #

@@ -1,4 +1,4 @@
-"""Discharge requires independent physical backup-cutoff verification."""
+"""Backup-cutoff evidence does not block normal economic battery operation."""
 
 from __future__ import annotations
 
@@ -36,11 +36,12 @@ class Client:
     def __init__(self):
         self.calls = []
         self.unavailable = False
+        self.soc = 50
 
     async def async_snapshot(self):
         if self.unavailable:
             raise LocalProtocolError("battery temporarily unreachable")
-        return FbpLocalSnapshot(50, 250, 0, 0, 200, {
+        return FbpLocalSnapshot(self.soc, 250, 0, 0, 200, {
             "Storage_list": [{"OffGridLoadPower": 250}],
         })
 
@@ -63,7 +64,7 @@ class Client:
         self.calls.append(("self_consumption",))
 
 
-async def coordinator(*, override="auto", startup=False):
+async def coordinator(*, override="auto", startup=False, now=None):
     hass = HomeAssistant("/tmp")
     hass.config.time_zone = "UTC"
     timeline = []
@@ -79,7 +80,7 @@ async def coordinator(*, override="auto", startup=False):
     hass.services.async_register("switch", "turn_off", switch)
     hass.states.async_set("switch.grid_input", "off")
     hass.states.async_set("binary_sensor.grid", "on")
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
     start = now.replace(minute=now.minute // 15 * 15, second=0, microsecond=0)
     hass.states.async_set("sensor.prices", "4", {"prices": [
         {"start": (start + timedelta(minutes=15 * index)).isoformat(),
@@ -121,7 +122,7 @@ async def coordinator(*, override="auto", startup=False):
 
 
 @pytest.mark.parametrize("stored", [None, False, "true", "false", 1, {}])
-def test_missing_or_malformed_verification_cannot_unlock_discharge(stored):
+def test_missing_or_malformed_verification_is_not_reported_as_verified(stored):
     data = {"execution_enabled": True, "override_action": "battery"}
     if stored is not None:
         data["backup_cutoff_verified"] = stored
@@ -137,63 +138,66 @@ def test_explicit_verification_round_trips_without_being_inferred():
 
 
 @pytest.mark.parametrize("action", [Action.BATTERY, Action.CHARGE, Action.GRID])
-def test_actuator_locks_only_discharge_before_any_grid_isolation(action):
+def test_unverified_cutoff_does_not_block_actuator_commands(action):
     async def scenario():
         coord, client, hass, timeline = await coordinator()
         success, result = await coord.actuator.async_command(
             action, datetime.now(UTC), load_w=250,
         )
         assert success, result
-        assert hass.states.get("switch.grid_input").state == "on"
-        assert "turn_off" not in timeline
-        if action is Action.CHARGE:
+        if action is Action.BATTERY:
+            assert hass.states.get("switch.grid_input").state == "off"
+            assert client.calls == [("limits", 20, 90), ("mode", "Discharge", 200)]
+        elif action is Action.CHARGE:
             assert client.calls[-1][:2] == ("mode", "Charge")
         else:
             assert client.calls == [("grid_idle", 20, 90)]
-        if action is Action.BATTERY:
-            assert "physically verified" in result
+        if action is not Action.BATTERY:
+            assert hass.states.get("switch.grid_input").state == "on"
+            assert "turn_off" not in timeline
         assert coord.runtime.execution_enabled
+        assert not coord.runtime.backup_cutoff_verified
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("override", ["auto", "battery"])
 @pytest.mark.parametrize("startup", [False, True])
-def test_persisted_override_and_held_plan_cannot_bypass_cutoff_lock(override, startup):
+def test_unverified_cutoff_preserves_override_and_executable_discharge(override, startup):
     async def scenario():
         coord, client, hass, timeline = await coordinator(override=override, startup=startup)
         status = await coord._async_update_data()
-        assert hass.states.get("switch.grid_input").state == "on"
-        assert "turn_off" not in timeline
-        assert client.calls == [("grid_idle", 20, 90)]
+        if startup:
+            assert hass.states.get("switch.grid_input").state == "on"
+            assert "turn_off" not in timeline
+            assert client.calls == [("grid_idle", 20, 90)]
+        else:
+            assert hass.states.get("switch.grid_input").state == "off"
+            assert client.calls == [("limits", 20, 90), ("mode", "Discharge", 200)]
+        assert coord.runtime.override_action == override
         assert status["backup_cutoff_verified"] is False
-        assert status["battery_discharge_blocked"] is True
-        assert "physically verified" in status["battery_discharge_blocked_reason"]
+        assert status["battery_discharge_blocked"] is False
+        assert status["battery_discharge_blocked_reason"] is None
         assert status["execution_enabled"]
-        assert all(slot["action"] != "battery" for slot in status["plan"]["slots"])
-        assert status["executable_slot"]["action"] != "battery"
-        assert coord.plan.terminal_value_dkk == 0
-        historical_discharge = [
-            slot for slot in coord.runtime.daily_plan.slots if slot.action is Action.BATTERY
-        ]
-        assert len(historical_discharge) == 1
-        assert historical_discharge[0].end == datetime.fromisoformat(status["last_refresh"])
+        assert status["executable_slot"]["action"] == "battery"
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("native", [False, True])
-def test_unverified_manual_battery_request_is_rejected_before_writes(native):
+def test_unverified_manual_battery_request_is_accepted(native):
     async def scenario():
-        coord, client, _, timeline = await coordinator()
-        with pytest.raises(ValueError, match="physically verified"):
-            if native:
-                await coord.async_set_manual_mode(MODE_BATTERY)
-            else:
-                await coord.async_set_override_action("battery")
-        assert not client.calls
-        assert not timeline
-        assert coord.runtime.override_action == "auto"
+        coord, client, hass, _ = await coordinator()
+        if native:
+            await coord.async_set_manual_mode(MODE_BATTERY)
+            assert client.calls == [("self_consumption",)]
+            assert hass.states.get("switch.grid_input").state == "off"
+        else:
+            await coord.async_set_override_action("battery")
+            assert coord.runtime.override_action == "battery"
+            await coord._async_update_data()
+            assert client.calls == [("limits", 20, 90), ("mode", "Discharge", 200)]
+        assert not coord.runtime.backup_cutoff_verified
 
     asyncio.run(scenario())
 
@@ -209,7 +213,7 @@ def test_unverified_native_grid_and_charge_controls_remain_available(mode):
     asyncio.run(scenario())
 
 
-def test_interrupted_telemetry_restores_grid_without_unlocking_on_recovery():
+def test_interrupted_telemetry_restores_grid_and_resumes_authorized_discharge():
     async def scenario():
         coord, client, hass, timeline = await coordinator(override="battery")
         client.unavailable = True
@@ -219,15 +223,15 @@ def test_interrupted_telemetry_restores_grid_without_unlocking_on_recovery():
         assert not client.calls
         client.unavailable = False
         resumed = await coord._async_update_data()
-        assert resumed["battery_discharge_blocked"]
-        assert "turn_off" not in timeline
-        assert client.calls == [("grid_idle", 20, 90)]
+        assert resumed["battery_discharge_blocked"] is False
+        assert timeline[-1] == "turn_off"
+        assert client.calls == [("limits", 20, 90), ("mode", "Discharge", 200)]
         assert not coord.runtime.backup_cutoff_verified
 
     asyncio.run(scenario())
 
 
-def test_failed_grid_restore_remains_locked_and_reports_failure(monkeypatch):
+def test_failed_grid_restore_still_stops_output_and_reports_failure(monkeypatch):
     monkeypatch.setattr("house_battery.actuator._STATE_CONFIRM_TIMEOUT_SECONDS", .01)
     monkeypatch.setattr("house_battery.actuator._STATE_CONFIRM_POLL_SECONDS", .001)
     monkeypatch.setattr("house_battery.actuator._GRID_SWITCH_RETRY_DELAY_SECONDS", 0)
@@ -241,7 +245,7 @@ def test_failed_grid_restore_remains_locked_and_reports_failure(monkeypatch):
 
         hass.services.async_register("switch", "turn_on", unavailable_switch)
         success, result = await coord.actuator.async_command(
-            Action.BATTERY, datetime.now(UTC), load_w=250,
+            Action.CHARGE, datetime.now(UTC), load_w=250,
         )
         assert not success
         assert "did not confirm on" in result
@@ -253,7 +257,7 @@ def test_failed_grid_restore_remains_locked_and_reports_failure(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_rearming_automatic_control_never_unlocks_backup_cutoff():
+def test_rearming_control_preserves_cutoff_evidence_and_allows_battery_override():
     async def scenario():
         coord, _, _, _ = await coordinator()
         await coord._async_update_data()
@@ -262,8 +266,9 @@ def test_rearming_automatic_control_never_unlocks_backup_cutoff():
         assert coord.runtime.execution_enabled
         assert not coord.runtime.backup_cutoff_verified
         assert coord.store.runtime.as_dict()["backup_cutoff_verified"] is False
-        with pytest.raises(ValueError, match="physically verified"):
-            await coord.async_set_override_action("battery")
+        await coord.async_set_override_action("battery")
+        assert coord.runtime.override_action == "battery"
+        assert not coord.battery_discharge_blocked
 
     asyncio.run(scenario())
 
@@ -278,6 +283,58 @@ def test_first_startup_stops_previous_discharge_even_without_price_plan(grid_sta
         assert client.calls == [("grid_idle", 20, 90)]
         assert hass.states.get("switch.grid_input").state == "on"
         assert "turn_off" not in timeline
-        assert status["battery_discharge_blocked"]
+        assert not status["battery_discharge_blocked"]
+        assert not status["backup_cutoff_verified"]
+
+    asyncio.run(scenario())
+
+
+def test_unverified_cutoff_allows_charging_for_future_expensive_load(monkeypatch):
+    now = datetime(2026, 10, 24, 12, 5, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    monkeypatch.setattr("house_battery.coordinator.datetime", FrozenDatetime)
+
+    async def scenario():
+        coord, client, hass, _ = await coordinator(now=now)
+        client.soc = 19
+        coord.runtime.settings["reserve_soc"] = 10
+        coord.runtime.daily_plan = DailyPlan(date=now.date().isoformat())
+        start = now.replace(minute=now.minute // 15 * 15, second=0, microsecond=0)
+        hass.states.async_set("sensor.prices", ".3", {"prices": [
+            {"start": (start + timedelta(minutes=15 * index)).isoformat(),
+             "end": (start + timedelta(minutes=15 * (index + 1))).isoformat(),
+             "price": price}
+            for index, price in enumerate([.3] * 12 + [4.] * 24)
+        ]})
+        status = await coord._async_update_data()
+        assert status["system_state"] == "ACTIVE"
+        assert not status["battery_discharge_blocked"]
+        assert not status["backup_cutoff_verified"]
+        charging = [slot for slot in coord.plan.slots if slot.action is Action.CHARGE]
+        assert charging
+        assert any(slot.price == pytest.approx(.3) for slot in charging)
+        assert any(
+            slot.action is Action.BATTERY and slot.price == pytest.approx(4.)
+            for slot in coord.plan.slots
+        )
+
+    asyncio.run(scenario())
+
+
+def test_unverified_discharge_still_exits_at_reserve_soc():
+    async def scenario():
+        coord, client, hass, timeline = await coordinator(override="battery")
+        client.soc = 20
+        status = await coord._async_update_data()
+        assert hass.states.get("switch.grid_input").state == "on"
+        assert "turn_off" not in timeline
+        assert client.calls == [("grid_idle", 20, 90)]
+        assert "reserve SOC protection" in status["command_result"]
+        assert not coord.runtime.backup_cutoff_verified
 
     asyncio.run(scenario())

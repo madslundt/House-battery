@@ -1,18 +1,16 @@
 # Commissioning: verifying export and SOC limits
 
-Automatic control requires physical verification of zero export and both SOC
-limits. Command read-back and automated tests verify the requested settings;
+Commissioning checks zero export and both SOC limits.
+Command read-back and automated tests verify the requested settings;
 they do not establish the physical behavior of the separate off-grid AC output.
 
-Direct-local discharge is locked until independent backup-cutoff verification
-has been recorded. Existing installations also default to unverified. The lock
-survives restarts, commissioning changes and automatic-control switch cycles;
-held plans and forced Battery mode cannot bypass it. Charge and Grid controls
-remain available, but planning excludes discharge and its assumed savings.
-Read-only `backup_cutoff_verified`, `battery_discharge_blocked` and
-`battery_discharge_blocked_reason` attributes explain this state. There is no
-UI or service that unlocks discharge in this release. Native SOC read-back
-does not unlock it.
+Direct-local charging and discharging follow the economic plan and configured
+SOC limits without requiring backup-cutoff verification. The read-only
+`backup_cutoff_verified` attribute records independent physical evidence; native
+SOC read-back does not establish it. The legacy `battery_discharge_blocked` and
+`battery_discharge_blocked_reason` attributes remain false and empty. Health,
+grid availability, commissioning, export checks and actual-SOC reserve handling
+continue to govern normal control.
 
 ## FBP1200 physical results, 2026-10-24
 
@@ -24,10 +22,11 @@ These results apply to the tested unit and firmware, not every FBP1200.
 | Emergency floor 22% at reported SOC 20%, with the sole mains input disconnected | Native minimum and active-slot minimum both read back 22%, with all other slots disabled. Battery output continued at 243 W and the UPS received 230 V. Failed. |
 | Autonomous crossing from SOC 20% to emergency floor 19% | Output continued at 235–278 W for over one minute after SOC reached 19%. Failed. |
 
-Mains and original SOC settings were restored after every test. Automatic
-control remains off on the tested installation. These failures do not establish
-a supported emergency cutoff command; the software lock prevents deliberate
-discharge but cannot stop independent backup output during a real outage.
+Mains and original SOC settings were restored after every test. These failures
+do not establish a supported emergency cutoff command. During normal operation,
+Home Assistant restores grid input at the reserve; it cannot guarantee
+independent backup-output cutoff during a real outage or when its control
+connection is unavailable.
 
 ## The three protection layers
 
