@@ -84,6 +84,11 @@ integration presentation.
 
 ## Quick safety rules
 
+Direct-local FBP1200 discharge is locked until independent backup-output cutoff
+verification is recorded. Existing entries also default to locked. Commissioning,
+restarting or selecting Battery mode cannot unlock it; Charge and Grid controls
+remain available. See the [physical test results](docs/commissioning.md).
+
 Keep automatic control off until each local mode, SOC limit, read-back,
 battery-served load source, and electrical setting has been tested. Bind **Grid available**
 to a physical on-grid/device status, never a power sensor. Stale telemetry,

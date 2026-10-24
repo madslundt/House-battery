@@ -14,6 +14,28 @@ from house_battery.planner import optimize
 BASE = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("soc", [20, 70])
+def test_disabled_discharge_has_no_arbitrage_or_terminal_credit(soc) -> None:
+    plan = optimize(
+        slots([.2] * 8 + [4.0] * 16), now=BASE, soc=soc,
+        settings=settings(discharge_enabled=False), current_action=Action.BATTERY,
+    )
+    assert plan.slots
+    assert all(slot.action is Action.GRID for slot in plan.slots)
+    assert plan.battery_throughput_kwh == 0
+    assert plan.terminal_value_dkk == 0
+    assert plan.expected_savings_dkk <= 0
+
+
+def test_disabled_discharge_still_allows_profitable_negative_price_charging() -> None:
+    plan = optimize(
+        slots([-1.0] * 8), now=BASE, soc=20,
+        settings=settings(discharge_enabled=False),
+    )
+    assert any(slot.action is Action.CHARGE for slot in plan.slots)
+    assert all(slot.action is not Action.BATTERY for slot in plan.slots)
+
+
 def slots(prices: list[float], load_w: float = 500) -> list[PriceSlot]:
     return [
         PriceSlot(

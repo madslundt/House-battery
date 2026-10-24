@@ -4,6 +4,31 @@ Automatic control requires physical verification of zero export and both SOC
 limits. Command read-back and automated tests verify the requested settings;
 they do not establish the physical behavior of the separate off-grid AC output.
 
+Direct-local discharge is locked until independent backup-cutoff verification
+has been recorded. Existing installations also default to unverified. The lock
+survives restarts, commissioning changes and automatic-control switch cycles;
+held plans and forced Battery mode cannot bypass it. Charge and Grid controls
+remain available, but planning excludes discharge and its assumed savings.
+Read-only `backup_cutoff_verified`, `battery_discharge_blocked` and
+`battery_discharge_blocked_reason` attributes explain this state. There is no
+UI or service that unlocks discharge in this release. Native SOC read-back
+does not unlock it.
+
+## FBP1200 physical results, 2026-10-24
+
+These results apply to the tested unit and firmware, not every FBP1200.
+
+| Test | Observed result |
+| --- | --- |
+| Normal reserve raised from 18% to 22% at reported SOC 20% | Mains input restored; reported battery output fell from 215 W to 0 W; downstream UPS remained online. Passed. |
+| Emergency floor 22% at reported SOC 20%, with the sole mains input disconnected | Native minimum and active-slot minimum both read back 22%, with all other slots disabled. Battery output continued at 243 W and the UPS received 230 V. Failed. |
+| Autonomous crossing from SOC 20% to emergency floor 19% | Output continued at 235–278 W for over one minute after SOC reached 19%. Failed. |
+
+Mains and original SOC settings were restored after every test. Automatic
+control remains off on the tested installation. These failures do not establish
+a supported emergency cutoff command; the software lock prevents deliberate
+discharge but cannot stop independent backup output during a real outage.
+
 ## The three protection layers
 
 1. **Discharge is bounded at the actuator.** Native integrations use their

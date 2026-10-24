@@ -57,6 +57,9 @@ ACTION_CHARGE = "charge"
 ACTION_GRID = "grid"
 ACTION_BATTERY = "battery"
 ACTION_SAFE = "safe"
+BACKUP_CUTOFF_UNVERIFIED_REASON = (
+    "Battery discharge blocked: backup cutoff has not been physically verified"
+)
 
 # Manual operating override for the storage controller. `auto` follows the
 # optimizer plan; the other options force the commanded battery action

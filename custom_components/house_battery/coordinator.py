@@ -19,6 +19,7 @@ from homeassistant.util import dt as dt_util
 from .accounting import calendar_period_bounds
 from .actuator import LocalControlAdapter, soc_control_problems
 from .const import (
+    BACKUP_CUTOFF_UNVERIFIED_REASON,
     CONF_ACCOUNTING_LOAD_POWER,
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
@@ -51,6 +52,7 @@ from .const import (
     MODE_SAFE,
     OPPORTUNISTIC_TARGET_SOC,
     OVERRIDE_AUTO,
+    OVERRIDE_BATTERY,
     OVERRIDE_OPTIONS,
     OVERRIDE_TO_ACTION,
     RECOVERY_RELOAD_AFTER_FAILURES,
@@ -183,6 +185,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     def is_direct_local(self) -> bool:
         return self.local_client is not None
 
+    @property
+    def battery_discharge_blocked(self) -> bool:
+        """Require physical backup-cutoff proof for direct-local discharge."""
+        return self.is_direct_local and not self.runtime.backup_cutoff_verified
+
     def _set_commanded_local_mode(self, mode: str) -> None:
         self._commanded_local_mode = mode
 
@@ -200,6 +207,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         )
         if self.is_direct_local:
+            if (
+                self.battery_discharge_blocked
+                and self.runtime.override_action == OVERRIDE_BATTERY
+            ):
+                self.runtime.override_action = OVERRIDE_AUTO
+                await self.store.save(self.runtime)
             learner_source = DIRECT_LOAD_SOURCE
             if self.runtime.load_learner_source != learner_source:
                 self.runtime.load_learner = LoadLearner()
@@ -565,7 +578,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         all_forecast_slots: list[PriceSlot] = []
         for _, forecast_slots in available_forecasts:
             all_forecast_slots.extend(forecast_slots)
-        self._forecast_plan = build_forecast_plan(
+        self._forecast_plan = None if self.battery_discharge_blocked else build_forecast_plan(
             all_forecast_slots,
             now=now,
             known_slots=known_slots,
@@ -641,6 +654,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             target_soc=values["target_soc"],
             charge_power_w=values["charge_power_w"],
             discharge_power_w=values["discharge_power_w"],
+            discharge_enabled=not self.battery_discharge_blocked,
             round_trip_efficiency=efficiency,
             degradation_cost_dkk_per_kwh=values["degradation_cost_dkk_per_kwh"],
             minimum_profit_dkk_per_kwh=values["minimum_profit_dkk_per_kwh"],
@@ -752,8 +766,22 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if (
             not self.is_direct_local
             or not self.runtime.execution_enabled
-            or not self.config.get(CONF_GRID_ISOLATION_SWITCH)
         ):
+            return result
+        if (
+            self.battery_discharge_blocked
+            and self._local_snapshot is not None
+            and (
+                self._observed_action() is Action.BATTERY
+                or self._local_snapshot.raw_reported_output_power_w > 0
+            )
+        ):
+            # Startup/price faults must also stop old active discharge once
+            # fresh telemetry exists. A TCP outage still only restores mains.
+            success, detail = await self.actuator.async_command(Action.GRID, datetime.now(UTC))
+            self._record_command_result(success, detail)
+            return f"{result}; {BACKUP_CUTOFF_UNVERIFIED_REASON}; {detail}"
+        if not self.config.get(CONF_GRID_ISOLATION_SWITCH):
             return result
         restored = await self.actuator.async_set_grid_isolation(True)
         detail = (
@@ -963,12 +991,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 + "; ".join(problems or ["grid availability is not confirmed"])
             )
             command_result = await self._restore_grid_during_pause(
-                "startup gate is inhibiting writes"
+                "startup gate is inhibiting economic writes"
             )
         elif grid_available is False:
             self.plan = None
             state = "OUTAGE"
-            reason = "Grid is unavailable; optimizer is preserving the absolute emergency SOC"
+            reason = (
+                "Grid is unavailable; requesting the absolute emergency SOC floor; "
+                "physical backup-output cutoff is not established by read-back"
+            )
             command_result = await self._force_safe_if_needed(now)
         elif local_tcp_recovering:
             self.plan = None
@@ -1039,7 +1070,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         + (self.plan.reason if self.plan else "; ".join(problems))
                     )
                     command_result = await self._restore_grid_during_pause(
-                        "startup gate is inhibiting writes"
+                        "startup gate is inhibiting economic writes"
                     )
                 else:
                     state = "DEGRADED"
@@ -1068,6 +1099,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     cutoff=now,
                     day_start=day_start,
                     horizon_end=horizon_end,
+                    discharge_enabled=effective_settings.discharge_enabled,
                 )
                 published_slot = self.runtime.daily_plan.slot_at(now)
                 if published_slot is not None:
@@ -1122,7 +1154,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not self._startup_guard_passed:
                     self._startup_guard_passed = True
                     command_result = await self._restore_grid_during_pause(
-                        "startup freshness gate passed; no write on first refresh"
+                        "startup freshness gate passed; no economic write on first refresh"
                     )
                 elif state == "ACTIVE":
                     # A manual override forces the commanded battery action
@@ -1138,6 +1170,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if override_action is not None
                         else executable_action or self.plan.current_action
                     )
+                    if requested_action is Action.BATTERY and self.battery_discharge_blocked:
+                        requested_action = Action.GRID
+                        reason = BACKUP_CUTOFF_UNVERIFIED_REASON
                     reserve_exit = (
                         requested_action is Action.BATTERY
                         and soc <= effective_settings.reserve_soc
@@ -1286,6 +1321,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "reason": reason,
             "observed_action": action.value,
             "execution_enabled": self.runtime.execution_enabled,
+            "backup_cutoff_verified": self.runtime.backup_cutoff_verified,
+            "battery_discharge_blocked": self.battery_discharge_blocked,
+            "battery_discharge_blocked_reason": (
+                BACKUP_CUTOFF_UNVERIFIED_REASON if self.battery_discharge_blocked else None
+            ),
             "mode_override": self.runtime.override_action,
             "automatic_control_startup_gate": self._startup_control_gate_reason,
             "commissioned": bool(self.config.get(CONF_COMMISSIONED, False)),
@@ -1600,6 +1640,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_set_manual_mode(self, mode: str) -> None:
         if not self.local_client:
             raise ValueError("This entity is only available for direct local setup")
+        if mode == MODE_BATTERY and self.battery_discharge_blocked:
+            raise ValueError(BACKUP_CUTOFF_UNVERIFIED_REASON)
         controls = await self.local_client.async_read_controls()
         minimum = round(_control_number(controls, "3023") or 0)
         maximum = round(_control_number(controls, "3024") or 100)
@@ -1646,6 +1688,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if mode not in OVERRIDE_OPTIONS:
             raise ValueError(f"Unsupported operating override: {mode}")
+        if mode == OVERRIDE_BATTERY and self.battery_discharge_blocked:
+            raise ValueError(BACKUP_CUTOFF_UNVERIFIED_REASON)
         if mode != OVERRIDE_AUTO and not self.config.get(CONF_COMMISSIONED, False):
             raise ValueError(
                 "Commission the integration in Options before overriding control"

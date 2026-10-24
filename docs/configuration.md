@@ -46,11 +46,13 @@ selected mode. Acceptable normalized states are:
 | Meaning | Accepted raw state values |
 | --- | --- |
 | Available | `1`, `on`, `available`, `grid`, `on_grid`, `connected`, `true` |
-| Unavailable | `0`, `off`, `unavailable`, `no_grid`, `disconnected`, `false` |
+| Unavailable | `0`, `off`, `no_grid`, `disconnected`, `false` |
 
 Any other state is unsafe and makes the optimizer degraded. Use a direct device
 or inverter on-grid/AC-input status when available. If you need a template,
 derive it from such a status—not from `grid_import_power > 0`.
+Home Assistant's literal `unknown` and `unavailable` states mean grid status
+cannot be determined; neither permits selecting the lower emergency floor.
 
 ## Price input and external forecasts
 

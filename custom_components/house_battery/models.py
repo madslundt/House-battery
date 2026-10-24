@@ -62,6 +62,7 @@ class PlannerSettings:
     high_soc_discharge_threshold: float = 90.0
     high_soc_discharge_discount_dkk_per_kwh: float = 0.0
     energy_step_wh: float = 5.0
+    discharge_enabled: bool = True
 
     def validate(self) -> None:
         if self.capacity_wh <= 0 or self.energy_step_wh <= 0:

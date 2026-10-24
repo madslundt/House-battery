@@ -138,6 +138,8 @@ def _slot_transition(
     *,
     allow_substep_continuation: bool = False,
 ) -> tuple[_State, tuple[float, float, float, float, float, str], float] | None:
+    if action is Action.BATTERY and not settings.discharge_enabled:
+        return None
     energy_wh = state.energy_step * settings.energy_step_wh
     load_wh = max(0.0, slot.expected_load_wh)
     charge_efficiency = sqrt(settings.round_trip_efficiency)
@@ -150,6 +152,8 @@ def _slot_transition(
     discharged_wh = 0.0
     can_move = False
     reason = "Grid supplies forecast load while energy is held for a better interval"
+    if not settings.discharge_enabled:
+        reason = "Grid supplies forecast load; battery discharge is disabled"
 
     if action is Action.CHARGE:
         headroom_wh = max(0.0, maximum_step * settings.energy_step_wh - energy_wh)
@@ -460,7 +464,9 @@ def optimize(
             return Plan(now, (), 0, 0, 0, 0, 0, "No plan satisfies battery constraints")
         layers.append(layer)
 
-    terminal_price = _terminal_price(valid)
+    # An unavailable discharge path cannot redeem stored energy later. Giving
+    # it a carryover credit would buy power for an unexecutable arbitrage cycle.
+    terminal_price = _terminal_price(valid) if settings.discharge_enabled else 0.0
     discharge_efficiency = sqrt(settings.round_trip_efficiency)
     # Value leftover energy at its best future discharge opportunity: the
     # replacement price less the real degradation wear. The required profit

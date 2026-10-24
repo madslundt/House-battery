@@ -36,6 +36,9 @@ class RuntimeState:
     decisions: list[dict[str, Any]] = field(default_factory=list)
     scheduled_loads: list[dict[str, Any]] = field(default_factory=list)
     execution_enabled: bool = False
+    # Native SOC read-back cannot prove the separate backup output cuts off.
+    # This remains false until independent physical verification is recorded.
+    backup_cutoff_verified: bool = False
     export_safety_fault_latched: bool = False
     last_action: str = "safe"
     last_action_at: str | None = None
@@ -131,6 +134,7 @@ class RuntimeState:
             "decisions": self.decisions[-500:],
             "scheduled_loads": self.scheduled_loads,
             "execution_enabled": self.execution_enabled,
+            "backup_cutoff_verified": self.backup_cutoff_verified,
             "export_safety_fault_latched": self.export_safety_fault_latched,
             "last_action": self.last_action,
             "last_action_at": self.last_action_at,
@@ -215,6 +219,7 @@ class RuntimeState:
             decisions=list(data.get("decisions", []))[-500:],
             scheduled_loads=list(data.get("scheduled_loads", [])),
             execution_enabled=bool(data.get("execution_enabled", False)),
+            backup_cutoff_verified=data.get("backup_cutoff_verified") is True,
             export_safety_fault_latched=bool(
                 data.get("export_safety_fault_latched", False)
             ),

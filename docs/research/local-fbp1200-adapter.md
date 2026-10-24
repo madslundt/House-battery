@@ -160,3 +160,35 @@ This verifies that custom Discharge starts physical output on this unit while
 native Self-Gen remains idle without a CT signal. Raw output power remains
 diagnostic-only and is not treated as a calibrated measure of delivered AC
 power.
+
+## Backup-output investigation (2026-10-24)
+
+The separate off-grid output did not stop at an elevated native/slot minimum,
+including an autonomous SOC crossing from 20% to 19%. See
+[commissioning results](../commissioning.md). No FBP1200 backup-cutoff command
+has been verified; direct-local economic discharge is locked by default.
+
+Additional bounded, read-only observations on this unit:
+
+- mDNS reports logger type 131. This identifies the logger, not the inverter
+  firmware or its control register map.
+- Modbus holding register 65030 returned the same SOC as JSON telemetry.
+- Candidate shutdown register 41116 from the Humsienk register map returned
+  Modbus exception 4. Its FBP1200 meaning and accessibility are not established.
+- A holding-register read at candidate AC-switch address 4000 also returned
+  exception 4; a coil read at 4000 timed out. Neither is a usable control.
+- The vendor-documented JSON RTU pass-through SOC read returned no usable JSON.
+  It was stopped without retrying or sending a write function.
+
+The [vendor EMS interface](https://shuoxd.com/document/appEMS?language=en)
+documents JSON, Modbus TCP and RTU pass-through as separate access methods.
+Do not assume their parameter namespaces are interchangeable.
+
+Static inspection of the [Fossibot vendor app distribution](https://www.pgyer.com/fossibot)
+(version 1.260516.3; SHA-256
+`e0d16f0aa1d452ac4f2bd7ecfe2204b18aa203b3e4954252e7bfc69c7a9ff8d4`)
+found a shared cloud AC-switch handler at address `0xFA0` (4000). Its UI is
+gated to Bienesol app ID 33; Fossibot uses app ID 17. Related BLE switch and
+SOC controls belong to WS logger type 174. Their presence in a shared app
+bundle is insufficient evidence that FBP1200/logger type 131 supports them.
+No command from these unrelated paths was written to the battery.
