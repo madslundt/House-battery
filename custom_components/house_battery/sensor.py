@@ -129,6 +129,14 @@ SENSORS = (
         precision=2,
     ),
     FbpSensorDescription(
+        key="tomorrow_expected_savings_dkk",
+        name="Expected savings tomorrow",
+        icon="mdi:calendar-arrow-right",
+        unit="DKK",
+        precision=2,
+        device_class=SensorDeviceClass.MONETARY,
+    ),
+    FbpSensorDescription(
         key="today_net_savings_dkk",
         name="Estimated realized savings today",
         icon="mdi:cash-check",

@@ -1,0 +1,71 @@
+[   18809ms] [WARNING] Received event for unknown subscription 58. Unsubscribing. @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[   18809ms] [WARNING] Received event for unknown subscription 55. Unsubscribing. @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 3348268ms] [LOG] Websocket died, forcing reconnect... @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 3353283ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 3353283ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 3354290ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 3354290ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 3356297ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 3356297ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 3359304ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 3359304ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 3363311ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 3363312ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 3368322ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 3368325ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 3373334ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 3373342ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 3379389ms] Object
+[ 4113145ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 4114154ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 4116166ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 4119172ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 4123183ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 4128195ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 4133216ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 4138995ms] [WARNING] Received event for unknown subscription 52. Unsubscribing. @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 6829674ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 6829674ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 6951300ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 6951300ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 6952307ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 6952307ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 6954322ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 6954325ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 6957338ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 6957338ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 6961350ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 6961350ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 6966359ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 6966360ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 6971368ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 6971377ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 6976388ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/auth/token:0
+[ 6976392ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 6981728ms] [WARNING] Received event for unknown subscription 53. Unsubscribing. @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7078183ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078183ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078183ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078183ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078183ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078183ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078184ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078184ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078184ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078184ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078184ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078184ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078184ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7078184ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[ 7212526ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7213534ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7215540ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7218552ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7222568ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7227579ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7232599ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7237620ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7242668ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[ 7248659ms] [WARNING] Received event for unknown subscription 54. Unsubscribing. @ http://homeassistant.local/frontend_latest/core.ac6047285dbf35f5.js:0
+[13906023ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134
+[13906023ms] [WARNING] The specified value "NaN" cannot be parsed, or is out of range. @ http://homeassistant.local/frontend_latest/app.14aa97223db841e4.js:134

@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -29,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from homeassistant.core import HomeAssistant
 
-from house_battery.const import CONF_LOAD_POWER, CONF_PRICE_ENTITIES
+from house_battery.const import CONF_LOAD_POWER, CONF_PRICE_ENTITIES, CONF_SOC
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.dailyplan import (
     DailyPlan,
@@ -38,11 +40,10 @@ from house_battery.dailyplan import (
     reconcile_daily_plan,
 )
 from house_battery.learning import LoadLearner
-from house_battery.models import Action, PlannerSettings, PlannedSlot, PriceSlot
+from house_battery.models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 from house_battery.runtime import RuntimeState
 
-UTC = timezone.utc
 PLUS2 = timezone(timedelta(hours=2))
 COPENHAGEN = ZoneInfo("Europe/Copenhagen")
 
@@ -137,6 +138,69 @@ def hourly_prices(
     ]
 
 
+def savings_plan(slots: tuple[PlannedSlot, ...]) -> Plan:
+    return Plan(
+        created_at=datetime(2026, 9, 20, tzinfo=UTC),
+        slots=slots,
+        expected_cost_dkk=0,
+        baseline_cost_dkk=0,
+        expected_savings_dkk=100,
+        battery_throughput_kwh=0,
+        terminal_price_dkk_per_kwh=1,
+        terminal_value_dkk=100,
+        reason="test",
+    )
+
+
+@pytest.mark.parametrize(
+    ("day", "hours"),
+    [(datetime(2026, 9, 21), 24), (datetime(2026, 3, 29), 23),
+     (datetime(2026, 10, 25), 25)],
+)
+def test_expected_day_savings_use_local_midnights_and_exclude_terminal_credit(
+    day: datetime, hours: int,
+) -> None:
+    day = day.replace(tzinfo=COPENHAGEN)
+    start = day.astimezone(UTC)
+    plan = savings_plan(tuple(
+        slot(start + timedelta(hours=i), start + timedelta(hours=i + 1),
+             Action.BATTERY, baseline_cost_dkk=2, interval_cost_dkk=0.75)
+        for i in range(hours)
+    ))
+    assert plan.expected_savings_for_day(day) == pytest.approx(hours * 1.25)
+
+
+@pytest.mark.parametrize("cost", [1.0, 2.0, 3.0])
+def test_expected_day_savings_prorate_crossing_midnight_and_keep_sign(cost: float) -> None:
+    day = datetime(2026, 9, 21, tzinfo=PLUS2)
+    # The first and last intervals straddle the local calendar boundaries.
+    plan = savings_plan((
+        slot(day - timedelta(hours=1), day + timedelta(hours=1), Action.CHARGE,
+             baseline_cost_dkk=2, interval_cost_dkk=cost),
+        slot(day + timedelta(hours=1), day + timedelta(hours=23), Action.GRID,
+             baseline_cost_dkk=2, interval_cost_dkk=2),
+        slot(day + timedelta(hours=23), day + timedelta(hours=25), Action.BATTERY,
+             baseline_cost_dkk=2, interval_cost_dkk=cost),
+    ))
+    assert plan.expected_savings_for_day(day) == pytest.approx(2 - cost)
+
+
+@pytest.mark.parametrize("coverage", ["none", "today_only", "late_start", "early_end", "gap", "overlap"])
+def test_expected_day_savings_require_a_complete_contiguous_day(coverage: str) -> None:
+    day = datetime(2026, 9, 21, tzinfo=PLUS2)
+    first = slot(day, day + timedelta(hours=12), Action.GRID)
+    second = slot(day + timedelta(hours=12), day + timedelta(days=1), Action.BATTERY)
+    slots = {
+        "none": (),
+        "today_only": (slot(day - timedelta(days=1), day, Action.GRID),),
+        "late_start": (second,),
+        "early_end": (first,),
+        "gap": (first, replace(second, start=second.start + timedelta(minutes=15))),
+        "overlap": (first, replace(second, start=second.start - timedelta(minutes=15))),
+    }[coverage]
+    assert savings_plan(slots).expected_savings_for_day(day) is None
+
+
 class _Entry:
     entry_id = "horizon-test"
     title = "Horizon test"
@@ -163,6 +227,48 @@ def _coordinator_with_prices(
     )
     hass.states.async_set("sensor.load", "110")
     return coordinator
+
+
+@pytest.mark.parametrize("hours", [12, 36, 60])
+def test_coordinator_publishes_only_tomorrows_expected_savings(
+    monkeypatch: pytest.MonkeyPatch, hours: int,
+) -> None:
+    from homeassistant.util import dt as dt_util
+    from house_battery import coordinator as coordinator_module
+
+    now = datetime(2026, 9, 20, 12, tzinfo=COPENHAGEN).astimezone(UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(dt_util, "DEFAULT_TIME_ZONE", COPENHAGEN)
+    monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
+    monkeypatch.setattr(coordinator_module, "get_health_problems", lambda *args: [])
+
+    async def scenario() -> None:
+        hass = HomeAssistant("/tmp")
+        coordinator = _coordinator_with_prices(hass, now, [0.2] * 6 + [5.0] * 6, hours)
+        coordinator.entry.data[CONF_SOC] = "sensor.soc"
+        hass.states.async_set("sensor.soc", "50")
+        coordinator.store.save = AsyncMock()
+        coordinator.evidence.async_observe = AsyncMock()
+        data = await coordinator._async_update_data()
+        assert coordinator.plan is not None
+        if hours < 36:
+            assert data["tomorrow_expected_savings_dkk"] is None
+        else:
+            tomorrow = datetime(2026, 9, 21, tzinfo=COPENHAGEN)
+            end = tomorrow + timedelta(days=1)
+            expected = sum(
+                item.baseline_cost_dkk - item.interval_cost_dkk
+                for item in coordinator.plan.slots
+                if tomorrow <= item.start < end
+            )
+            assert data["tomorrow_expected_savings_dkk"] == pytest.approx(round(expected, 4))
+
+    asyncio.run(scenario())
 
 
 def _coordinator_horizon_chain(

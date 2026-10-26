@@ -1366,6 +1366,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "expected_savings_dkk": self.plan.expected_savings_dkk
             if self.plan
             else None,
+            "tomorrow_expected_savings_dkk": (
+                self.plan.expected_savings_for_day(local_now + timedelta(days=1))
+                if self.plan else None
+            ),
             "realized_savings_dkk": self.plan.realized_savings_dkk
             if self.plan
             else None,

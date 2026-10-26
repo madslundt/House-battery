@@ -166,7 +166,8 @@ power.
 The separate off-grid output did not stop at an elevated native/slot minimum,
 including an autonomous SOC crossing from 20% to 19%. See
 [commissioning results](../commissioning.md). No FBP1200 backup-cutoff command
-has been verified; direct-local economic discharge is locked by default.
+has been verified. Version 1.7.3 blocked direct-local economic discharge;
+version 1.7.4 removed that block. The user has enabled automatic control.
 
 Additional bounded, read-only observations on this unit:
 
@@ -177,8 +178,9 @@ Additional bounded, read-only observations on this unit:
   Modbus exception 4. Its FBP1200 meaning and accessibility are not established.
 - A holding-register read at candidate AC-switch address 4000 also returned
   exception 4; a coil read at 4000 timed out. Neither is a usable control.
-- The vendor-documented JSON RTU pass-through SOC read returned no usable JSON.
-  It was stopped without retrying or sending a write function.
+- The initial JSON RTU pass-through probe parsed only one response line and
+  produced an inconclusive result. A corrected complete-message reader later
+  confirmed that pass-through works; see the TCP follow-up below.
 
 The [vendor EMS interface](https://shuoxd.com/document/appEMS?language=en)
 documents JSON, Modbus TCP and RTU pass-through as separate access methods.
@@ -192,3 +194,152 @@ gated to Bienesol app ID 33; Fossibot uses app ID 17. Related BLE switch and
 SOC controls belong to WS logger type 174. Their presence in a shared app
 bundle is insufficient evidence that FBP1200/logger type 131 supports them.
 No command from these unrelated paths was written to the battery.
+
+## TCP 8080 follow-up (2026-10-24)
+
+Read-only probes with exclusive access to the battery's existing TCP 8080
+endpoint confirmed the following interfaces:
+
+| Interface | Result |
+| --- | --- |
+| JSON `EnergyParameter` | Returned SOC 19%, 0 W battery output and connected-load telemetry. |
+| JSON `Energycontrolparameters` | Returned SOC registers 3023 and 3024. |
+| JSON `EnergycontrolparametersList` | Returned named fields including `EnergyManagement`, `ScheduledModeEnabled` and `SystemMaxPowerLimit`. Other documented fields did not all answer within the bounded probe. |
+| JSON `DataTransmission`, inner Modbus function 03 | Returned a valid, CRC-checked native SOC response. |
+| Direct Modbus function 43 / MEI 14 basic device identification | No response within 8 seconds. No register address or write operation was sent. |
+| Individual named `InstantControlPeriod` and `PowerControlPeriod1` reads | No response within 8 seconds each. |
+| Individual named `PeakShavingConfig` read | Returned an empty `ControlInfoField`; no cutoff capability established. |
+| Narrow JSON `DeviceManagement` read, IDs 20 and 21 | Returned `ControlInfo` with model `GTSW0000` and firmware `1.4.9.9.1.0`. |
+
+A fresh `EnergyParameter` read exposed only the published storage telemetry
+fields, with `DevAddr=1` and SOC 19%; it supplied no model, firmware or DTC.
+Timeouts establish only that these bounded requests did not answer, not that
+the underlying feature is absent. None of these observations justifies a
+backup-output write or another physical cutoff test.
+
+The successful identity request used `RegDeviceManagementAddr: [20, 21]`,
+following the upstream integration's identity field mappings. The previous
+request for IDs 8 and 9 had timed out; an unanswered batch must not be treated
+as proof that every field on that interface is unavailable. `GTSW0000` is a
+logger identifier also reported on unrelated Growatt equipment, so it does
+not identify the FBP1200 inverter protocol or justify using another model's
+cutoff registers.
+
+The native SOC read used the vendor-documented RTU pass-through envelope:
+
+```json
+{
+  "Set": "DataTransmission",
+  "SerialNumber": 301,
+  "CommandSource": "HA",
+  "SetCommand": {
+    "FunctionCode": 3,
+    "TransmittedData": "01 03 FE 06 00 01 55 E3"
+  }
+}
+```
+
+Despite the outer `Set` name, the inner function 03 is a read. The returned RTU
+frame was `01 03 02 00 13 F9 89`, representing SOC 19. A separate read of
+candidate shutdown address 41116 returned CRC-valid exception frame
+`01 83 04 40 F3`. The outer `ControlState` still said `succeed`: successful
+pass-through does not establish success of the enclosed Modbus operation.
+That candidate is not a usable FBP1200 cutoff control.
+
+These probes wrote no battery settings. Home Assistant's battery integration
+was temporarily unloaded to release its single TCP session, then restored.
+The user's newly enabled automatic-control setting was preserved. Installed
+version 1.7.4 reports backup cutoff unverified and discharge unblocked; it
+removed the 1.7.3 lock. Final checks showed mains on and battery discharge 0 W.
+
+## Capturing this FBP1200 from the original iPhone app
+
+No public FBP1200-specific backup-cutoff register specification was found in
+the sources examined. Capture the installed app's actual device settings
+instead of treating shared code for another brand as a supported command.
+The battery is already visible in the user's original iPhone app.
+The user reports that no minimum or maximum SOC setting is visible there.
+This does not establish whether the firmware supports an autonomous backup
+cutoff. Availability of an AC-output switch in this FBP1200's app remains
+unconfirmed; even a verified switch would establish output control rather
+than an autonomous minimum-SOC threshold.
+
+### First capture: connection and settings reads
+
+1. Get PacketLogger from Apple's
+   [Additional Tools for Xcode](https://developer.apple.com/download/all/?q=additional).
+   The download requires Apple Developer sign-in. PacketLogger was not found
+   on the Mac during preparation.
+2. On the **iPhone**, use Apple's
+   [Bluetooth for iOS/iPadOS profile and current instructions](https://developer.apple.com/feedback-assistant/profiles-and-logs/?name=bluetooth).
+   Follow its installation/restart instructions. This is the iPhone logging
+   profile, not the Mac Bluetooth-controller profile.
+3. Connect the unlocked iPhone to the Mac over USB and accept the trust prompts.
+   In PacketLogger choose **File → New iOS Trace** and select the iPhone.
+   Apple demonstrates this [capture route](https://developer.apple.com/videos/play/wwdc2019/901/?time=1752).
+4. Keep mains connected and discharge disabled. Record the times when opening
+   the battery page, opening its settings and refreshing those pages. Initially
+   change no settings, switches, schedules, firmware or network bindings.
+5. Stop and save the short trace locally. Inspect whether those actions produce
+   a battery BLE connection with ATT characteristic writes and notifications.
+   If not, this trace has not captured the app's control route; the app may be
+   using its cloud service. Remove the logging profile after capture is complete.
+
+### Decode and identify the control
+
+Preparation includes a private local capture directory:
+`~/Library/Logs/HouseBattery/2026-10-24/` (mode 0700). It contains an offline
+decoder prototype and the inspected vendor APK. Neither capture data nor SDK
+material should be committed to Git or uploaded as an entire phone diagnostic.
+
+The prototype extracts AES material from the APK into memory and validates
+framing and checksums before interpreting a message. It redacts logger
+provisioning/authentication values. Synthetic tests passed; **real iPhone
+compatibility is not yet verified**. It does not parse `.pklg` directly.
+Export ATT value bytes from the trace, preserving ordering and keeping each
+direction/connection/characteristic stream separate. Its hex input accepts
+one value chunk per line, without HCI/L2CAP/ATT headers.
+
+```sh
+.venv/bin/python ~/Library/Logs/HouseBattery/2026-10-24/decode_ble_capture.py \
+  --apk ~/Library/Logs/HouseBattery/2026-10-24/fossibot-1.260516.3.apk \
+  --hex-file /absolute/path/to/sent-att-values.txt
+```
+
+After a readable baseline is established, inspect the exact setting names
+offered for this FBP1200. A later supervised capture can compare one raised
+backup-minimum setting with its original value, including the response and
+read-back. Do not infer a SET command from a read, another brand's address, or
+an unrelated charging/EMS limit. A captured AC switch would only establish an
+output-control command; it would not establish autonomous low-SOC protection.
+An elevated-threshold physical cutoff test must pass before claiming that the
+emergency minimum protects the backup output. The user's later decision to
+enable automatic control does not constitute verification of that protection.
+
+### If the settings use HTTPS instead of Bluetooth
+
+A router trace or iPhone IP trace alone cannot reveal encrypted request bodies.
+The alternative is a short, local HTTPS inspection session for the app's actual
+vendor host using a trusted debugging proxy. This would require configuring
+the iPhone's Wi-Fi proxy and trusting that proxy's certificate; it is a separate
+setup step and has **not** been performed. See
+[mitmproxy's certificate and iOS instructions](https://docs.mitmproxy.org/stable/concepts/certificates/).
+Capture the settings query/response first, then only the one supervised control
+transaction. Keep authentication headers, serials and raw captures private.
+If the app rejects the proxy certificate, stop and reassess rather than
+assuming the interception succeeded. Remove proxy settings and certificate
+trust afterward.
+
+The shared app's generic settings path submits logical field names and a
+`setTemplateId` to `deviceSetConfig/setCustomParams`. Translation into a native
+device command can therefore happen on the server. An HTTPS capture may reveal
+the FBP1200's DTC and supported setting schema without revealing the native
+register/function. Such a capture alone is not sufficient evidence for a local
+register write; it may require a device-side command capture or the vendor's
+model-specific protocol/template specification.
+
+The manufacturer's documentation request should specifically ask for the
+**FBP1200 backup/off-grid AC output's autonomous minimum-SOC cutoff**, its local
+protocol, address/function, units, read-back and restart behavior. State that
+EMS register 3023 and the active schedule minimum were accepted but did not
+stop backup output in elevated-threshold tests. No support message has been sent.

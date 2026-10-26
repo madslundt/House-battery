@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -291,6 +291,33 @@ class Plan:
             "reason": self.reason,
             "slots": [slot.as_dict() for slot in self.slots],
         }
+
+    def expected_savings_for_day(self, day: datetime) -> float | None:
+        """Estimate a complete local day's cash savings, excluding terminal credit.
+
+        Interval costs include charging, conversion losses and battery wear.
+        Prorate intervals crossing midnight and require continuous coverage so
+        a partial horizon cannot masquerade as a full-day estimate. Compare in
+        UTC to retain both occurrences of repeated hours on DST transitions.
+        """
+        midnight = day.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = midnight.astimezone(UTC)
+        end = (midnight + timedelta(days=1)).astimezone(UTC)
+        cursor = start
+        savings = 0.0
+        for slot in sorted(self.slots, key=lambda item: item.start.astimezone(UTC)):
+            slot_start = slot.start.astimezone(UTC)
+            slot_end = slot.end.astimezone(UTC)
+            if slot_end <= start or slot_start >= end:
+                continue
+            overlap_start = max(start, slot_start)
+            overlap_end = min(end, slot_end)
+            if overlap_start != cursor or overlap_end <= overlap_start:
+                return None
+            fraction = (overlap_end - overlap_start) / (slot_end - slot_start)
+            savings += (slot.baseline_cost_dkk - slot.interval_cost_dkk) * fraction
+            cursor = overlap_end
+        return round(savings, 4) if cursor == end else None
 
     def today_dict(self, now: datetime) -> dict[str, Any]:
         """Return plan dict filtered to the local day containing *now*.

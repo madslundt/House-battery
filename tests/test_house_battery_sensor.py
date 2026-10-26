@@ -129,6 +129,23 @@ def test_dashboard_period_entities_are_available_with_measurement_units() -> Non
     assert all(descriptions[key].unit == "DKK" for key in savings_keys)
 
 
+@pytest.mark.parametrize("amount", [None, 0.0, 3.75, -1.25])
+def test_expected_savings_tomorrow_is_a_default_monetary_forecast(amount: float | None) -> None:
+    description = next(item for item in SENSORS if item.key == "tomorrow_expected_savings_dkk")
+    assert description.name == "Expected savings tomorrow"
+    assert description.unit == "DKK"
+    assert description.precision == 2
+    assert description.device_class is SensorDeviceClass.MONETARY
+    assert description.state_class is None  # A changing forecast is not an accumulator.
+    assert description.enabled_by_default
+    sensor = SimpleNamespace(
+        coordinator=SimpleNamespace(data={description.key: amount}),
+        description=description,
+    )
+    assert FbpValueSensor.native_value.fget(sensor) == amount
+    assert FbpValueSensor.last_reset.fget(sensor) is None
+
+
 @pytest.mark.parametrize(
     ("period", "period_name"),
     [("week", "this week"), ("last_week", "last week")],

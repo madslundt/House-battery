@@ -23,6 +23,7 @@ DEFAULT_ENTITY_KEYS = frozenset(
         "battery_power_w",
         "current_price_dkk_per_kwh",
         "expected_savings_dkk",
+        "tomorrow_expected_savings_dkk",
         "operation_plan",
         "current_plan_slot",
         "actual_battery_history",
