@@ -29,7 +29,8 @@ merged lazily for display via :func:`merge_adjacent_blocks`.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
+from itertools import pairwise
 from math import ceil
 from typing import Any
 
@@ -361,12 +362,12 @@ def _has_future_overlap(
     )
     return any(
         previous.end > current.start and previous.end > cutoff
-        for previous, current in zip(ordered, ordered[1:])
+        for previous, current in pairwise(ordered)
     )
 
 
 def reconcile_daily_plan(
-    existing: "DailyPlan | None",
+    existing: DailyPlan | None,
     future_slots: tuple[PlannedSlot, ...],
     *,
     cutoff: datetime,
@@ -390,7 +391,7 @@ def reconcile_daily_plan(
     ``day_start`` so the whole timeline shares one, unambiguous offset.
     """
 
-    tz = day_start.tzinfo or timezone.utc
+    tz = day_start.tzinfo or UTC
     today = day_start.date().isoformat()
     if (
         existing is None
@@ -595,7 +596,7 @@ class DailyPlan:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DailyPlan":
+    def from_dict(cls, data: dict[str, Any]) -> DailyPlan:
         slots: list[PlannedSlot] = []
         for raw in data.get("slots", []):
             try:

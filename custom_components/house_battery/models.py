@@ -28,6 +28,9 @@ class PriceSlot:
     expected_load_wh: float = 0.0
     source: str = "known"
     uncertainty_dkk_per_kwh: float = 0.0
+    # A caller may already clip the load calculation to the remaining tariff
+    # tail. Retain its original boundary so mode continuation still applies.
+    tariff_start: datetime | None = None
 
     @property
     def hours(self) -> float:
@@ -63,6 +66,10 @@ class PlannerSettings:
     high_soc_discharge_discount_dkk_per_kwh: float = 0.0
     energy_step_wh: float = 5.0
     discharge_enabled: bool = True
+    # None uses the direct device's integer SOC ceilings. Legacy controls may
+    # expose a narrower range/cadence; an empty tuple preserves full-target-only
+    # charging when their supported partial ceilings cannot be established.
+    partial_charge_targets: tuple[int, ...] | None = None
 
     def validate(self) -> None:
         if self.capacity_wh <= 0 or self.energy_step_wh <= 0:
@@ -88,6 +95,11 @@ class PlannerSettings:
             self.high_soc_discharge_discount_dkk_per_kwh,
         ) < 0:
             raise ValueError("SOC price adjustments cannot be negative")
+        if self.partial_charge_targets is not None and any(
+            not isinstance(target, int) or isinstance(target, bool) or not 0 < target <= 100
+            for target in self.partial_charge_targets
+        ):
+            raise ValueError("Partial charge targets must be integer SOC percentages")
 
 
 @dataclass(frozen=True, slots=True)

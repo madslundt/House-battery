@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from math import ceil, sqrt
+from math import ceil, floor, sqrt
 
 from .models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 
@@ -22,6 +23,7 @@ class _Node:
     throughput_wh: float
     previous: _State | None
     detail: tuple[float, float, float, float, float, str] | None
+    charge_target_soc: float | None = None
 
 
 _TERMINAL_PRICE_LOOKBACK = timedelta(hours=3)
@@ -51,6 +53,7 @@ def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
                 slot.expected_load_wh * remaining_fraction,
                 slot.source,
                 slot.uncertainty_dkk_per_kwh,
+                slot.tariff_start,
             )
         if valid and slot.start != expected_start:
             break
@@ -205,7 +208,16 @@ def _slot_transition(
             reason = "Battery avoids expensive grid import and clears the configured economic margin"
 
     new_energy_wh = energy_wh + charged_wh - discharged_wh
-    new_step = round(new_energy_wh / settings.energy_step_wh)
+    # Round movement toward the starting energy. Rounding to the nearest step
+    # can buy more input than the charge limit permits, or deliver more output
+    # than the load/power cap allows. The discretized model may leave less than
+    # one step unused, but must never invent physically unavailable movement.
+    if action is Action.CHARGE:
+        new_step = floor(new_energy_wh / settings.energy_step_wh + 1e-9)
+    elif action is Action.BATTERY:
+        new_step = ceil(new_energy_wh / settings.energy_step_wh - 1e-9)
+    else:
+        new_step = state.energy_step
     # An observed battery may legitimately start above the configured charge
     # target. Preserve that real energy while holding, but do not turn the
     # observed SOC into a higher charge ceiling for the rest of the horizon.
@@ -215,7 +227,11 @@ def _slot_transition(
         if action is Action.CHARGE
         else max(maximum_step, state.energy_step)
     )
-    new_step = min(state_ceiling, max(minimum_step, new_step))
+    # Reserve limits discharge; it does not establish the actual stored energy.
+    # A depleted battery must remain below reserve until feasible charging
+    # restores it, including across multiple tariff intervals.
+    state_floor = min(minimum_step, state.energy_step)
+    new_step = min(state_ceiling, max(state_floor, new_step))
     actual_delta_wh = (new_step - state.energy_step) * settings.energy_step_wh
     # An operating-mode label must correspond to real battery movement. At the
     # reserve/target boundary the requested mode can otherwise do nothing;
@@ -315,6 +331,93 @@ def _slot_transition(
     return next_state, detail, discharged_wh + charged_wh
 
 
+def _partial_charge_candidates(
+    predecessors: list[_State],
+    previous_layer: dict[_State, _Node],
+    slot: PriceSlot,
+    settings: PlannerSettings,
+    minimum_step: int,
+    maximum_step: int,
+) -> Iterator[tuple[_State, _Node]]:
+    """Find the best predecessor for each reachable native integer SOC target.
+
+    Charge cost is a difference of energy potentials, including the integrated
+    low-SOC premium. For a fixed endpoint only predecessors within one slot's
+    input budget can reach it. A monotonic queue finds their minimum in linear
+    time rather than trying every target from every energy/action state.
+    """
+    if not predecessors or settings.partial_charge_targets == ():
+        return
+    step_wh = settings.energy_step_wh
+    efficiency = sqrt(settings.round_trip_efficiency)
+    load_power_w = max(0.0, slot.expected_load_wh) / slot.hours
+    budget_wh = max(0.0, settings.charge_power_w - load_power_w) * slot.hours * efficiency
+    budget_steps = floor(budget_wh / step_wh + 1e-9)
+    if budget_steps <= 0:
+        return
+
+    threshold_wh = settings.capacity_wh * settings.low_soc_charge_threshold / 100
+
+    def potential(energy_wh: float) -> float:
+        weighted_wh = 0.0
+        if threshold_wh > 0:
+            below_wh = min(energy_wh, threshold_wh)
+            weighted_wh = below_wh - below_wh**2 / (2 * threshold_wh)
+        return (
+            energy_wh * slot.charge_price_dkk_per_kwh
+            - weighted_wh * settings.low_soc_charge_premium_dkk_per_kwh
+        ) / (efficiency * 1000)
+
+    targets: dict[int, int] = {}
+    allowed_targets = (
+        range(floor(settings.reserve_soc) + 1, floor(settings.target_soc) + 1)
+        if settings.partial_charge_targets is None
+        else sorted(set(settings.partial_charge_targets))
+    )
+    for target_soc in allowed_targets:
+        if not settings.reserve_soc < target_soc <= settings.target_soc:
+            continue
+        endpoint = floor(settings.capacity_wh * target_soc / 100 / step_wh)
+        if minimum_step < endpoint <= maximum_step:
+            targets.setdefault(endpoint, target_soc)
+
+    window: deque[tuple[tuple[float, float], _State]] = deque()
+    cursor = 0
+    for endpoint, target_soc in targets.items():
+        while cursor < len(predecessors) and predecessors[cursor].energy_step < endpoint:
+            state = predecessors[cursor]
+            node = previous_layer[state]
+            energy_wh = state.energy_step * step_wh
+            key = (
+                round(
+                    node.cost - potential(energy_wh)
+                    + (settings.switching_penalty_dkk if state.action is not Action.CHARGE else 0),
+                    12,
+                ),
+                node.throughput_wh - energy_wh,
+            )
+            while window and key < window[-1][0]:
+                window.pop()
+            window.append((key, state))
+            cursor += 1
+        while window and window[0][1].energy_step < endpoint - budget_steps:
+            window.popleft()
+        if not window:
+            continue
+        state = window[0][1]
+        result = _slot_transition(
+            state, Action.CHARGE, slot, settings, minimum_step, endpoint
+        )
+        if result is None:
+            continue
+        next_state, detail, throughput = result
+        node = previous_layer[state]
+        yield next_state, _Node(
+            node.cost + detail[4], node.throughput_wh + throughput,
+            state, detail, float(target_soc),
+        )
+
+
 def optimize(
     slots: Iterable[PriceSlot],
     *,
@@ -331,7 +434,10 @@ def optimize(
     """
     settings.validate()
     source_slots = tuple(slots)
-    first_slot_is_partial = any(slot.start < now < slot.end for slot in source_slots)
+    first_slot_is_partial = any(
+        (slot.tariff_start or slot.start) < now < slot.end
+        for slot in source_slots
+    )
     valid = _future_slots(source_slots, now)
     if valid and valid[0].start > now:
         return Plan(
@@ -383,6 +489,16 @@ def optimize(
         )
         previous_layer = layers[-1]
         layer: dict[_State, _Node] = {}
+        partial_charge_predecessors: list[_State] = []
+        interval_maximum_step = maximum_step
+        if (
+            slot_index == 0 and committed_slot is not None
+            and committed_slot.action is Action.CHARGE
+            and committed_slot.charge_target_soc is not None
+        ):
+            interval_maximum_step = int(
+                settings.capacity_wh * committed_slot.charge_target_soc / 100 // step_wh
+            )
         for state in sorted(
             previous_layer,
             key=lambda item: (
@@ -392,18 +508,10 @@ def optimize(
         ):
             node = previous_layer[state]
             actions = _allowed_actions()
-            interval_maximum_step = maximum_step
             continuing_action = state.action
             if slot_index == 0 and committed_slot is not None:
                 continuing_action = committed_slot.action
-                if (
-                    continuing_action is Action.CHARGE
-                    and committed_slot.charge_target_soc is not None
-                ):
-                    interval_maximum_step = int(
-                        settings.capacity_wh * committed_slot.charge_target_soc
-                        / 100 // step_wh
-                    )
+            locked_continuation = False
             if holding_interval:
                 # The electricity price is constant for the whole source slot.
                 # Keep the committed (or observed) action until that tariff
@@ -422,6 +530,9 @@ def optimize(
                 )
                 if continuing is not None:
                     actions = (continuing_action,)
+                    locked_continuation = True
+            if Action.CHARGE in actions and not locked_continuation:
+                partial_charge_predecessors.append(state)
             for action in actions:
                 result = _slot_transition(
                     state,
@@ -443,10 +554,18 @@ def optimize(
                     node.throughput_wh + throughput,
                     state,
                     detail,
+                    (
+                        committed_slot.charge_target_soc
+                        if slot_index == 0 and committed_slot is not None
+                        and committed_slot.charge_target_soc is not None
+                        else settings.target_soc
+                    ) if action is Action.CHARGE else None,
                 )
                 existing = layer.get(next_state)
                 candidate_key = (
-                    candidate.cost,
+                    # Keep floating accumulation noise from discarding the
+                    # lower-throughput path before the final economic tie.
+                    round(candidate.cost, 12),
                     candidate.throughput_wh,
                     action.value,
                 )
@@ -454,12 +573,21 @@ def optimize(
                     layer[next_state] = candidate
                 else:
                     existing_key = (
-                        existing.cost,
+                        round(existing.cost, 12),
                         existing.throughput_wh,
                         next_state.action.value,
                     )
                     if candidate_key < existing_key:
                         layer[next_state] = candidate
+        for next_state, candidate in _partial_charge_candidates(
+            partial_charge_predecessors, previous_layer, slot, settings,
+            minimum_step, interval_maximum_step,
+        ):
+            existing = layer.get(next_state)
+            if existing is None or (
+                round(candidate.cost, 12), candidate.throughput_wh
+            ) < (round(existing.cost, 12), existing.throughput_wh):
+                layer[next_state] = candidate
         if not layer:
             return Plan(now, (), 0, 0, 0, 0, 0, "No plan satisfies battery constraints")
         layers.append(layer)
@@ -485,7 +613,7 @@ def optimize(
 
     def final_key(item: tuple[_State, _Node]) -> tuple[float, float, str]:
         state, node = item
-        stored_above_reserve_wh = (state.energy_step - minimum_step) * step_wh
+        stored_above_reserve_wh = max(0, state.energy_step - minimum_step) * step_wh
         terminal_value = (
             stored_above_reserve_wh * discharge_efficiency / 1000 * terminal_net_price
         )
@@ -524,14 +652,7 @@ def optimize(
         )
         next_energy = next_state.energy_step * step_wh
         baseline = max(0.0, slot.expected_load_wh) / 1000 * slot.price
-        charge_target = None
-        if next_state.action is Action.CHARGE:
-            charge_target = settings.target_soc
-            if (
-                not planned and committed_slot is not None
-                and committed_slot.charge_target_soc is not None
-            ):
-                charge_target = committed_slot.charge_target_soc
+        charge_target = node.charge_target_soc
         planned.append(
             PlannedSlot(
                 start=slot.start,
@@ -560,7 +681,7 @@ def optimize(
     # economic benefit is not understated (the optimizer already credits
     # the terminal value internally when selecting the final state).
     terminal_value = (
-        (final_state.energy_step - minimum_step)
+        max(0, final_state.energy_step - minimum_step)
         * step_wh
         * discharge_efficiency
         / 1000

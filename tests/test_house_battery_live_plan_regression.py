@@ -18,7 +18,6 @@ from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 from house_battery.policy import select_opportunistic_plan
 
-
 FIXTURE = Path(__file__).parent / "fixtures" / "ha_plan_2026-09-27.json"
 
 
@@ -84,14 +83,17 @@ def test_live_known_price_plan_charges_for_evening_and_values_carryover() -> Non
         for block in blocks[-4:]
     ] == [
         (4, 0, 13, 45, Action.GRID),
-        (13, 45, 15, 45, Action.CHARGE),
-        (15, 45, 17, 30, Action.GRID),
-        (17, 30, 0, 0, Action.BATTERY),
+        (13, 45, 17, 15, Action.CHARGE),
+        (17, 15, 0, 0, Action.BATTERY),
     ]
     assert max(slot.soc_end for slot in normal.slots) == pytest.approx(89.89, abs=0.02)
     evening = [slot for slot in normal.slots if slot.action is Action.BATTERY]
-    assert sum(slot.expected_load_wh for slot in evening) == pytest.approx(965.9)
+    assert sum(slot.expected_load_wh for slot in evening) == pytest.approx(1003.05)
     assert sum(slot.battery_charge_wh for slot in normal.slots) == pytest.approx(1365)
+    assert normal.optimization_objective_dkk < 3.256042  # Full-power-only reference.
+    for slot in normal.slots:
+        delivered_wh = slot.battery_discharge_wh * normal_settings.round_trip_efficiency**0.5
+        assert delivered_wh <= slot.expected_load_wh + 1e-8
 
     # The known evening peak justifies the optional higher charge ceiling.
     decision = select_opportunistic_plan(

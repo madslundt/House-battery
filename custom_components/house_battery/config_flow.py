@@ -11,16 +11,16 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_ACCOUNTING_LOAD_POWER,
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
-    CONF_ACCOUNTING_LOAD_POWER,
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
     CONF_DISCHARGE_POWER_CONTROL,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
-    CONF_GRID_ISOLATION_SWITCH,
     CONF_GRID_IMPORT_POWER,
+    CONF_GRID_ISOLATION_SWITCH,
     CONF_LOAD_POWER,
     CONF_MAX_SOC_CONTROL,
     CONF_MIN_SOC_CONTROL,
@@ -51,7 +51,7 @@ def _required(key: str, defaults: dict[str, Any]) -> vol.Required:
 
 def _optional(key: str, defaults: dict[str, Any]) -> vol.Optional:
     return (
-        vol.Optional(key, default=defaults[key])
+        vol.Optional(key, description={"suggested_value": defaults[key]})
         if key in defaults
         else vol.Optional(key)
     )
@@ -219,7 +219,23 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         defaults = {**self._entry.data, **self._entry.options}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            optional_keys = (
+                (CONF_GRID_IMPORT_POWER, CONF_ACCOUNTING_LOAD_POWER)
+                if self._entry.data.get(CONF_HOST)
+                else (
+                    CONF_FAULT, CONF_ONLINE,
+                    CONF_CHARGE_POWER_CONTROL, CONF_DISCHARGE_POWER_CONTROL,
+                )
+            )
+            # Explicit cleared values override the original setup bindings
+            # when the coordinator merges entry data with these options.
+            data = {
+                **dict.fromkeys((*optional_keys, CONF_GRID_ISOLATION_SWITCH)),
+                CONF_PRICE_FORECAST_ENTITIES: [],
+                CONF_PRICE_FORECAST_ENTITY: None,
+                **user_input,
+            }
+            return self.async_create_entry(title="", data=data)
         if self._entry.data.get(CONF_HOST):
             return self.async_show_form(
                 step_id="init", data_schema=_direct_schema(defaults, options=True)

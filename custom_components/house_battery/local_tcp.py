@@ -46,6 +46,7 @@ _MAX_CONFIRMED_WRITE_ATTEMPTS = 2
 _MAX_FRAME_BYTES = 256 * 1024
 _MODE_VERIFY_DELAY_SECONDS = 0.5
 _GRID_IDLE_ACTIVE_POWER_W = 5.0
+_GRID_IDLE_STANDBY_INPUT_MAX_W = 50.0
 _SOC_ZERO_WARMUP_SECONDS = 60
 _MAX_SOC_CHANGE_PER_MINUTE = 10.0
 _ACTIVE_POWER_W = 50.0
@@ -238,13 +239,6 @@ class FbpLocalTcpClient:
         absolute update did not apply; an ambiguous result is never blindly
         replayed.
         """
-        # A reload fixes the reported stale-state issue because unload closes
-        # this socket. Apply that recovery at the telemetry polling boundary
-        # too, rather than trusting a long-lived but potentially stale session.
-        if getattr(self, "_reader", None) is not None or getattr(
-            self, "_writer", None
-        ) is not None:
-            await self.async_close()
         return await self._async_read_with_retry(
             {"Get": "EnergyParameter"}, decode_energy_parameter
         )
@@ -289,7 +283,14 @@ class FbpLocalTcpClient:
             try:
                 return decoder(await self._request(command))
             except LocalProtocolError:
-                await self.async_close()
+                # Decoder failures happen after _request releases its lock.
+                # Keep cleanup serialised too, so a new control connection
+                # cannot start while the rejected session is still closing.
+                lock = getattr(self, "_lock", None)
+                if lock is None:
+                    self._lock = lock = asyncio.Lock()
+                async with lock:
+                    await self.async_close()
                 if attempt + 1 == attempts:
                     raise
                 await asyncio.sleep(_READ_RETRY_DELAYS_SECONDS[attempt])
@@ -370,9 +371,9 @@ class FbpLocalTcpClient:
             snapshot = None
 
         observed_mode = operating_mode_from_controls(controls)
-        active = snapshot is None or max(
-            snapshot.charge_power_w, snapshot.discharge_power_w
-        ) > _GRID_IDLE_ACTIVE_POWER_W
+        active = snapshot is None or _battery_power_active(
+            snapshot, allow_standby=_explicit_idle_controls(controls)
+        )
 
         if observed_mode == "Idle" and not active:
             idle_slot = (
@@ -401,9 +402,10 @@ class FbpLocalTcpClient:
         await self.async_set_self_consumption()
         for attempt in range(5):
             snapshot = await self.async_snapshot()
-            if max(snapshot.charge_power_w, snapshot.discharge_power_w) <= (
-                _GRID_IDLE_ACTIVE_POWER_W
-            ):
+            # The preceding writes verified a 100% floor and disabled every
+            # slot. A small summary input may power the inverter itself; only
+            # complete independent zero battery-flow readings can prove that.
+            if not _battery_power_active(snapshot, allow_standby=True):
                 break
             if attempt == 4:
                 raise LocalProtocolError(
@@ -422,6 +424,11 @@ class FbpLocalTcpClient:
     async def _request(self, command: dict[str, Any]) -> dict[str, Any]:
         async with self._lock:
             try:
+                # Reset telemetry sessions only after any in-flight control
+                # response finishes. Closing before taking this lock can abort
+                # a concurrent SAFE write while it is awaiting its reply.
+                if command.get("Get") == "EnergyParameter":
+                    await self.async_close()
                 reader, writer = await self._connection()
                 self._serial += 1
                 payload = {
@@ -515,6 +522,65 @@ class FbpLocalTcpClient:
         raise LocalProtocolError(f"native {label} write was not confirmed")
 
 
+def _corroborated_standby_input(snapshot: FbpLocalSnapshot) -> bool:
+    units = _storage_entries(snapshot.raw)
+    return bool(
+        0 <= snapshot.charge_power_w <= _GRID_IDLE_STANDBY_INPUT_MAX_W
+        and 0 <= snapshot.discharge_power_w <= _GRID_IDLE_ACTIVE_POWER_W
+        and units
+        and all(
+            unit is not None
+            and _number(unit, "BatteryChargingPower") == 0
+            and _number(unit, "BatteryDischargingPower") == 0
+            for unit in units
+        )
+    )
+
+
+def observed_battery_power(
+    snapshot: FbpLocalSnapshot, controls: dict[str, str]
+) -> tuple[float, float]:
+    """Separate verified idle input from battery energy; retain raw diagnostics."""
+    if _explicit_idle_controls(controls) and _corroborated_standby_input(snapshot):
+        return 0.0, 0.0
+    return snapshot.charge_power_w, snapshot.discharge_power_w
+
+
+def _battery_power_active(
+    snapshot: FbpLocalSnapshot, *, allow_standby: bool
+) -> bool:
+    """Keep real battery flow distinct from corroborated inverter overhead."""
+    units = _storage_entries(snapshot.raw)
+    per_unit = [
+        (_scaled(unit, "BatteryChargingPower", 0.1),
+         _scaled(unit, "BatteryDischargingPower", 0.1))
+        if unit is not None else (None, None)
+        for unit in units
+    ]
+    if any(value is not None and value > _GRID_IDLE_ACTIVE_POWER_W
+           for powers in per_unit for value in powers):
+        return True
+    if allow_standby and _corroborated_standby_input(snapshot):
+        return False
+    return max(snapshot.charge_power_w, snapshot.discharge_power_w) > (
+        _GRID_IDLE_ACTIVE_POWER_W
+    )
+
+
+def _explicit_idle_controls(controls: dict[str, str]) -> bool:
+    """Require the complete schedule bank before classifying standing input."""
+    minimum, maximum = controls.get(REG_MIN_SOC), controls.get(REG_MAX_SOC)
+    if minimum is None or maximum is None:
+        return False
+    return _controls_match({
+        REG_EMS_ENABLE: "1", REG_SCHEDULE_MODE: "6",
+        REG_AI_SMART_CHARGE: "0", REG_AI_SMART_DISCHARGE: "0",
+        REG_CUSTOM_MODE: "1",
+        REG_CONTROL_TIME_1: f"1,00:00,23:59,0,0,6,5,0,0,{maximum},{minimum}",
+        **{key: SLOT_DISABLED for key in REG_CONTROL_TIME_SLOTS[1:]},
+    }, controls)
+
+
 def _controls_match(values: dict[str, str], observed: dict[str, str]) -> bool:
     return all(
         _control_value_matches(key, value, observed.get(key))
@@ -533,7 +599,9 @@ def decode_energy_parameter(response: dict[str, Any]) -> FbpLocalSnapshot:
         if len(storage_entries) <= 1
         else {}
     )
-    soc = _number(summary, "AverageBatteryAverageSOC") or _number(storage, "BatterySoc")
+    soc = _number(summary, "AverageBatteryAverageSOC")
+    if soc is None:
+        soc = _number(storage, "BatterySoc")
     if soc is None or not 0 <= soc <= 100:
         raise LocalProtocolError("missing or invalid battery SOC")
     charge = (

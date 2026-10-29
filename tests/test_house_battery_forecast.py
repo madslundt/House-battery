@@ -2,12 +2,10 @@
 
 import asyncio
 import sys
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-
 from homeassistant.core import HomeAssistant
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
@@ -476,6 +474,41 @@ def test_forecast_accuracy_scores_forecast_once_actual_price_is_known() -> None:
     assert accuracy.mean_absolute_error_dkk_per_kwh == 0.20
     assert accuracy.mean_bias_dkk_per_kwh == 0.20
     assert accuracy.within_uncertainty_pct == 100.0
+
+
+def test_scored_forecast_is_not_recorded_again_after_refresh_or_restart() -> None:
+    """A published actual price cannot turn revisions into new scored samples."""
+    accuracy = ForecastAccuracy()
+    accuracy.record_forecasts([_slot(1, 1.20)])
+    assert accuracy.score_actual_prices(
+        [_slot(1, 1.00)], uncertainty_dkk_per_kwh=0.25
+    ) == 1
+
+    for _ in range(2):
+        accuracy.record_forecasts([_slot(1, 1.00)])
+        assert accuracy.score_actual_prices(
+            [_slot(1, 1.00)], uncertainty_dkk_per_kwh=0.25
+        ) == 0
+        assert accuracy.samples == 1
+        assert accuracy.mean_absolute_error_dkk_per_kwh == 0.20
+        accuracy = ForecastAccuracy.from_dict(accuracy.as_dict())
+
+
+def test_scored_forecast_identities_are_bounded_and_expire() -> None:
+    accuracy = ForecastAccuracy()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    for index in range(1001):
+        end = start + timedelta(minutes=index + 1)
+        interval = PriceSlot(end - timedelta(minutes=1), end, 1.20)
+        accuracy.record_forecasts([interval])
+        accuracy.score_actual_prices([interval], uncertainty_dkk_per_kwh=0.25)
+    restored = ForecastAccuracy.from_dict(accuracy.as_dict())
+
+    assert restored.samples == 1000
+    assert len(restored.as_dict()["scored_intervals"]) == 1000
+    restored.prune(end + timedelta(days=8))
+    assert restored.as_dict()["scored_intervals"] == {}
+    assert restored.samples == 1000
 
 
 def test_forecast_accuracy_compares_hourly_forecast_to_quarterly_actual_prices() -> (

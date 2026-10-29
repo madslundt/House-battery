@@ -17,11 +17,11 @@ trust a precise number.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from statistics import median
 from typing import Any
 
-from .models import Action, PriceSlot
+from .models import Action
 
 # A dip must sit at least this fraction *below* the baseline to count as a
 # charging window; a spike must sit at least this fraction *above* it.  The

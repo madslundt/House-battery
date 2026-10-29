@@ -1,7 +1,7 @@
 """Deterministic tests for the hardware-independent FBP1200 planner."""
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 from house_battery.models import Action, PlannedSlot, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 
-BASE = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
+BASE = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
 
 
 @pytest.mark.parametrize("soc", [20, 70])
@@ -119,6 +119,143 @@ def test_reserve_is_never_crossed() -> None:
         settings=settings(minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0),
     )
     assert min(slot.soc_end for slot in plan.slots) >= 20
+
+
+@pytest.mark.parametrize("price", [5.0, -1.0])
+def test_below_reserve_energy_changes_only_by_feasible_charging(price: float) -> None:
+    """A drained battery cannot acquire its reserve without buying that energy."""
+    data = [PriceSlot(BASE, BASE + timedelta(minutes=1), price, 0)]
+    plan = optimize(
+        data, now=BASE, soc=0,
+        settings=settings(
+            capacity_wh=2000, round_trip_efficiency=0.81,
+            switching_penalty_dkk=0,
+        ),
+    )
+
+    slot = plan.slots[0]
+    assert slot.soc_start == 0
+    assert slot.battery_discharge_wh == 0
+    # 1200 W for one minute permits 20 Wh input and 18 Wh stored.
+    assert slot.grid_import_wh <= 20 + 1e-9
+    assert slot.battery_charge_wh <= 18 + 1e-9
+    assert slot.soc_end * 20 == pytest.approx(slot.battery_charge_wh)
+    if price > 0:
+        assert slot.action is Action.GRID
+        assert slot.soc_end == 0
+    else:
+        assert slot.action is Action.CHARGE
+        assert slot.battery_charge_wh > 0
+
+
+@pytest.mark.parametrize("soc", [0, 20, 60])
+@pytest.mark.parametrize("price", [-1.0, 5.0])
+def test_discretized_movement_respects_load_power_and_energy_conservation(soc, price) -> None:
+    """The energy grid may reduce movement, but cannot enlarge physical budgets."""
+    data = [
+        PriceSlot(BASE, BASE + timedelta(minutes=1), price, 0 if price < 0 else 8),
+        PriceSlot(BASE + timedelta(minutes=1), BASE + timedelta(minutes=2), 0, 0),
+    ]
+    plan = optimize(
+        data, now=BASE, soc=soc,
+        settings=settings(
+            capacity_wh=2000, round_trip_efficiency=0.81,
+            minimum_profit_dkk_per_kwh=0, degradation_cost_dkk_per_kwh=0,
+            switching_penalty_dkk=0,
+        ),
+    )
+
+    slot = plan.slots[0]
+    assert slot.battery_charge_wh / 0.9 + slot.expected_load_wh <= 20 + 1e-9
+    assert slot.battery_discharge_wh * 0.9 <= slot.expected_load_wh + 1e-9
+    assert (slot.soc_end - slot.soc_start) * 20 == pytest.approx(
+        slot.battery_charge_wh - slot.battery_discharge_wh
+    )
+    if price < 0:
+        assert slot.action is Action.CHARGE
+    elif soc > 20:
+        assert slot.action is Action.BATTERY
+
+
+@pytest.mark.parametrize("action", [Action.GRID, Action.CHARGE, Action.BATTERY])
+def test_preclipped_tariff_keeps_mode_without_prorating_remaining_load_again(action):
+    now = BASE + timedelta(minutes=45)
+    data = [
+        PriceSlot(
+            now, BASE + timedelta(hours=1), 1, 25,
+            tariff_start=BASE,
+        ),
+        PriceSlot(BASE + timedelta(hours=1), BASE + timedelta(hours=2), 1, 100),
+    ]
+    plan = optimize(data, now=now, soc=50, settings=settings(), current_action=action)
+
+    assert plan.slots[0].start == now
+    assert plan.slots[0].expected_load_wh == 25
+    assert plan.slots[0].action is action
+
+
+def test_profitable_small_load_uses_a_reachable_partial_native_charge_target():
+    data = [
+        PriceSlot(BASE, BASE + timedelta(hours=1), 1, 0),
+        PriceSlot(BASE + timedelta(hours=1), BASE + timedelta(hours=2), 5, 100),
+        PriceSlot(BASE + timedelta(hours=2), BASE + timedelta(hours=3), 0, 0),
+    ]
+    plan = optimize(
+        data, now=BASE, soc=20,
+        settings=settings(capacity_wh=2000, round_trip_efficiency=0.81),
+    )
+
+    assert plan.slots[0].action is Action.CHARGE
+    assert plan.slots[0].charge_target_soc == 26
+    assert plan.slots[0].battery_charge_wh == 120
+    assert plan.slots[1].battery_discharge_wh == 110
+    # Includes input losses, wear, the required margin, and all three switches.
+    assert plan.optimization_objective_dkk == pytest.approx(0.397233, abs=1e-6)
+    assert plan.optimization_objective_dkk < 0.5  # Grid-only reference.
+
+
+@pytest.mark.parametrize("targets,price,target", [
+    (None, 1, 26),
+    ((50, 60, 70, 80, 90), .1, 50),
+    ((), .1, 90),
+    ((20, 26, 100), 1, 26),
+])
+def test_partial_charging_uses_only_supported_native_ceilings(targets, price, target):
+    data = [
+        PriceSlot(BASE, BASE + timedelta(hours=1), price, 0),
+        PriceSlot(BASE + timedelta(hours=1), BASE + timedelta(hours=2), 5, 100),
+        PriceSlot(BASE + timedelta(hours=2), BASE + timedelta(hours=3), 0, 0),
+    ]
+    plan = optimize(
+        data, now=BASE, soc=20,
+        settings=settings(
+            capacity_wh=2000, round_trip_efficiency=0.81,
+            partial_charge_targets=targets,
+        ),
+    )
+
+    assert plan.slots[0].action is Action.CHARGE
+    assert plan.slots[0].charge_target_soc == target
+
+
+@pytest.mark.parametrize("price", [1, .1])
+def test_exact_economic_wash_preserves_zero_throughput_path(price):
+    data = [
+        PriceSlot(BASE + timedelta(hours=index), BASE + timedelta(hours=index + 1), price, 50)
+        for index in range(24)
+    ]
+    plan = optimize(
+        data, now=BASE, soc=50,
+        settings=settings(
+            capacity_wh=200, reserve_soc=0, target_soc=100,
+            charge_power_w=200, discharge_power_w=200, round_trip_efficiency=1,
+            degradation_cost_dkk_per_kwh=0, minimum_profit_dkk_per_kwh=0,
+            switching_penalty_dkk=0,
+        ),
+    )
+
+    assert plan.battery_throughput_kwh == 0
+    assert all(slot.action is Action.GRID for slot in plan.slots)
 
 
 def test_target_is_never_crossed() -> None:

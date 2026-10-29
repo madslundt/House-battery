@@ -8,6 +8,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.components.recorder.db_schema import StateAttributes
@@ -22,6 +23,7 @@ from house_battery.const import (
     CONF_GRID_IMPORT_POWER,
     CONF_PRICE_FORECAST_ENTITIES,
 )
+from house_battery.diagnostics import async_get_config_entry_diagnostics
 from house_battery.entity import enabled_by_default
 from house_battery.number import FbpSettingNumber
 from house_battery.select import FbpOperatingModeSelect
@@ -37,6 +39,24 @@ def _entity_coordinator(config: dict | None = None) -> SimpleNamespace:
         data={},
         device_info={},
     )
+
+
+def test_diagnostics_reports_loaded_version_and_redacts_sensitive_values(monkeypatch):
+    async def scenario():
+        coordinator = _entity_coordinator({"host": "192.0.2.5", "token": "private-token"})
+        coordinator.export_data = lambda: {"password": "private-password"}
+        entry = SimpleNamespace(title="Battery", runtime_data=coordinator)
+        loader = AsyncMock(return_value=SimpleNamespace(version="9.9.9"))
+        monkeypatch.setattr("house_battery.diagnostics.async_get_integration", loader)
+        hass = SimpleNamespace()
+        result = await async_get_config_entry_diagnostics(hass, entry)
+        loader.assert_awaited_once_with(hass, "house_battery")
+        assert result["integration"] == {"version": "9.9.9", "title": "Battery"}
+        assert result["configuration"]["host"] != "192.0.2.5"
+        assert result["configuration"]["token"] != "private-token"
+        assert result["export"]["password"] != "private-password"
+
+    asyncio.run(scenario())
 
 
 def test_compact_catalogue_keeps_daily_operation_and_learning_visible() -> None:

@@ -65,7 +65,7 @@ local TCP or command failures.
 | **Known price spread** | Highest minus lowest price in the known future horizon. |
 | **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before battery cycling is worthwhile. |
 | **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary opportunistic ceiling. |
-| **Extra storage policy** | `normal` or `active`, with the effective target and explanation in attributes. It becomes active only when the opt-in higher-target plan completes an additional profitable cycle using known prices and returns below the normal target within that horizon. |
+| **Extra storage policy** | `normal` or `active`, with the effective target and explanation in attributes. With opt-in enabled, meaningful extra charging can activate when it improves the risk-adjusted objective, including enabled forecasts and conservative value for energy left beyond the horizon. Manual overrides use the normal charge ceiling. |
 
 Battery financial totals update after each completed 15-minute ledger interval
 with sufficient telemetry. Only energy with known prices contributes to the
@@ -137,7 +137,7 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | Number | What changing it does | Realistic change |
 | --- | --- | --- |
 | **Nominal battery capacity** | Fallback usable capacity until learning is ready. | Set 1.958 kWh for one module; use the installed usable capacity, not a marketing nominal total. |
-| **Absolute emergency SOC** | Native lower hardware floor written during automatic commands. | Raise 10→20% if outage reserve is more valuable than arbitrage. |
+| **Absolute emergency SOC** | Native emergency floor requested during a confirmed grid outage; normal operation uses the arbitrage reserve. Native read-back does not prove backup-output cutoff. | Raise 10→20% if outage reserve is more valuable than arbitrage. |
 | **Arbitrage reserve SOC** | Planner's no-discharge floor. | Raise 20→35% before a storm; the optimizer keeps more backup but has less energy to sell against peak prices. |
 | **Maximum charge SOC** | Normal charge ceiling. | Lower 90→80% to reduce high-SOC dwell time; it may skip otherwise profitable evening coverage. |
 | **Maximum AC charge power** | Maximum power budget used for charging. | The available range tops out at 1200 W; lower it if the battery or electrical installation needs a conservative cap. |

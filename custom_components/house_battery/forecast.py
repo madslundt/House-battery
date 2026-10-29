@@ -157,6 +157,9 @@ class ForecastAccuracy:
     outstanding: dict[str, dict[str, str | float]] = field(default_factory=dict)
     errors_dkk_per_kwh: list[float] = field(default_factory=list)
     within_uncertainty: list[bool] = field(default_factory=list)
+    # Keep interval identities after removing the pending prediction, so a
+    # provider's later reports cannot score the same published tariff again.
+    scored_intervals: dict[str, str] = field(default_factory=dict)
 
     def prune(self, now: datetime) -> None:
         """Drop forecasts that can no longer be compared with recent prices."""
@@ -176,10 +179,24 @@ class ForecastAccuracy:
             except (KeyError, TypeError, ValueError):
                 continue
         self.outstanding = dict(list(retained.items())[-_MAX_SAMPLES:])
+        scored = {}
+        for key, end_value in self.scored_intervals.items():
+            try:
+                end = datetime.fromisoformat(end_value)
+                if (
+                    end.tzinfo is not None
+                    and now - FORECAST_EVIDENCE_MAX_AGE < end
+                ):
+                    scored[key] = end_value
+            except (TypeError, ValueError):
+                continue
+        self.scored_intervals = dict(list(scored.items())[-_MAX_SAMPLES:])
 
     def record_forecasts(self, slots: list[PriceSlot]) -> None:
         """Keep the first forecast seen for each interval for an honest score."""
         for slot in slots:
+            if _key(slot) in self.scored_intervals:
+                continue
             self.outstanding.setdefault(
                 _key(slot),
                 {
@@ -222,6 +239,7 @@ class ForecastAccuracy:
                 sum(seconds * price for seconds, price in overlapping) / covered
             )
             self.outstanding.pop(key)
+            self.scored_intervals[key] = end.isoformat()
             error = predicted_price - actual_price
             self.errors_dkk_per_kwh.append(error)
             self.within_uncertainty.append(
@@ -230,6 +248,7 @@ class ForecastAccuracy:
             matched += 1
         self.errors_dkk_per_kwh = self.errors_dkk_per_kwh[-_MAX_SAMPLES:]
         self.within_uncertainty = self.within_uncertainty[-_MAX_SAMPLES:]
+        self.scored_intervals = dict(list(self.scored_intervals.items())[-_MAX_SAMPLES:])
         return matched
 
     @property
@@ -274,6 +293,7 @@ class ForecastAccuracy:
             "outstanding": self.outstanding,
             "errors_dkk_per_kwh": self.errors_dkk_per_kwh,
             "within_uncertainty": self.within_uncertainty,
+            "scored_intervals": self.scored_intervals,
         }
 
     @classmethod
@@ -307,4 +327,8 @@ class ForecastAccuracy:
             within_uncertainty=[
                 bool(value) for value in data.get("within_uncertainty", [])
             ][-_MAX_SAMPLES:],
+            scored_intervals={
+                str(key): str(value)
+                for key, value in list(data.get("scored_intervals", {}).items())[-_MAX_SAMPLES:]
+            },
         )

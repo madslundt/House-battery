@@ -63,6 +63,16 @@ def test_runtime_persists_opportunistic_charging_opt_in() -> None:
     assert restored.opportunistic_charging_enabled
 
 
+def test_pending_safe_retry_survives_restart_with_automatic_control_disabled() -> None:
+    runtime = RuntimeState(execution_enabled=False, pending_safe=True)
+
+    restored = RuntimeState.from_dict(runtime.as_dict())
+
+    assert restored.pending_safe
+    assert not restored.execution_enabled
+    assert not RuntimeState.from_dict({}).pending_safe
+
+
 def test_recent_action_changes_remain_diagnostics_only() -> None:
     first = datetime(2026, 9, 21, 16, tzinfo=UTC)
     runtime = RuntimeState(

@@ -1182,7 +1182,7 @@ def test_transient_local_tcp_loss_pauses_writes_without_disabling_control() -> N
 def test_charge_plan_resumes_after_disconnect_across_price_boundary(
     monkeypatch, published_target: float,
 ) -> None:
-    """A missed poll must retain the full-charge commitment and resume fresh."""
+    """A missed poll must retain the published charge ceiling and resume fresh."""
     import house_battery.coordinator as coordinator_module
 
     boundary = datetime(2026, 10, 22, 3, tzinfo=UTC)
@@ -1253,6 +1253,11 @@ def test_charge_plan_resumes_after_disconnect_across_price_boundary(
         assert active["executable_slot"]["action"] == "charge"
         assert commands == [(Action.CHARGE, published_target)]
         saved = coordinator.runtime.daily_plan.as_dict()
+        next_target = coordinator.runtime.daily_plan.slot_at(
+            boundary + timedelta(seconds=1)
+        ).charge_target_soc
+        assert next_target is not None and 90 < next_target <= 100
+        assert next_target == int(next_target)
 
         nonlocal fixed_now
         fixed_now = boundary + timedelta(seconds=1)
@@ -1272,7 +1277,7 @@ def test_charge_plan_resumes_after_disconnect_across_price_boundary(
         assert resumed["executable_slot"]["action"] == "charge"
         assert resumed["plan"]["slots"][0]["action"] == "charge"
         assert resumed["plan"]["slots"][0]["soc_end"] > 90
-        assert commands == [(Action.CHARGE, published_target), (Action.CHARGE, 100)]
+        assert commands == [(Action.CHARGE, published_target), (Action.CHARGE, next_target)]
 
     monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
     asyncio.run(scenario())

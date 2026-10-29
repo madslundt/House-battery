@@ -13,7 +13,7 @@ from datetime import datetime
 from math import isfinite, sqrt
 
 from .accounting import IntervalAccumulator
-from .models import Action, GRID_POWER_IMPORT_POSITIVE, PowerFlowSnapshot
+from .models import GRID_POWER_IMPORT_POSITIVE, Action, PowerFlowSnapshot
 from .runtime import RuntimeState
 
 
@@ -31,8 +31,10 @@ class EvidenceCollector:
         self._flow = flow
         self._save = save
         self._load_power = load_power
-        self._accumulator: IntervalAccumulator | None = None
-        self._last_sample_at: datetime | None = None
+        # The persisted cursor explains the last stored observation, but the
+        # first observation in a new collector never integrates offline time.
+        self._accounting_started = False
+        self._flow_was_available = False
         self._battery_sample_at: datetime | None = None
         self._load_bucket_start: datetime | None = None
         self._load_bucket_wh = 0.0
@@ -47,7 +49,7 @@ class EvidenceCollector:
         now: datetime,
         price: float | None,
         action: Action,
-        soc: float,
+        soc: float | None,
         battery_charge_power_w: float | None = None,
         battery_discharge_power_w: float | None = None,
         battery_learning_enabled: bool = True,
@@ -87,8 +89,9 @@ class EvidenceCollector:
             if self._last_load_sample_at
             else 0.0
         )
-        self._last_load_sample_at = now
-        if watts is not None and isfinite(watts) and elapsed > 0:
+        valid = watts is not None and isfinite(watts)
+        self._last_load_sample_at = now if valid else None
+        if valid and elapsed > 0:
             self._load_bucket_wh += max(0.0, watts) * elapsed / 3600
             self._load_bucket_seconds += elapsed
 
@@ -97,36 +100,21 @@ class EvidenceCollector:
         now: datetime,
         price: float | None,
         action: Action,
-        soc: float,
+        soc: float | None,
         flow: PowerFlowSnapshot | None,
         battery_charge_power_w: float | None,
         battery_discharge_power_w: float | None,
     ) -> None:
         runtime = self._runtime()
         bucket = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
-        if self._accumulator and self._accumulator.start != bucket:
-            completed = self._accumulator
+        if runtime.accounting_interval and runtime.accounting_interval.start != bucket:
+            completed = runtime.accounting_interval
             runtime.ledger.close(
                 completed, runtime.settings["degradation_cost_dkk_per_kwh"]
             )
-            self._accumulator = None
+            runtime.accounting_interval = None
             await self._save()
         flow_available = flow is not None and flow.flow_available
-        if not flow_available and (
-            battery_charge_power_w is None or battery_discharge_power_w is None
-        ):
-            return
-        if self._accumulator is None:
-            self._accumulator = IntervalAccumulator(bucket)
-        elapsed = (
-            min(
-                60.0,
-                max(0.0, (now - self._last_sample_at).total_seconds()),
-            )
-            if self._last_sample_at
-            else 0
-        )
-        self._last_sample_at = now
         charge_w = (
             flow.battery_charge_power_w
             if flow_available and battery_charge_power_w is None
@@ -137,26 +125,61 @@ class EvidenceCollector:
             if flow_available and battery_discharge_power_w is None
             else battery_discharge_power_w
         )
-        self._accumulator.add(
+        if (
+            soc is None or not isfinite(soc) or not 0 <= soc <= 100
+            or charge_w is None or not isfinite(charge_w)
+            or discharge_w is None or not isfinite(discharge_w)
+        ):
+            runtime.accounting_sample_at = None
+            self._flow_was_available = False
+            return
+        if runtime.accounting_interval is None:
+            runtime.accounting_interval = IntervalAccumulator(bucket)
+        gap = (
+            max(0.0, (now - runtime.accounting_sample_at).total_seconds())
+            if self._accounting_started and runtime.accounting_sample_at
+            else 0
+        )
+        elapsed = min(60.0, gap) if gap <= 120 else 0.0
+        runtime.accounting_sample_at = now
+        self._accounting_started = True
+        runtime.accounting_interval.add(
             seconds=elapsed,
             load_w=flow.load_w if flow_available else 0.0,
             grid_power_w=flow.grid_power_w if flow_available else 0.0,
             grid_sign=GRID_POWER_IMPORT_POSITIVE,
             charge_w=charge_w or 0.0,
             discharge_w=discharge_w or 0.0,
-            price=price,
+            price=price if price is not None and isfinite(price) else None,
             soc=flow.soc if flow_available else soc,
             action=action,
-            flow_available=flow_available,
+            # A recovered meter cannot describe the preceding missing sample.
+            flow_available=flow_available and self._flow_was_available,
         )
+        self._flow_was_available = flow_available
 
     async def _learn_battery(
         self,
         now: datetime,
         action: Action,
-        soc: float,
+        soc: float | None,
         flow: PowerFlowSnapshot | None,
     ) -> None:
+        if (
+            soc is None or not isfinite(soc)
+            or flow is None or not flow.flow_available
+            or (
+                self._battery_sample_at is not None
+                and (now - self._battery_sample_at).total_seconds() > 120
+            )
+        ):
+            # SOC movement across missing measurements cannot be paired with
+            # measured energy, so it must never become a capacity sample.
+            self._battery_sample_at = None
+            self._session_action = None
+            self._session_start_soc = None
+            self._session_energy_wh = 0.0
+            return
         elapsed = (
             min(
                 120.0,
@@ -171,6 +194,7 @@ class EvidenceCollector:
             self._session_action = action
             self._session_start_soc = soc
             self._session_energy_wh = 0.0
+            elapsed = 0.0
         power = 0.0
         if flow is not None and flow.flow_available:
             if action is Action.CHARGE:

@@ -57,6 +57,10 @@ DISCHARGE_EXPORT_SAFETY_MARGIN_W = 50.0
 _DIRECT_SETPOINT_CEILING_W = 1200
 
 
+class _CommandSuperseded(Exception):
+    """A safety request revoked an older control transaction."""
+
+
 def discharge_setpoint_below_load(requested_w: float, load_w: float | None) -> float:
     """Return a conservative discharge setpoint for the observed load."""
     if load_w is None or not math.isfinite(load_w):
@@ -136,6 +140,21 @@ class LocalControlAdapter:
         self._save = save
         self._direct_client = direct_client
         self._direct_mode_changed = direct_mode_changed
+        self._command_lock = asyncio.Lock()
+        self._command_generation = 0
+
+    def invalidate_pending_commands(self) -> None:
+        """Synchronously revoke economic commands before any safety await."""
+        self._command_generation += 1
+
+    async def async_wait_for_idle(self) -> None:
+        """Wait for the complete control transaction before closing its client."""
+        async with self._command_lock:
+            pass
+
+    def _check_command_current(self, generation: int | None) -> None:
+        if generation is not None and generation != self._command_generation:
+            raise _CommandSuperseded
 
     async def _async_call_and_confirm_state(
         self, domain: str, service: str, data: dict[str, Any],
@@ -160,7 +179,9 @@ class LocalControlAdapter:
         except TimeoutError:
             return False
 
-    async def async_set_grid_isolation(self, enabled: bool) -> bool:
+    async def async_set_grid_isolation(
+        self, enabled: bool, *, generation: int | None = None
+    ) -> bool:
         """Best-effort control of the optional grid input smart plug.
 
         A configured plug is confirmed through state read-back. A missing or
@@ -172,6 +193,7 @@ class LocalControlAdapter:
             return True
         desired = "on" if enabled else "off"
         for attempt in range(_GRID_SWITCH_ATTEMPTS):
+            self._check_command_current(generation)
             current = self._hass.states.get(entity_id)
             if current is not None and current.state == desired:
                 return True
@@ -183,7 +205,7 @@ class LocalControlAdapter:
                     lambda state: state == desired,
                 ):
                     return True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - HA service failures vary by integration.
                 _LOGGER.warning(
                     "Could not turn %s grid isolation plug %s (attempt %d/%d): %s",
                     desired,
@@ -214,6 +236,7 @@ class LocalControlAdapter:
         target_soc: float | None,
         load_w: float | None = None,
         grid_available: bool | None = None,
+        generation: int | None = None,
     ) -> tuple[bool, str] | None:
         """Use the built-in TCP adapter when this is a direct-local entry."""
         client = self._direct_client() if self._direct_client else None
@@ -248,6 +271,7 @@ class LocalControlAdapter:
         # mode matches the physical mode the device is really in.
         direct_command_mode: str | None = None
         try:
+            self._check_command_current(generation)
             if not grid_restore_confirmed:
                 # Do not report a successful handoff while the mains remain
                 # isolated. Stop battery output. The coordinator keeps the
@@ -268,13 +292,17 @@ class LocalControlAdapter:
                 # battery output. If it is unavailable, stop the inverter in
                 # Grid/Idle and leave automatic control armed for the next
                 # refresh to retry.
-                isolation_confirmed = await self.async_set_grid_isolation(False)
+                isolation_confirmed = await self.async_set_grid_isolation(
+                    False, generation=generation
+                )
+                self._check_command_current(generation)
                 if not isolation_confirmed:
                     direct_command_mode = "Idle"
                     action = Action.GRID
                     await client.async_set_grid_idle(minimum, maximum)
                 else:
                     await client.async_set_limits(minimum, maximum)
+                    self._check_command_current(generation)
                     direct_command_mode = "Discharge"
                     await client.async_set_mode(
                         direct_command_mode,
@@ -286,6 +314,7 @@ class LocalControlAdapter:
                 await client.async_set_limits(minimum, maximum)
 
             if action is Action.CHARGE:
+                self._check_command_current(generation)
                 direct_command_mode = "Charge"
                 await client.async_set_mode(
                     "Charge",
@@ -293,6 +322,9 @@ class LocalControlAdapter:
                     min_soc=minimum,
                     max_soc=maximum,
                 )
+            self._check_command_current(generation)
+        except _CommandSuperseded:
+            raise
         except Exception as exc:
             _LOGGER.exception("Local TCP mode command failed")
             if requested_action is Action.BATTERY:
@@ -412,20 +444,24 @@ class LocalControlAdapter:
 
     async def _apply_limits(
         self, action: Action, target_soc: float | None,
-        *, grid_available: bool | None = None,
+        *, grid_available: bool | None = None, generation: int | None = None,
     ) -> None:
         runtime = self._runtime()
+        self._check_command_current(generation)
         await self._set_number(
             CONF_CHARGE_POWER_CONTROL, runtime.settings["charge_power_w"]
         )
+        self._check_command_current(generation)
         await self._set_number(
             CONF_DISCHARGE_POWER_CONTROL, runtime.settings["discharge_power_w"]
         )
+        self._check_command_current(generation)
         await self._set_number(
             CONF_MIN_SOC_CONTROL,
             self._minimum_soc_for(action, grid_available=grid_available),
             required=True,
         )
+        self._check_command_current(generation)
         await self._set_number(
             CONF_MAX_SOC_CONTROL,
             target_soc if target_soc is not None else runtime.settings["target_soc"],
@@ -446,8 +482,26 @@ class LocalControlAdapter:
         Direct-local BATTERY commands are capped below ``load_w``. Missing
         load telemetry fails closed to an Idle slot.
         """
+        if action is Action.SAFE:
+            self.invalidate_pending_commands()
+        generation = None if action is Action.SAFE else self._command_generation
+        async with self._command_lock:
+            try:
+                self._check_command_current(generation)
+                return await self._async_command_locked(
+                    action, now, target_soc=target_soc, load_w=load_w,
+                    grid_available=grid_available, generation=generation,
+                )
+            except _CommandSuperseded:
+                return False, "command superseded by a safety request"
+
+    async def _async_command_locked(
+        self, action: Action, now: datetime, *, target_soc: float | None,
+        load_w: float | None, grid_available: bool | None,
+        generation: int | None,
+    ) -> tuple[bool, str]:
         direct_result = await self._async_direct_command(
-            action, now, target_soc, load_w, grid_available
+            action, now, target_soc, load_w, grid_available, generation
         )
         if direct_result is not None:
             return direct_result
@@ -457,8 +511,10 @@ class LocalControlAdapter:
         limits_warning: str | None = None
         try:
             await self._apply_limits(
-                action, target_soc, grid_available=grid_available
+                action, target_soc, grid_available=grid_available, generation=generation
             )
+        except _CommandSuperseded:
+            raise
         except Exception as exc:  # The safety command must remain available.
             if action is not Action.SAFE:
                 _LOGGER.exception("Battery SOC limit command failed")
@@ -466,6 +522,7 @@ class LocalControlAdapter:
             limits_warning = f"SOC limits not confirmed: {exc}"
             _LOGGER.warning("%s; continuing with requested safe mode", limits_warning)
         try:
+            self._check_command_current(generation)
             current = self._hass.states.get(mode_entity)
             if current and current.state == mode:
                 detail = (
@@ -478,6 +535,9 @@ class LocalControlAdapter:
                 {"entity_id": mode_entity, "option": mode},
                 lambda state: state == mode,
             )
+            self._check_command_current(generation)
+        except _CommandSuperseded:
+            raise
         except Exception as exc:  # Home Assistant service failures vary by adapter
             _LOGGER.exception("Battery command failed")
             return False, f"command failed: {exc}"

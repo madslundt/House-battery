@@ -5,8 +5,8 @@ from __future__ import annotations
 import random
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from math import ceil, sqrt
+from datetime import UTC, datetime, timedelta
+from math import ceil, floor, sqrt
 from pathlib import Path
 
 import pytest
@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 
-BASE = datetime(2026, 9, 26, tzinfo=timezone.utc)
+BASE = datetime(2026, 9, 26, tzinfo=UTC)
 _ACTIONS = (Action.GRID, Action.BATTERY, Action.CHARGE)
 
 
@@ -27,6 +27,19 @@ class _OraclePath:
     objective_cost: float
     throughput_wh: float
     actions: tuple[Action, ...]
+
+
+def _low_soc_area(start_wh: float, end_wh: float, settings: PlannerSettings) -> float:
+    """Trapezoid integration of the piecewise-linear charging preference."""
+    threshold = settings.capacity_wh * settings.low_soc_charge_threshold / 100
+    if threshold <= 0 or end_wh <= start_wh:
+        return 0.0
+    points = sorted({start_wh, end_wh, min(end_wh, max(start_wh, threshold))})
+    weights = [max(0.0, 1 - value / threshold) for value in points]
+    return sum(
+        (points[index + 1] - points[index]) * (weights[index + 1] + weights[index]) / 2
+        for index in range(len(points) - 1)
+    )
 
 
 def _settings(**changes: float) -> PlannerSettings:
@@ -104,8 +117,16 @@ def _oracle_transition(
         available_input_w = max(0.0, settings.charge_power_w - load_power_w)
         headroom_wh = max(0.0, maximum_step * step_wh - energy_wh)
         input_wh = min(available_input_w * slot.hours, headroom_wh / efficiency)
-        charged_wh = input_wh * efficiency if input_wh > step_wh / 4 else 0.0
-        new_energy_wh = energy_wh + charged_wh
+        # Enumerate stored-energy states satisfying the input-energy budget.
+        # This oracle must independently reject physically impossible steps,
+        # rather than repeat the optimizer's rounding/clamping implementation.
+        feasible = [
+            step for step in range(path.energy_step + 1, maximum_step + 1)
+            if (step - path.energy_step) * step_wh / efficiency <= input_wh + 1e-9
+        ]
+        if not feasible:
+            return None
+        new_step = max(feasible)
     elif action is Action.BATTERY:
         available_wh = max(0.0, energy_wh - minimum_step * step_wh)
         delivered_wh = min(
@@ -113,18 +134,15 @@ def _oracle_transition(
             settings.discharge_power_w * slot.hours,
             available_wh * efficiency,
         )
-        discharged_wh = delivered_wh / efficiency if delivered_wh > step_wh / 4 else 0.0
-        new_energy_wh = energy_wh - discharged_wh
+        feasible = [
+            step for step in range(minimum_step, path.energy_step)
+            if (path.energy_step - step) * step_wh * efficiency <= delivered_wh + 1e-9
+        ]
+        if not feasible:
+            return None
+        new_step = min(feasible)
     else:
-        new_energy_wh = energy_wh
-
-    new_step = round(new_energy_wh / step_wh)
-    state_ceiling = (
-        maximum_step
-        if action is Action.CHARGE
-        else max(maximum_step, path.energy_step)
-    )
-    new_step = min(state_ceiling, max(minimum_step, new_step))
+        new_step = path.energy_step
     delta_wh = (new_step - path.energy_step) * step_wh
     if action is Action.CHARGE:
         if delta_wh <= 0:
@@ -132,6 +150,10 @@ def _oracle_transition(
         throughput_wh = delta_wh
         grid_wh = load_wh + delta_wh / efficiency
         movement_cost = delta_wh / efficiency / 1000 * slot.uncertainty_dkk_per_kwh
+        movement_cost -= (
+            _low_soc_area(energy_wh, new_step * step_wh, settings)
+            / efficiency / 1000 * settings.low_soc_charge_premium_dkk_per_kwh
+        )
     elif action is Action.BATTERY:
         if delta_wh >= 0:
             return None
@@ -182,23 +204,30 @@ def _oracle(
             actions=(),
         )
     ]
+    native_targets = (
+        range(floor(settings.reserve_soc) + 1, floor(settings.target_soc) + 1)
+        if settings.partial_charge_targets is None else settings.partial_charge_targets
+    )
+    native_ceilings = {
+        floor(settings.capacity_wh * target / 100 / step_wh)
+        for target in native_targets
+        if settings.reserve_soc < target <= settings.target_soc
+        if minimum_step < floor(settings.capacity_wh * target / 100 / step_wh) <= maximum_step
+    }
     for slot in slots:
-        paths = [
-            candidate
-            for path in paths
-            for action in _ACTIONS
-            if (
-                candidate := _oracle_transition(
-                    path,
-                    action,
-                    slot,
-                    settings,
-                    minimum_step,
-                    maximum_step,
-                )
-            )
-            is not None
-        ]
+        expanded = []
+        for path in paths:
+            alternatives = set()
+            for action in _ACTIONS:
+                ceilings = native_ceilings | {maximum_step} if action is Action.CHARGE else {maximum_step}
+                for ceiling in ceilings:
+                    candidate = _oracle_transition(
+                        path, action, slot, settings, minimum_step, ceiling
+                    )
+                    if candidate is not None:
+                        alternatives.add(candidate)
+            expanded.extend(alternatives)
+        paths = expanded
 
     discharge_efficiency = sqrt(settings.round_trip_efficiency)
     end = max(slot.end for slot in slots)
@@ -213,7 +242,7 @@ def _oracle(
     )
 
     def final_key(path: _OraclePath) -> tuple[float, float, str]:
-        stored_wh = (path.energy_step - minimum_step) * step_wh
+        stored_wh = max(0, path.energy_step - minimum_step) * step_wh
         terminal_value = stored_wh * discharge_efficiency / 1000 * terminal_net_price
         return (
             round(path.objective_cost - terminal_value, 6),
@@ -241,6 +270,13 @@ def _plan_key(
             price = slot.price
             input_wh = slot.battery_charge_wh / efficiency
             movement_cost = input_wh / 1000 * slot.price_uncertainty_dkk_per_kwh
+            movement_cost -= (
+                _low_soc_area(
+                    slot.soc_start * settings.capacity_wh / 100,
+                    slot.soc_end * settings.capacity_wh / 100,
+                    settings,
+                ) / efficiency / 1000 * settings.low_soc_charge_premium_dkk_per_kwh
+            )
         elif slot.action is Action.BATTERY:
             price = slot.price
             delivered_wh = slot.battery_discharge_wh * efficiency
@@ -272,6 +308,10 @@ def _plan_key(
         ([-0.50, -0.10, 0.20, 3.00], 0.0, {}),
         ([5.0, 5.0, 0.1, 5.0], 0.0, {"reserve_soc": 25.0}),
         ([0.1, 4.0, 0.2, 3.5], 100.0, {"target_soc": 75.0}),
+        ([1.0, 4.0, 0.0], 0.0, {
+            "low_soc_charge_threshold": 60.0,
+            "low_soc_charge_premium_dkk_per_kwh": 2.0,
+        }),
     ],
 )
 def test_optimizer_matches_exhaustive_oracle_for_targeted_patterns(
@@ -375,11 +415,12 @@ def test_optimizer_matches_exhaustive_oracle_for_seeded_random_cases() -> None:
             target_soc=rng.choice([75.0, 100.0]),
             switching_penalty_dkk=rng.choice([0.0, 0.02, 0.1]),
             minimum_profit_dkk_per_kwh=rng.choice([0.0, 0.3, 0.8]),
+            low_soc_charge_premium_dkk_per_kwh=rng.choice([0.0, 0.25, 1.0]),
         )
         if planner_settings.reserve_soc >= planner_settings.target_soc:
             continue
         soc = rng.choice(
-            [planner_settings.reserve_soc, 50.0, planner_settings.target_soc, 100.0]
+            [0.0, planner_settings.reserve_soc, 50.0, planner_settings.target_soc, 100.0]
         )
         current_action = rng.choice(_ACTIONS)
         expected_key, expected_path = _oracle(

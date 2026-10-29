@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta
+from math import isfinite
 from typing import Any
 
 from .const import LEDGER_HISTORY_LIMIT
@@ -42,6 +43,35 @@ class IntervalAccumulator:
     samples: int = 0
     action: str = Action.SAFE.value
     grid_sign: float = 1.0
+
+    def as_dict(self) -> dict[str, Any]:
+        """Keep a partly observed interval durable across coordinator reloads."""
+        result = asdict(self)
+        result["start"] = self.start.isoformat()
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Any) -> IntervalAccumulator | None:
+        """Restore only complete, finite accumulator payloads."""
+        if not isinstance(data, dict):
+            return None
+        try:
+            values = dict(data)
+            start = datetime.fromisoformat(values.pop("start"))
+            if start.tzinfo is None:
+                return None
+            accumulator = cls(start=start, **values)
+            Action(accumulator.action)
+            for key, value in asdict(accumulator).items():
+                if key in {"start", "action"}:
+                    continue
+                if value is None and key in {"soc_first", "soc_last"}:
+                    continue
+                if not isinstance(value, (int, float)) or not isfinite(value):
+                    return None
+            return accumulator
+        except (KeyError, TypeError, ValueError):
+            return None
 
     def add(
         self,
@@ -336,39 +366,36 @@ class EnergyLedger:
             )
             interval.setdefault("charge_cost_dkk", None)
             interval.setdefault("discharge_value_dkk", None)
+            for key in (
+                "price_dkk_per_kwh", "baseline_cost_dkk", "actual_cost_dkk",
+                "net_savings_dkk", "charge_cost_dkk", "discharge_value_dkk",
+            ):
+                interval[key] = _finite_number(interval.get(key))
             intervals.append(LedgerInterval(**interval))
-        total_net_savings = float(data.get("total_net_savings_dkk", 0))
-        total_charge_cost = float(
-            data.get(
-                "total_charge_cost_dkk",
-                sum(item.charge_cost_dkk or 0 for item in intervals),
-            )
+        saved_savings = _finite_number(data.get("total_net_savings_dkk", 0))
+        total_net_savings = (
+            saved_savings if saved_savings is not None
+            else sum(item.net_savings_dkk or 0 for item in intervals)
         )
-        total_discharge_value = float(
-            data.get(
-                "total_discharge_value_dkk",
-                sum(item.discharge_value_dkk or 0 for item in intervals),
-            )
+        saved_charge_cost = _finite_number(data.get("total_charge_cost_dkk"))
+        total_charge_cost = (
+            saved_charge_cost if saved_charge_cost is not None
+            else sum(item.charge_cost_dkk or 0 for item in intervals)
+        )
+        saved_discharge_value = _finite_number(data.get("total_discharge_value_dkk"))
+        total_discharge_value = (
+            saved_discharge_value if saved_discharge_value is not None
+            else sum(item.discharge_value_dkk or 0 for item in intervals)
         )
         # Older runtime payloads predate the evidence counters. Preserve known
         # zero-price evidence as well as totals whose intervals were pruned.
-        charge_cost_intervals = int(
-            data.get(
-                "charge_cost_intervals",
-                max(
-                    sum(item.charge_cost_dkk is not None for item in intervals),
-                    int(total_charge_cost != 0),
-                ),
-            )
+        charge_cost_intervals = _evidence_count(
+            data, "charge_cost_intervals", "total_charge_cost_dkk",
+            max(sum(item.charge_cost_dkk is not None for item in intervals), int(total_charge_cost != 0)),
         )
-        discharge_value_intervals = int(
-            data.get(
-                "discharge_value_intervals",
-                max(
-                    sum(item.discharge_value_dkk is not None for item in intervals),
-                    int(total_discharge_value != 0),
-                ),
-            )
+        discharge_value_intervals = _evidence_count(
+            data, "discharge_value_intervals", "total_discharge_value_dkk",
+            max(sum(item.discharge_value_dkk is not None for item in intervals), int(total_discharge_value != 0)),
         )
         return cls(
             intervals=intervals[-LEDGER_HISTORY_LIMIT:],
@@ -380,16 +407,29 @@ class EnergyLedger:
             discharge_value_intervals=max(0, discharge_value_intervals),
             total_export_kwh=float(data.get("total_export_kwh", 0)),
             total_net_savings_dkk=total_net_savings,
-            savings_intervals=max(
-                0,
-                int(
-                    data.get(
-                        "savings_intervals",
-                        1 if total_net_savings != 0 else 0,
-                    )
-                ),
+            savings_intervals=_evidence_count(
+                data, "savings_intervals", "total_net_savings_dkk",
+                sum(item.net_savings_dkk is not None for item in intervals)
+                if saved_savings is None else int(total_net_savings != 0),
             ),
         )
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if isfinite(number) else None
+
+
+def _evidence_count(data: dict[str, Any], key: str, total_key: str, fallback: int) -> int:
+    # Earlier releases could save nonfinite tariffs as JSON null. Their
+    # counters must not turn a discarded, unknown amount into zero-price proof.
+    if total_key in data and _finite_number(data[total_key]) is None:
+        return fallback
+    saved = _finite_number(data.get(key))
+    return max(0, int(saved)) if saved is not None else fallback
 
 
 def calendar_period_bounds(now: datetime) -> dict[str, tuple[datetime, datetime]]:

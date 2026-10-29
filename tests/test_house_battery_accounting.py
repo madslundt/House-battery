@@ -1,14 +1,16 @@
 """Tests for auditable interval savings and battery-use accounting."""
 
 import asyncio
+import json
 import sys
-from datetime import UTC, datetime, timedelta
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+from homeassistant.helpers.json import json_dumps
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
@@ -19,6 +21,247 @@ from house_battery.accounting import (
     calendar_period_bounds,
 )
 from house_battery.models import Action
+
+
+@pytest.mark.parametrize("case,expected_charge", [
+    ("standby", 0), ("unit_charging", 48), ("incomplete_unit", 48),
+    ("charge_controls", 48), ("incomplete_controls", 48),
+])
+def test_verified_idle_standby_input_is_not_booked_as_battery_charge(
+    monkeypatch, case: str, expected_charge: float
+) -> None:
+    import house_battery.coordinator as coordinator_module
+    from test_house_battery_cutoff_gate import coordinator
+    from test_house_battery_safety_regression import IdleDevice
+
+    start = datetime(2026, 10, 29, 10, tzinfo=UTC)
+
+    class Clock(datetime):
+        tick = start
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.tick.astimezone(tz) if tz else cls.tick.replace(tzinfo=None)
+
+    async def scenario() -> None:
+        coord, _, _, _ = await coordinator(now=start)
+        coord.runtime.execution_enabled = False
+        device = IdleDevice(per_unit_charge=48 if case == "unit_charging" else 0)
+        if case == "incomplete_unit":
+            device.charge = None
+        elif case == "charge_controls":
+            device.controls["3003"] = "1,00:00,23:59,-48,0,6,5,0,0,90,10"
+        elif case == "incomplete_controls":
+            del device.controls["3018"]
+        coord.local_client = device
+        for minute in range(16):
+            Clock.tick = start + timedelta(minutes=minute)
+            status = await coord._async_update_data()
+
+        assert coord._local_snapshot.raw_reported_charge_power_w == 48
+        assert coord.runtime.ledger.total_charge_kwh == pytest.approx(expected_charge * 14 / 60 / 1000)
+        assert coord.runtime.ledger.total_charge_cost_dkk == pytest.approx(expected_charge * 14 / 60 / 1000 * 4)
+        assert sum(block["charge_kwh"] for block in status["actual_history_blocks"]) == pytest.approx(expected_charge * 15 / 60 / 1000)
+        assert status["battery_charge_power_w"] == expected_charge
+        assert status["power_source"] == ("grid" if expected_charge == 0 else "charging")
+
+    monkeypatch.setattr(coordinator_module, "datetime", Clock)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("old_price", [float("nan"), float("inf"), -float("inf")])
+def test_legacy_nonfinite_tariffs_keep_energy_and_resume_after_reload(old_price: float) -> None:
+    from house_battery.evidence import EvidenceCollector
+    from house_battery.runtime import RuntimeState
+
+    start = datetime(2026, 10, 29, 10, tzinfo=UTC)
+    old_interval = IntervalAccumulator(start)
+    for _ in range(15):
+        old_interval.add(
+            seconds=60, load_w=1000, grid_power_w=0, charge_w=0,
+            discharge_w=1000, price=old_price, soc=50, action=Action.BATTERY,
+        )
+    ledger = EnergyLedger()
+    ledger.close(old_interval, 0.35)
+    payload = json.loads(json_dumps(RuntimeState(ledger=ledger).as_dict()))
+    restored = RuntimeState.from_dict(payload)
+
+    assert restored.ledger.total_discharge_kwh == pytest.approx(0.25)
+    assert restored.ledger.total_battery_net_savings_dkk is None
+    assert restored.ledger.savings_intervals == 0
+
+    async def scenario() -> None:
+        async def save() -> None:
+            pass
+
+        observer = EvidenceCollector(lambda: restored, lambda: None, save, lambda: None)
+        for minute in range(30, 46):
+            await observer.async_observe(
+                start + timedelta(minutes=minute), 2, Action.CHARGE, 50,
+                battery_charge_power_w=1000, battery_discharge_power_w=0,
+                battery_learning_enabled=False,
+            )
+
+        assert restored.ledger.total_discharge_kwh == pytest.approx(0.25)
+        assert restored.ledger.total_charge_kwh == pytest.approx(14 / 60)
+        assert restored.ledger.total_charge_cost_dkk == pytest.approx(14 / 30)
+        assert restored.ledger.total_battery_net_savings_dkk == pytest.approx(-14 / 30)
+
+    asyncio.run(scenario())
+
+
+def test_repairing_unknown_ledger_amounts_preserves_valid_negative_tariff_evidence() -> None:
+    from house_battery.runtime import RuntimeState
+
+    start = datetime(2026, 10, 29, 10, tzinfo=UTC)
+    ledger = EnergyLedger()
+    for index, price in enumerate([-1, float("nan")]):
+        accumulator = IntervalAccumulator(start + timedelta(minutes=15 * index))
+        for _ in range(15):
+            accumulator.add(
+                seconds=60, load_w=1000, grid_power_w=2000, charge_w=1000,
+                discharge_w=0, price=price, soc=50, action=Action.CHARGE,
+            )
+        ledger.close(accumulator, 0.35)
+
+    restored = RuntimeState.from_dict(
+        json.loads(json_dumps(RuntimeState(ledger=ledger).as_dict()))
+    ).ledger
+
+    assert restored.total_charge_kwh == pytest.approx(0.5)
+    assert restored.total_charge_cost_dkk == pytest.approx(-0.25)
+    assert restored.charge_cost_intervals == 1
+    assert restored.total_net_savings_dkk == pytest.approx(0.25)
+    assert restored.savings_intervals == 1
+
+
+@pytest.mark.parametrize("resume_minute,expected_kwh", [(13, 13 / 60), (20, 0.2)])
+def test_open_accounting_interval_survives_restart_without_filling_offline_time(
+    resume_minute: int, expected_kwh: float
+) -> None:
+    from house_battery.evidence import EvidenceCollector
+    from house_battery.runtime import RuntimeState
+
+    async def scenario() -> None:
+        runtime = RuntimeState()
+
+        async def save() -> None:
+            pass
+
+        def collector() -> EvidenceCollector:
+            return EvidenceCollector(lambda: runtime, lambda: None, save, lambda: None)
+
+        observer = collector()
+        start = datetime(2026, 10, 29, 10, tzinfo=UTC)
+
+        async def observe(minute: int) -> None:
+            await observer.async_observe(
+                start + timedelta(minutes=minute), 1, Action.CHARGE, 50,
+                battery_charge_power_w=1000, battery_discharge_power_w=0,
+                battery_learning_enabled=False,
+            )
+
+        for minute in range(13):
+            await observe(minute)
+        runtime = RuntimeState.from_dict(runtime.as_dict())
+        observer = collector()
+        for minute in range(resume_minute, max(16, resume_minute + 1)):
+            await observe(minute)
+
+        assert runtime.ledger.total_charge_kwh == pytest.approx(expected_kwh)
+        assert len(runtime.ledger.intervals) == 1
+        assert runtime.ledger.intervals[0].battery_quality == "good"
+
+    asyncio.run(scenario())
+
+
+def test_unavailable_measurements_do_not_bridge_an_accounting_gap() -> None:
+    from house_battery.evidence import EvidenceCollector
+    from house_battery.runtime import RuntimeState
+
+    async def scenario() -> None:
+        runtime = RuntimeState()
+
+        async def save() -> None:
+            pass
+
+        observer = EvidenceCollector(lambda: runtime, lambda: None, save, lambda: None)
+        start = datetime(2026, 10, 29, 10, tzinfo=UTC)
+        for minute, valid in [(0, True), (1, True), (2, False), (3, True), (4, True), (15, False)]:
+            await observer.async_observe(
+                start + timedelta(minutes=minute), 1, Action.CHARGE,
+                50 if valid else None,
+                battery_charge_power_w=1000 if valid else None,
+                battery_discharge_power_w=0 if valid else None,
+                battery_learning_enabled=False,
+            )
+
+        # Only 00->01 and 03->04 had fresh measurements at both endpoints.
+        assert runtime.ledger.intervals[0].battery_charge_kwh == pytest.approx(1 / 30)
+
+    asyncio.run(scenario())
+
+
+def test_battery_learning_discards_sessions_crossing_missing_balanced_flow() -> None:
+    from house_battery.evidence import EvidenceCollector
+    from house_battery.models import derive_power_flow
+    from house_battery.runtime import RuntimeState
+
+    async def scenario() -> None:
+        runtime = RuntimeState()
+        flow = None
+
+        async def save() -> None:
+            pass
+
+        observer = EvidenceCollector(lambda: runtime, lambda: flow, save, lambda: None)
+        start = datetime(2026, 10, 29, 10, tzinfo=UTC)
+        for minute in range(13):
+            soc = 80 - minute
+            flow = derive_power_flow(soc, 1000, 0)
+            await observer.async_observe(start + timedelta(minutes=minute), 1, Action.BATTERY, soc)
+        flow = None
+        await observer.async_observe(start + timedelta(minutes=13), 1, Action.BATTERY, None)
+        flow = derive_power_flow(50, 1000, 1000)
+        await observer.async_observe(start + timedelta(minutes=14), 1, Action.GRID, 50)
+
+        assert runtime.battery_learner.capacity_samples_wh == []
+
+    asyncio.run(scenario())
+
+
+def test_battery_accounting_continues_while_household_meter_recovers() -> None:
+    from house_battery.evidence import EvidenceCollector
+    from house_battery.models import derive_power_flow
+    from house_battery.runtime import RuntimeState
+
+    async def scenario() -> None:
+        runtime = RuntimeState()
+        flow = None
+
+        async def save() -> None:
+            pass
+
+        observer = EvidenceCollector(lambda: runtime, lambda: flow, save, lambda: None)
+        start = datetime(2026, 10, 29, 10, tzinfo=UTC)
+        for minute in range(5):
+            flow = None if minute == 2 else derive_power_flow(50, 1000, 0)
+            await observer.async_observe(
+                start + timedelta(minutes=minute), 1, Action.BATTERY, 50,
+                battery_charge_power_w=0, battery_discharge_power_w=1000,
+                battery_learning_enabled=False,
+            )
+        flow = None
+        await observer.async_observe(
+            start + timedelta(minutes=15), 1, Action.BATTERY, None,
+            battery_learning_enabled=False,
+        )
+
+        interval = runtime.ledger.intervals[0]
+        assert interval.battery_discharge_kwh == pytest.approx(1 / 15)
+        assert interval.load_kwh == pytest.approx(1 / 30)
+
+    asyncio.run(scenario())
 
 
 def test_complete_battery_interval_books_net_savings_after_wear() -> None:
@@ -303,9 +546,9 @@ def test_coordinator_publishes_battery_finances_to_sensors(
     with_evidence: bool,
 ) -> None:
     """Battery telemetry reaches every financial entity without household flow."""
-    from homeassistant.core import HomeAssistant
     import homeassistant.util.dt as dt_util
     import house_battery.coordinator as coordinator_module
+    from homeassistant.core import HomeAssistant
     from house_battery.coordinator import Fbp1200Coordinator
     from house_battery.runtime import RuntimeState
     from house_battery.sensor import SENSORS, FbpValueSensor
@@ -338,7 +581,7 @@ def test_coordinator_publishes_battery_finances_to_sensors(
 
     class FrozenDatetime(datetime):
         @classmethod
-        def now(cls, tz=None):  # noqa: ANN001 - stdlib signature
+        def now(cls, tz=None):
             return now.astimezone(tz) if tz else now.replace(tzinfo=None)
 
     async def scenario() -> Fbp1200Coordinator:

@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from math import isfinite
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CONF_ACCOUNTING_LOAD_POWER,
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
-    CONF_ACCOUNTING_LOAD_POWER,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
@@ -35,6 +36,24 @@ _REQUIRED = (
     CONF_BATTERY_DISCHARGE_POWER,
 )
 _PHYSICAL = (*_REQUIRED, CONF_FAULT, CONF_ONLINE)
+_NUMERIC = (
+    CONF_SOC, CONF_LOAD_POWER, CONF_GRID_IMPORT_POWER, CONF_ACCOUNTING_LOAD_POWER,
+    CONF_BATTERY_CHARGE_POWER, CONF_BATTERY_DISCHARGE_POWER,
+)
+
+
+def fresh_numeric_value(value: Any, now: datetime) -> float | None:
+    """Accept finite physical measurements only while their report is fresh."""
+    if value is None:
+        return None
+    reported = getattr(value, "last_reported", None) or value.last_updated
+    if now - reported.astimezone(UTC) > TELEMETRY_STALE_AFTER:
+        return None
+    try:
+        number = float(value.state)
+    except (TypeError, ValueError):
+        return None
+    return number if isfinite(number) else None
 
 
 def get_health_problems(
@@ -52,12 +71,23 @@ def get_health_problems(
         # the built-in TCP adapter. Only physical grid availability still
         # needs an HA source, and it is a binary template, so it must not be
         # treated as a continuously-refreshing meter.
-        required = (CONF_GRID_AVAILABLE,)
+        required = (CONF_GRID_AVAILABLE,) + tuple(
+            key for key in (CONF_GRID_IMPORT_POWER, CONF_ACCOUNTING_LOAD_POWER)
+            if config.get(key)
+        )
     problems = [
         f"{key} unavailable"
         for key in required
         if (value := state(key)) is None or value.state.lower() in _BAD_STATES
     ]
+    for key in required:
+        if key in _NUMERIC and (value := state(key)) is not None:
+            try:
+                valid = isfinite(float(value.state))
+            except (TypeError, ValueError):
+                valid = False
+            if not valid and value.state.lower() not in _BAD_STATES:
+                problems.append(f"{key} is not finite numeric telemetry")
     grid = state(CONF_GRID_AVAILABLE)
     if parse_grid_available(grid.state if grid else None) is None:
         problems.append("grid availability is unknown")

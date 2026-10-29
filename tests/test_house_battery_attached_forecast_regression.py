@@ -16,7 +16,6 @@ from house_battery.forecast import extend_known_horizon
 from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 
-
 FIXTURE = (
     Path(__file__).parent
     / "fixtures"
@@ -89,10 +88,15 @@ def test_known_prices_only_reproduce_the_agreed_two_day_plan() -> None:
     assert _operation_blocks(plan, now) == [
         ("2026-09-26T23:07:00+02:00", "2026-09-26T23:15:00+02:00", Action.GRID),
         ("2026-09-26T23:15:00+02:00", "2026-09-27T04:45:00+02:00", Action.BATTERY),
-        ("2026-09-27T04:45:00+02:00", "2026-09-27T14:30:00+02:00", Action.GRID),
-        ("2026-09-27T14:30:00+02:00", "2026-09-27T17:00:00+02:00", Action.CHARGE),
-        ("2026-09-27T17:00:00+02:00", "2026-09-28T00:00:00+02:00", Action.BATTERY),
+        ("2026-09-27T04:45:00+02:00", "2026-09-27T13:45:00+02:00", Action.GRID),
+        ("2026-09-27T13:45:00+02:00", "2026-09-27T17:15:00+02:00", Action.CHARGE),
+        ("2026-09-27T17:15:00+02:00", "2026-09-28T00:00:00+02:00", Action.BATTERY),
     ]
+    # The former full-power-only search produced objective 4.024185 DKK.
+    assert plan.optimization_objective_dkk < 4.024185
+    for slot in plan.slots:
+        delivered_wh = slot.battery_discharge_wh * settings.round_trip_efficiency**0.5
+        assert delivered_wh <= slot.expected_load_wh + 1e-8
 
 
 @pytest.mark.parametrize(
@@ -156,9 +160,11 @@ def test_attached_forecasts_change_the_plan_for_their_later_price_peaks(
     assert blocks[:4] == [
         ("2026-09-26T23:07:00+02:00", "2026-09-26T23:15:00+02:00", Action.GRID),
         ("2026-09-26T23:15:00+02:00", "2026-09-27T04:45:00+02:00", Action.BATTERY),
-        ("2026-09-27T04:45:00+02:00", "2026-09-27T13:30:00+02:00", Action.GRID),
-        ("2026-09-27T13:30:00+02:00", "2026-09-27T16:00:00+02:00", Action.CHARGE),
+        ("2026-09-27T04:45:00+02:00", "2026-09-27T13:45:00+02:00", Action.GRID),
+        ("2026-09-27T13:45:00+02:00", "2026-09-27T16:15:00+02:00", Action.CHARGE),
     ]
+    previous_objective = 18.057775 if forecast_name == "forecast_radius" else 17.267905
+    assert plan.optimization_objective_dkk <= previous_objective + 1e-6
     # The forecast-aware plan holds its charge across Sunday's known evening
     # peak, then uses it in a later forecast window selected by the full horizon.
     assert not any(

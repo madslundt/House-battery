@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 import homeassistant.util.dt as dt_util
 import house_battery.coordinator as coordinator_module
-from house_battery.dailyplan import DailyPlan
 from house_battery.const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
@@ -28,11 +27,96 @@ from house_battery.const import (
     CONF_SOC,
 )
 from house_battery.coordinator import Fbp1200Coordinator
+from house_battery.dailyplan import DailyPlan
 from house_battery.models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 from house_battery.runtime import RuntimeState
 
-
 NOW = datetime(2026, 9, 21, 10, tzinfo=UTC)
+
+
+def test_current_tariff_preserves_remaining_scheduled_load_and_mode(monkeypatch):
+    """Clip load at now without losing the tariff's existing operating action."""
+    from house_battery.planner import optimize
+    from test_house_battery_cutoff_gate import coordinator as make_coordinator
+
+    now = datetime(2026, 10, 29, 19, 45, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    async def scenario():
+        coord, client, hass, _ = await make_coordinator(now=now)
+        coord._local_snapshot = await client.async_snapshot()
+        coord.runtime.scheduled_loads = [{
+            "start": now.isoformat(),
+            "end": (now + timedelta(minutes=15)).isoformat(),
+            "additional_w": 1000,
+            "label": "Cooking",
+        }]
+        start = now.replace(minute=0)
+        hass.states.async_set("sensor.prices", "1", {"prices": [
+            {"start": (start + timedelta(hours=index)).isoformat(),
+             "end": (start + timedelta(hours=index + 1)).isoformat(), "price": 1}
+            for index in range(2)
+        ]})
+
+        slots = coord._price_slots(now)
+        assert slots[0].start == now
+        # 250 W baseline and 1000 W scheduled load both remain for 15 minutes.
+        assert slots[0].expected_load_wh == pytest.approx(312.5)
+        plan = optimize(
+            slots, now=now, soc=50, settings=coord._settings(),
+            current_action=Action.BATTERY,
+        )
+        assert plan.slots[0].expected_load_wh == pytest.approx(312.5)
+        assert plan.slots[0].action is Action.BATTERY
+
+    monkeypatch.setattr(coordinator_module, "datetime", Clock)
+    asyncio.run(scenario())
+
+
+def test_partial_charge_ceiling_stays_committed_across_minute_replans(monkeypatch):
+    from test_house_battery_cutoff_gate import coordinator as make_coordinator
+
+    clock = [datetime(2026, 10, 29, 19, 10, tzinfo=UTC)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            current = clock[0]
+            return current.astimezone(tz) if tz else current.replace(tzinfo=None)
+
+    async def scenario():
+        coord, client, hass, _ = await make_coordinator(now=clock[0])
+        client.soc = 23
+        start = clock[0].replace(minute=0)
+        end = start + timedelta(hours=1)
+        coord.runtime.daily_plan = DailyPlan(
+            date=start.date().isoformat(),
+            slots=(PlannedSlot(
+                start, end, Action.CHARGE, 1, 250, 383.333, 120, 0,
+                20, 26, .383333, .25, "Published partial charge",
+                charge_target_soc=26,
+            ),),
+        )
+        hass.states.async_set("sensor.prices", "1", {"prices": [
+            {"start": (start + timedelta(hours=index)).isoformat(),
+             "end": (end + timedelta(hours=index)).isoformat(), "price": price}
+            for index, price in enumerate([1, 5, 0])
+        ]})
+        for soc in (23, 24):
+            client.soc = soc
+            status = await coord._async_update_data()
+            assert status["executable_slot"]["charge_target_soc"] == 26
+            assert status["effective_target_soc"] == 26
+            assert client.calls[-2] == ("limits", 20, 26)
+            assert client.calls[-1][:2] == ("mode", "Charge")
+            clock[0] += timedelta(minutes=1)
+
+    monkeypatch.setattr(coordinator_module, "datetime", Clock)
+    asyncio.run(scenario())
 
 
 def _make_plan(slots) -> Plan:
@@ -87,9 +171,12 @@ def test_coordinator_selects_full_charge_only_when_opted_in_and_profitable() -> 
     assert decision.settings.target_soc == 100
     assert max(slot.soc_end for slot in decision.plan.slots) > 99
     assert all(
-        slot.charge_target_soc == 100
+        slot.charge_target_soc is not None
+        and settings.reserve_soc < slot.charge_target_soc <= 100
+        and slot.charge_target_soc == int(slot.charge_target_soc)
         for slot in decision.plan.slots if slot.action is Action.CHARGE
     )
+    assert any(slot.charge_target_soc == 100 for slot in decision.plan.slots)
 
 
 def test_plan_today_dict_filters_out_tomorrow() -> None:
@@ -228,7 +315,7 @@ def test_coordinator_executes_published_action_until_price_boundary(
 
     class FrozenDatetime(datetime):
         @classmethod
-        def now(cls, tz=None):  # noqa: ANN001 - stdlib signature
+        def now(cls, tz=None):
             if tz is None:
                 return fixed_now.replace(tzinfo=None)
             return fixed_now.astimezone(tz)
@@ -323,7 +410,7 @@ def test_coordinator_executes_published_action_until_price_boundary(
             },
         )
 
-        async def no_observation(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        async def no_observation(*args, **kwargs) -> None:
             return None
 
         coordinator.evidence.async_observe = no_observation
@@ -340,7 +427,7 @@ def test_coordinator_executes_published_action_until_price_boundary(
 
         async def capture_command(
             action: Action, now: datetime, **kwargs
-        ) -> tuple[bool, str]:  # noqa: ANN003
+        ) -> tuple[bool, str]:
             commanded.append((action, kwargs["target_soc"]))
             return True, "command captured"
 
@@ -397,7 +484,7 @@ def test_plan_view_spans_whole_local_day_at_utc_midnight(
 
     class FrozenDatetime(datetime):
         @classmethod
-        def now(cls, tz=None):  # noqa: ANN001 - stdlib signature
+        def now(cls, tz=None):
             if tz is None:
                 return fixed_now.replace(tzinfo=None)
             return fixed_now.astimezone(tz)

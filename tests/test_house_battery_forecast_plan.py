@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.models import Action, PriceSlot  # noqa: E402
-from house_battery.forecast_plan import (  # noqa: E402
+from house_battery.forecast_plan import (
     MIN_BLOCK_HOURS,
     ForecastBlock,
     build_forecast_plan,
 )
+from house_battery.models import Action, PriceSlot
 
-_ORIGIN = datetime(2026, 9, 25, 10, tzinfo=timezone.utc)
+_ORIGIN = datetime(2026, 9, 25, 10, tzinfo=UTC)
 
 
 def h(offset_hours: float) -> datetime:

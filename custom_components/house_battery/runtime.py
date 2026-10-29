@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from homeassistant.helpers.storage import Store
 
-from .accounting import EnergyLedger
+from .accounting import EnergyLedger, IntervalAccumulator
 from .actual_history import ActualDailyHistory
 from .const import (
     DECISION_HISTORY_LIMIT,
@@ -32,10 +32,13 @@ class RuntimeState:
     load_learner_source: str | None = None
     battery_learner: BatteryLearner = field(default_factory=BatteryLearner)
     ledger: EnergyLedger = field(default_factory=EnergyLedger)
+    accounting_interval: IntervalAccumulator | None = None
+    accounting_sample_at: datetime | None = None
     actual_history: ActualDailyHistory = field(default_factory=ActualDailyHistory)
     decisions: list[dict[str, Any]] = field(default_factory=list)
     scheduled_loads: list[dict[str, Any]] = field(default_factory=list)
     execution_enabled: bool = False
+    pending_safe: bool = False
     # Native SOC read-back cannot prove the separate backup output cuts off.
     # This remains false until independent physical verification is recorded.
     # It is diagnostic evidence, not an authorization gate for normal control.
@@ -131,10 +134,17 @@ class RuntimeState:
             "load_learner_source": self.load_learner_source,
             "battery_learner": self.battery_learner.as_dict(),
             "ledger": self.ledger.as_dict(),
+            "accounting_interval": (
+                self.accounting_interval.as_dict() if self.accounting_interval else None
+            ),
+            "accounting_sample_at": (
+                self.accounting_sample_at.isoformat() if self.accounting_sample_at else None
+            ),
             "actual_history": self.actual_history.as_dict(),
             "decisions": self.decisions[-500:],
             "scheduled_loads": self.scheduled_loads,
             "execution_enabled": self.execution_enabled,
+            "pending_safe": self.pending_safe,
             "backup_cutoff_verified": self.backup_cutoff_verified,
             "export_safety_fault_latched": self.export_safety_fault_latched,
             "last_action": self.last_action,
@@ -216,10 +226,17 @@ class RuntimeState:
                 if is_legacy
                 else EnergyLedger.from_dict(data.get("ledger", {}))
             ),
+            accounting_interval=(
+                None if is_legacy else IntervalAccumulator.from_dict(
+                    data.get("accounting_interval")
+                )
+            ),
+            accounting_sample_at=_parse_timestamp(data.get("accounting_sample_at")),
             actual_history=ActualDailyHistory.from_dict(data.get("actual_history", {})),
             decisions=list(data.get("decisions", []))[-500:],
             scheduled_loads=list(data.get("scheduled_loads", [])),
             execution_enabled=bool(data.get("execution_enabled", False)),
+            pending_safe=data.get("pending_safe") is True,
             backup_cutoff_verified=data.get("backup_cutoff_verified") is True,
             export_safety_fault_latched=bool(
                 data.get("export_safety_fault_latched", False)

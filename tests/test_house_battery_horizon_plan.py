@@ -30,8 +30,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from homeassistant.core import HomeAssistant
-
-from house_battery.const import CONF_LOAD_POWER, CONF_PRICE_ENTITIES, CONF_SOC
+from house_battery.const import (
+    CONF_GRID_AVAILABLE,
+    CONF_LOAD_POWER,
+    CONF_PRICE_ENTITIES,
+    CONF_SOC,
+)
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.dailyplan import (
     DailyPlan,
@@ -252,6 +256,8 @@ def test_coordinator_publishes_only_tomorrows_expected_savings(
         coordinator = _coordinator_with_prices(hass, now, [0.2] * 6 + [5.0] * 6, hours)
         coordinator.entry.data[CONF_SOC] = "sensor.soc"
         hass.states.async_set("sensor.soc", "50")
+        coordinator.entry.data[CONF_GRID_AVAILABLE] = "binary_sensor.grid"
+        hass.states.async_set("binary_sensor.grid", "on")
         coordinator.store.save = AsyncMock()
         coordinator.evidence.async_observe = AsyncMock()
         data = await coordinator._async_update_data()
@@ -651,7 +657,7 @@ def test_reconcile_keeps_future_soc_at_actual_and_history_projected() -> None:
         soc=actual_soc,
         settings=planner_settings(),
     )
-    day_start, day_end = local_day_bounds(now)
+    day_start, _day_end = local_day_bounds(now)
     # A projected historical head whose projected SOC does not match the
     # observed SOC (88% was the forecast, 73.5% is what we actually measure).
     existing = DailyPlan(
@@ -1101,7 +1107,7 @@ def test_tomorrow_plan_visible_when_tomorrow_prices_available() -> None:
         )
         return daily, day_start, horizon_end, now
 
-    daily, day_start, horizon_end, _now = asyncio.run(_build())
+    daily, day_start, _horizon_end, _now = asyncio.run(_build())
     tomorrow = (day_start + timedelta(days=1)).date()
     # Blocks are published for tomorrow, not silently dropped.
     assert any(s.start.date() >= tomorrow for s in daily.slots)

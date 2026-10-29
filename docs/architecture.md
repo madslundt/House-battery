@@ -86,7 +86,9 @@ the horizon ends.
 The FBP1200 reports charge/output power in its EMS registers. House Battery
 uses those readings as estimated battery throughput and in the persisted actual
 activity timeline; it does not use them for battery-capacity or efficiency
-learning. A separate canonical household flow is computed when an independent
+learning. Verified Idle input is excluded from battery throughput when the full
+control bank and every storage unit independently confirm zero battery flow;
+the raw power readings remain available in diagnostics. A separate canonical household flow is computed when an independent
 whole-house load measurement and grid meter are both available:
 
 - whole-house load power (from the optional accounting-load entity for
@@ -142,11 +144,12 @@ See `docs/commissioning.md` for how to verify the invariant on the physical unit
 
 The policy is an explainable adjustment around—not a bypass of—the planner. It
 builds normal-target and higher-target candidates with the same constraints
-and cost model. The higher target wins only when the user has opted in, known
-prices support both the extra charge and later discharge, the energy returns
-below the normal target within the known horizon, and realized savings improve
-after losses, wear, switching, and the required profit hurdle. Terminal value
-and forecast-only opportunities cannot activate it.
+and cost model. The higher target wins only when the user has opted in, it adds
+meaningful charging above the normal target, and the risk-adjusted objective
+improves after losses, wear, switching, and the required profit hurdle. Enabled
+forecasts retain their uncertainty buffers. Conservative terminal carryover value
+can also justify the higher target; a complete extra cycle within known prices
+is not required. Manual overrides retain the configured normal charge ceiling.
 
 ## Accounting and degradation
 

@@ -7,6 +7,7 @@ import logging
 import math
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -20,13 +21,12 @@ from .accounting import calendar_period_bounds
 from .actuator import LocalControlAdapter, soc_control_problems
 from .const import (
     CONF_ACCOUNTING_LOAD_POWER,
-    CONF_BATTERY_CHARGE_POWER,
-    CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
     CONF_GRID_ISOLATION_SWITCH,
     CONF_LOAD_POWER,
+    CONF_MAX_SOC_CONTROL,
     CONF_OPERATING_MODE,
     CONF_PRICE_ENTITIES,
     CONF_PRICE_FORECAST_ENTITIES,
@@ -42,9 +42,9 @@ from .const import (
     FORECAST_MAX_AGE,
     HIGH_SOC_DISCHARGE_DISCOUNT_DKK_PER_KWH,
     HIGH_SOC_DISCHARGE_THRESHOLD,
+    LOCAL_TCP_RECOVERY_GRACE,
     LOW_SOC_CHARGE_PREMIUM_DKK_PER_KWH,
     LOW_SOC_CHARGE_THRESHOLD,
-    LOCAL_TCP_RECOVERY_GRACE,
     MODE_BATTERY,
     MODE_CHARGE,
     MODE_GRID,
@@ -66,20 +66,21 @@ from .forecast import (
     extend_known_horizon,
 )
 from .forecast_plan import build_forecast_plan
-from .health import get_health_problems
+from .health import fresh_numeric_value, get_health_problems
 from .learning import LoadLearner
 from .local_tcp import (
     FbpLocalSnapshot,
     FbpLocalTcpClient,
     FbpTelemetryValidator,
     LocalProtocolError,
+    observed_battery_power,
     operating_mode_from_controls,
 )
 from .models import (
     Action,
     Plan,
-    PlannerSettings,
     PlannedSlot,
+    PlannerSettings,
     PowerFlowSnapshot,
     PriceSlot,
     derive_power_flow,
@@ -160,6 +161,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._commanded_local_mode = MODE_SAFE
         self._observed_local_mode: str | None = None
         self._startup_control_gate_reason: str | None = None
+        self._planning_revision = 0
+        self._safe_request_id = 0
+        self._refresh_lock = asyncio.Lock()
+        self._unloading = False
         self.actuator = LocalControlAdapter(
             hass,
             lambda: self.config,
@@ -237,15 +242,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         # TCP snapshot. Optional whole-house measurements are read from HA.
         if self.is_direct_local and self._local_snapshot is not None and key == CONF_SOC:
             return self._local_snapshot.soc
-        state = self._state(key)
-        try:
-            return (
-                float(state.state)
-                if state and state.state.lower() not in _BAD_STATES
-                else default
-            )
-        except (TypeError, ValueError):
-            return default
+        value = fresh_numeric_value(self._state(key), datetime.now(UTC))
+        return value if value is not None else default
 
     def _load_power(self, default: float | None = None) -> float | None:
         """Return only a configured or explicitly confirmed connected-load value.
@@ -306,16 +304,18 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         meter entities are both configured.
         """
         now = datetime.now(UTC)
-        if self.is_direct_local:
-            # MeterTotalActivePower is not a whole-house grid meter. Only use
-            # balanced flow when both independent household measurements are
-            # explicitly bound; local off-grid load remains the planner input.
-            if not self.config.get(CONF_GRID_IMPORT_POWER) or not self.config.get(
-                CONF_ACCOUNTING_LOAD_POWER
-            ):
-                return None
+        # Balanced flow needs independent household measurements. The device's
+        # MeterTotalActivePower is not a whole-house grid meter.
+        if self.is_direct_local and (
+            not self.config.get(CONF_GRID_IMPORT_POWER)
+            or not self.config.get(CONF_ACCOUNTING_LOAD_POWER)
+        ):
+            return None
+        soc = self._float(CONF_SOC)
+        if soc is None:
+            return None
         return derive_power_flow(
-            self._float(CONF_SOC),
+            soc,
             self._float(CONF_ACCOUNTING_LOAD_POWER)
             if self.is_direct_local
             else self._float(CONF_LOAD_POWER),
@@ -337,8 +337,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if self.is_direct_local and self._local_snapshot is not None:
             threshold = FLOW_UI_ACTIVE_THRESHOLD_W
-            charge = float(self._local_snapshot.raw_reported_charge_power_w or 0)
-            output = float(self._local_snapshot.raw_reported_output_power_w or 0)
+            charge, output = observed_battery_power(
+                self._local_snapshot, self._local_controls
+            )
             load = float(self._local_snapshot.off_grid_load_total_w or 0)
             if charge > threshold:
                 return "charging"
@@ -586,8 +587,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         for slot in slots:
             if slot.end <= now:
                 continue
+            remaining_start = max(slot.start, now)
             load_w = self.runtime.load_learner.predict_w(
-                slot.start,
+                remaining_start,
                 current_load,
                 now=now,
             )
@@ -595,18 +597,22 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Unknown load is not a zero-watt forecast.  Without a live
                 # reading or sufficient learned profile, withhold the plan.
                 return []
-            scheduled_wh = self._scheduled_load_wh(slot.start, slot.end)
+            scheduled_wh = self._scheduled_load_wh(remaining_start, slot.end)
             # Known prices keep their full value. Forecast slots retain the
             # configured uncertainty so charging is priced conservatively high
             # and discharging conservatively low.
             result.append(
                 PriceSlot(
-                    slot.start,
+                    remaining_start,
                     slot.end,
                     slot.price,
-                    expected_load_wh=load_w * slot.hours + scheduled_wh,
+                    expected_load_wh=(
+                        load_w * (slot.end - remaining_start).total_seconds() / 3600
+                        + scheduled_wh
+                    ),
                     source=slot.source,
                     uncertainty_dkk_per_kwh=slot.uncertainty_dkk_per_kwh,
+                    tariff_start=slot.tariff_start or slot.start,
                 )
             )
         return result
@@ -656,6 +662,28 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             high_soc_discharge_discount_dkk_per_kwh=(
                 HIGH_SOC_DISCHARGE_DISCOUNT_DKK_PER_KWH
             ),
+            partial_charge_targets=self._partial_charge_targets(),
+        )
+
+    def _partial_charge_targets(self) -> tuple[int, ...] | None:
+        """Only plan ceilings supported by the bound native number control."""
+        if self.is_direct_local:
+            return None  # The local protocol supports integer SOC ceilings.
+        control = self._state(CONF_MAX_SOC_CONTROL)
+        if control is None:
+            return ()
+        try:
+            minimum = float(control.attributes["min"])
+            maximum = float(control.attributes["max"])
+            step = float(control.attributes["step"])
+        except (KeyError, TypeError, ValueError):
+            return ()
+        if not all(math.isfinite(v) for v in (minimum, maximum, step)) or step <= 0:
+            return ()
+        return tuple(
+            target for target in range(1, 101)
+            if minimum <= target <= maximum
+            and abs((target - minimum) / step - round((target - minimum) / step)) < 1e-6
         )
 
     def _optimize_with_storage_policy(
@@ -667,8 +695,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         settings: PlannerSettings,
         current_action: Action,
         committed_slot: PlannedSlot | None = None,
+        opportunistic_enabled: bool | None = None,
     ) -> OpportunisticPlanDecision:
         """Compare the normal plan with an opt-in higher-target candidate."""
+        enabled = (
+            self.runtime.opportunistic_charging_enabled
+            if opportunistic_enabled is None else opportunistic_enabled
+        )
         normal_plan = optimize(
             slots,
             now=now,
@@ -682,7 +715,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             target_soc=OPPORTUNISTIC_TARGET_SOC,
         )
         if (
-            not self.runtime.opportunistic_charging_enabled
+            not enabled
             or opportunistic_settings.target_soc <= settings.target_soc
         ):
             return select_opportunistic_plan(
@@ -690,7 +723,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 normal_plan,
                 settings,
                 opportunistic_settings,
-                enabled=self.runtime.opportunistic_charging_enabled,
+                enabled=enabled,
             )
         opportunistic_plan = optimize(
             slots,
@@ -731,31 +764,52 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _current_price(self, slots: list[PriceSlot], now: datetime) -> float | None:
         for slot in slots:
-            if slot.start <= now < slot.end:
+            if slot.start <= now < slot.end and math.isfinite(slot.price):
                 return slot.price
         for entity_id in self.config.get(CONF_PRICE_ENTITIES, []):
             state = self.hass.states.get(entity_id)
             try:
-                return float(state.state) if state else None
+                value = float(state.state) if state else None
+                if value is not None and math.isfinite(value):
+                    return value
             except (TypeError, ValueError):
                 continue
         return None
 
     async def _force_safe_if_needed(self, now: datetime) -> str:
-        if not self.runtime.execution_enabled:
+        if self._unloading:
+            return "integration unloading; economic commands revoked"
+        if not self.runtime.execution_enabled and not self.runtime.pending_safe:
             return "automatic writes disabled"
+        self.runtime.pending_safe = True
+        return await self._async_retry_safe(now)
+
+    async def _async_retry_safe(
+        self, now: datetime, *, allow_unloading: bool = False
+    ) -> str:
+        """Complete a safety request independently of economic authorization."""
+        if self._unloading and not allow_unloading:
+            return "safety request superseded by integration unload"
+        request_id = self._safe_request_id
+        await self.store.save(self.runtime)
+        if self._unloading and not allow_unloading:
+            return "safety request superseded by integration unload"
         success, result = await self.actuator.async_command(
             Action.SAFE, now, grid_available=self._grid_available()
         )
+        if request_id == self._safe_request_id:
+            self.runtime.pending_safe = not success
+        await self.store.save(self.runtime)
         self._record_command_result(success, result)
-        if success:
+        if success and self.runtime.execution_enabled:
             return f"{result}; writes resume automatically when health recovers"
         return result
 
     async def _restore_grid_during_pause(self, result: str) -> str:
         """Restore mains independently of unavailable/paused inverter controls."""
         if (
-            not self.is_direct_local
+            self._unloading
+            or not self.is_direct_local
             or not self.runtime.execution_enabled
         ):
             return result
@@ -829,6 +883,38 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.exception("House Battery recovery reload failed")
 
     async def _async_update_data(self) -> dict[str, Any]:
+        async with self._refresh_lock:
+            if self._unloading:
+                return self.data or {}
+            return await self._async_update_data_locked()
+
+    async def async_prepare_unload(self) -> None:
+        """Revoke old work and drain it before a replacement entry can write."""
+        stop_required = self.runtime.execution_enabled or self.runtime.pending_safe
+        self._unloading = True
+        self._planning_revision += 1
+        self.actuator.invalidate_pending_commands()
+        async with self._refresh_lock:
+            pass
+        await self.actuator.async_wait_for_idle()
+        if stop_required:
+            self._safe_request_id += 1
+            self.runtime.pending_safe = True
+            await self._async_retry_safe(datetime.now(UTC), allow_unloading=True)
+
+    async def async_cancel_unload(self) -> None:
+        """Resume fresh validation when Home Assistant cannot unload platforms."""
+        self._planning_revision += 1
+        self._unloading = False
+        self._startup_guard_passed = False
+        self._recovery_reload_scheduled = False
+        if self.runtime.execution_enabled:
+            self._startup_control_gate_reason = (
+                "Awaiting fresh validation after an unsuccessful integration unload"
+            )
+        await self.async_request_refresh()
+
+    async def _async_update_data_locked(self) -> dict[str, Any]:
         now = datetime.now(UTC)
         self.runtime.prune(now)
         local_problem: str | None = None
@@ -884,16 +970,21 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         action = self._observed_action()
         grid_available = self._grid_available()
         price = self._current_price(slots, now)
-        actual_charge_power = (
-            self._local_snapshot.raw_reported_charge_power_w
+        local_power = (
+            observed_battery_power(self._local_snapshot, self._local_controls)
             if self.is_direct_local and self._local_snapshot is not None
+            else None
+        )
+        actual_charge_power = (
+            local_power[0]
+            if local_power is not None
             else self.power_flow.battery_charge_power_w
             if self.power_flow is not None
             else None
         )
         actual_discharge_power = (
-            self._local_snapshot.raw_reported_output_power_w
-            if self.is_direct_local and self._local_snapshot is not None
+            local_power[1]
+            if local_power is not None
             else self.power_flow.battery_output_power_w
             if self.power_flow is not None
             else None
@@ -910,16 +1001,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             actual_discharge_power,
             price,
         )
-        if soc is not None:
-            await self.evidence.async_observe(
-                now,
-                price,
-                action,
-                soc,
-                battery_charge_power_w=actual_charge_power,
-                battery_discharge_power_w=actual_discharge_power,
-                battery_learning_enabled=not self.is_direct_local,
-            )
+        await self.evidence.async_observe(
+            now,
+            price,
+            action,
+            soc,
+            battery_charge_power_w=actual_charge_power,
+            battery_discharge_power_w=actual_discharge_power,
+            battery_learning_enabled=not self.is_direct_local,
+        )
 
         # The grid meter is the authoritative zero-export safety signal. Export
         # is only ever observed, never commanded; a large or persistent export
@@ -973,7 +1063,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             and direct_load_problem is None
             and (bool(problems) or grid_available is not True)
         )
-        if startup_waiting:
+        if self.runtime.pending_safe:
+            self.plan = None
+            state = "RECOVERING"
+            reason = "Completing the pending safe stop before economic control resumes"
+            command_result = await self._async_retry_safe(now)
+        elif startup_waiting:
             self.plan = None
             state = "BOOTSTRAP"
             reason = (
@@ -1033,21 +1128,83 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                             else math.ceil(committed_slot.soc_end),
                         ),
                     )
-                storage_decision = self._optimize_with_storage_policy(
-                    slots,
-                    now=now,
-                    soc=soc,
-                    settings=settings,
-                    current_action=current_action,
-                    committed_slot=committed_slot,
+                revision = self._planning_revision
+                storage_decision = await self.hass.async_add_executor_job(
+                    partial(
+                        self._optimize_with_storage_policy,
+                        list(slots),
+                        now=now,
+                        soc=soc,
+                        settings=settings,
+                        current_action=current_action,
+                        committed_slot=committed_slot,
+                        opportunistic_enabled=(
+                            self.runtime.opportunistic_charging_enabled
+                        ),
+                    )
                 )
+                if self._unloading:
+                    return self.data or {}
+                if revision != self._planning_revision:
+                    raise ValueError("Planning inputs changed; awaiting a fresh plan")
+                latest_grid = self._grid_available()
+                latest_problems = get_health_problems(
+                    self.hass, self.config, datetime.now(UTC)
+                )
+                if latest_grid is not True or latest_problems:
+                    grid_available = latest_grid
+                    problems.extend(p for p in latest_problems if p not in problems)
+                    raise ValueError("Physical inputs changed while planning")
+                # A meter can remain healthy while changing from import to
+                # export during the worker calculation. Reapply that safety
+                # signal immediately before publishing/commanding its result.
+                if self.config.get(CONF_GRID_IMPORT_POWER):
+                    latest_meter = self._float(CONF_GRID_IMPORT_POWER)
+                    if latest_meter is not None:
+                        export_w = normalize_grid_flow(latest_meter)[1]
+                        export_detected = export_w > FLOW_NOISE_FLOOR_W
+                        direct_grid_power = latest_meter if self.is_direct_local else None
+                        if (
+                            self.runtime.execution_enabled
+                            and export_w > EXPORT_SAFETY_W
+                        ):
+                            self.runtime.export_safety_fault_latched = True
+                            export_safety_fault = True
+                            await self.store.save(self.runtime)
+                            raise ValueError("Grid export detected while planning; control paused")
+                latest_soc = self._float(CONF_SOC)
+                if (
+                    latest_soc is not None
+                    and latest_soc <= settings.reserve_soc < soc
+                ):
+                    # Bound HA sensors can report the floor while the worker
+                    # runs. Rebuild just this interval from that observation
+                    # so the held discharge is cut now; the next refresh plans
+                    # the full horizon. A single interval has only three
+                    # transitions and does not need a long worker calculation.
+                    soc = latest_soc
+                    storage_decision = self._optimize_with_storage_policy(
+                        slots[:1], now=now, soc=soc, settings=settings,
+                        current_action=Action.GRID, opportunistic_enabled=False,
+                    )
                 self.plan = storage_decision.plan
                 effective_settings = storage_decision.settings
+                if self._override_action() is not None:
+                    effective_settings = replace(
+                        effective_settings, target_soc=settings.target_soc
+                    )
                 opportunistic_active = storage_decision.active
+                if self._override_action() is not None:
+                    opportunistic_active = False
                 opportunistic_reason = storage_decision.reason
                 opportunistic_incremental_savings = (
                     storage_decision.incremental_savings_dkk
                 )
+                if self._override_action() is not None:
+                    opportunistic_reason = (
+                        f"Manual override uses configured target {settings.target_soc:g}%"
+                    )
+                    opportunistic_incremental_savings = 0.0
             except ValueError as exc:
                 self.plan = None
                 problems.append(str(exc))
@@ -1083,13 +1240,25 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 horizon_end = (
                     self.plan.slots[-1].end if self.plan.slots else day_start
                 )
+                reserve_reached = soc <= effective_settings.reserve_soc
+                previous_slot = self.runtime.daily_plan.slot_at(now)
+                reserve_plan_cut = (
+                    reserve_reached
+                    and previous_slot is not None
+                    and previous_slot.action is Action.BATTERY
+                )
                 self.runtime.daily_plan = reconcile_daily_plan(
                     self.runtime.daily_plan,
                     self.plan.slots,
                     cutoff=now,
                     day_start=day_start,
                     horizon_end=horizon_end,
-                    discharge_enabled=effective_settings.discharge_enabled,
+                    # Actual SOC ends a held discharge immediately, even in
+                    # the middle of a tariff interval. Keep its executed head
+                    # and publish the fresh non-discharge tail from now.
+                    discharge_enabled=(
+                        effective_settings.discharge_enabled and not reserve_reached
+                    ),
                 )
                 published_slot = self.runtime.daily_plan.slot_at(now)
                 if published_slot is not None:
@@ -1161,8 +1330,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         else executable_action or self.plan.current_action
                     )
                     reserve_exit = (
-                        requested_action is Action.BATTERY
-                        and soc <= effective_settings.reserve_soc
+                        reserve_reached
+                        and (
+                            requested_action is Action.BATTERY
+                            or (reserve_plan_cut and requested_action is Action.GRID)
+                        )
                     )
                     if reserve_exit:
                         # Native discharge limits do not reconnect an isolated
@@ -1176,15 +1348,28 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # Direct-local units have no CT/grid-flow signal, so cap a
                     # manual discharge slot below the fresh connected-load
                     # reading. Missing load telemetry fails closed to 0 W.
-                    command_ok, command_result = await self.actuator.async_command(
-                        requested_action,
-                        now,
-                        target_soc=effective_settings.target_soc,
-                        load_w=self._load_power(),
-                    )
-                    if reserve_exit:
-                        command_result = f"reserve SOC protection: {command_result}"
-                    self._record_command_result(command_ok, command_result)
+                    if self.runtime.execution_enabled and not self.runtime.pending_safe:
+                        command_ok, command_result = await self.actuator.async_command(
+                            requested_action,
+                            now,
+                            target_soc=effective_settings.target_soc,
+                            load_w=self._load_power(),
+                        )
+                        superseded = command_result == (
+                            "command superseded by a safety request"
+                        )
+                        if not superseded:
+                            self._record_command_result(command_ok, command_result)
+                        if reserve_exit:
+                            command_result = f"reserve SOC protection: {command_result}"
+                    else:
+                        superseded = True
+                        command_result = "economic command superseded by a safety request"
+                    if superseded or not self.runtime.execution_enabled:
+                        state = (
+                            "RECOVERING" if self.runtime.execution_enabled else "SHADOW"
+                        )
+                        reason = "Economic control paused by a safety request"
 
         decision_key = (state, reason)
         decision_changed = decision_key != self._last_decision_key
@@ -1265,20 +1450,20 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         load_power = flow.load_w if flow else self._load_power()
         battery_charge_power = (
-            raw_charge_power
+            actual_charge_power
             if local_snapshot is not None
             else flow.battery_charge_power_w if flow else None
         )
         battery_output_power = (
-            raw_output_power
+            actual_discharge_power
             if local_snapshot is not None
             else flow.battery_output_power_w if flow else None
         )
         battery_power = (
-            raw_output_power - raw_charge_power
+            actual_discharge_power - actual_charge_power
             if local_snapshot is not None
-            and raw_output_power is not None
-            and raw_charge_power is not None
+            and actual_discharge_power is not None
+            and actual_charge_power is not None
             else flow.battery_net_power_w if flow else None
         )
         grid_power = (
@@ -1304,10 +1489,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "system_state": state,
             "healthy": (
                 not problems and not local_tcp_recovering and grid_available is True
+                and not self.runtime.pending_safe
             ),
             "reason": reason,
             "observed_action": action.value,
             "execution_enabled": self.runtime.execution_enabled,
+            "safe_stop_pending": self.runtime.pending_safe,
             "backup_cutoff_verified": self.runtime.backup_cutoff_verified,
             "battery_discharge_blocked": self.battery_discharge_blocked,
             "battery_discharge_blocked_reason": None,
@@ -1326,6 +1513,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_power_w": battery_power,
             "battery_charge_power_w": battery_charge_power,
             "battery_output_power_w": battery_output_power,
+            "raw_reported_battery_charge_power_w": raw_charge_power,
+            "raw_reported_battery_output_power_w": raw_output_power,
             "battery_power_source": (
                 "device telemetry"
                 if local_snapshot is not None
@@ -1523,6 +1712,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         return data
 
     async def async_set_execution_enabled(self, enabled: bool) -> None:
+        if self._unloading:
+            raise ValueError("House Battery is unloading")
         if enabled and not self.config.get(CONF_COMMISSIONED, False):
             raise ValueError(
                 "Commission the integration in Options before enabling control"
@@ -1532,13 +1723,17 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Automatic control requires commissioned native minimum and maximum "
                 f"SOC controls: {'; '.join(problems)}"
             )
-        if enabled and self.is_direct_local:
-            if problem := self._direct_load_problem():
-                raise ValueError(
-                    "Automatic control requires complete battery-served off-grid "
-                    f"load: {problem}"
-                )
+        if enabled and self.is_direct_local and (problem := self._direct_load_problem()):
+            raise ValueError(
+                "Automatic control requires complete battery-served off-grid "
+                f"load: {problem}"
+            )
         was_enabled = self.runtime.execution_enabled
+        self._planning_revision += 1
+        if not enabled:
+            self.actuator.invalidate_pending_commands()
+            self._safe_request_id += 1
+            self.runtime.pending_safe = was_enabled or self.runtime.pending_safe
         if enabled and not was_enabled:
             # A prior forced selection must never become active implicitly when
             # automatic control is re-armed.
@@ -1553,8 +1748,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.runtime.execution_enabled = enabled
         self._startup_control_gate_reason = None
         await self.store.save(self.runtime)
-        if was_enabled and not enabled:
-            await self.actuator.async_command(Action.SAFE, datetime.now(UTC))
+        if not enabled and self.runtime.pending_safe:
+            await self._async_retry_safe(datetime.now(UTC))
         await self.async_request_refresh()
 
     async def async_set_forecast_enabled(self, enabled: bool) -> None:
@@ -1563,17 +1758,22 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ValueError(
                 "Configure at least one external price forecast entity first"
             )
+        self._planning_revision += 1
         self.runtime.forecast_enabled = enabled
         await self.store.save(self.runtime)
         await self.async_request_refresh()
 
     async def async_set_opportunistic_charging_enabled(self, enabled: bool) -> None:
         """Opt in to a higher target only when a known profitable cycle exists."""
+        self._planning_revision += 1
+        self.actuator.invalidate_pending_commands()
         self.runtime.opportunistic_charging_enabled = enabled
         await self.store.save(self.runtime)
         await self.async_request_refresh()
 
     async def async_set_setting(self, key: str, value: float) -> None:
+        self._planning_revision += 1
+        self.actuator.invalidate_pending_commands()
         if key == "target_soc" and value < self.runtime.settings[key]:
             # An explicit user reduction cancels old held ceilings. Keep past
             # evidence intact; a newly justified opportunistic plan can still
@@ -1627,6 +1827,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         return []
 
     async def async_set_manual_mode(self, mode: str) -> None:
+        if self._unloading:
+            raise ValueError("House Battery is unloading")
         if not self.local_client:
             raise ValueError("This entity is only available for direct local setup")
         controls = await self.local_client.async_read_controls()
@@ -1681,6 +1883,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         if mode != OVERRIDE_AUTO and not self.runtime.execution_enabled:
             raise ValueError("Enable Automatic control before selecting a forced action")
+        self._planning_revision += 1
+        self.actuator.invalidate_pending_commands()
         self.runtime.override_action = mode
         await self.store.save(self.runtime)
         await self.async_request_refresh()
@@ -1688,12 +1892,17 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_force_safe(
         self, *, disable_automatic_control: bool = True
     ) -> None:
+        if self._unloading:
+            return
+        self._planning_revision += 1
+        self._safe_request_id += 1
+        self.actuator.invalidate_pending_commands()
+        self.runtime.pending_safe = True
         if disable_automatic_control:
             self.runtime.execution_enabled = False
         self.runtime.override_action = OVERRIDE_AUTO
         await self.store.save(self.runtime)
-        result = await self.actuator.async_command(Action.SAFE, datetime.now(UTC))
-        self._record_command_result(*result)
+        await self._async_retry_safe(datetime.now(UTC))
         await self.async_request_refresh()
 
     async def async_add_scheduled_load(

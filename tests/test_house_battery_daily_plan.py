@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -25,11 +26,10 @@ from house_battery.dailyplan import (
     merge_adjacent_blocks,
     reconcile_daily_plan,
 )
-from house_battery.models import Action, PlannerSettings, PlannedSlot, PriceSlot
+from house_battery.models import Action, PlannedSlot, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 from house_battery.sensor import daily_plan_blocks
 
-UTC = timezone.utc
 # A fixed +02:00 zone keeps the day-boundary tests deterministic while still
 # exercising timezone-aware (not UTC) calendar days.
 PLUS2 = timezone(timedelta(hours=2))
@@ -446,7 +446,6 @@ def test_consecutive_replans_never_accumulate_gaps_or_overlaps() -> None:
         assert_within_horizon(daily, day_start, day_end)
 
     # Every point in the day is covered by exactly one interval (no gaps/overlaps).
-    covered = 0.0
     previous_end = day_start
     for s in daily.slots:
         assert s.start == previous_end
@@ -648,7 +647,7 @@ def test_local_day_bounds_are_timezone_aware() -> None:
     assert end == datetime(2026, 9, 21, 0, 0, tzinfo=PLUS2)
     # A UTC instant that is still the previous local day is handled correctly.
     now_utc = datetime(2026, 9, 20, 23, 30, tzinfo=UTC)
-    start_utc, end_utc = local_day_bounds(now_utc)
+    start_utc, _end_utc = local_day_bounds(now_utc)
     assert start_utc == datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
 
 
@@ -794,7 +793,7 @@ def test_daily_plan_view_always_covers_the_complete_day() -> None:
     assert datetime.fromisoformat(entity_blocks[-1]["end"]) == datetime(
         2026, 9, 21, 0, 0, tzinfo=UTC
     )
-    for previous, current in zip(entity_blocks, entity_blocks[1:]):
+    for previous, current in pairwise(entity_blocks):
         previous_end = datetime.fromisoformat(previous["end"])
         current_start = datetime.fromisoformat(current["start"])
         assert previous_end == current_start

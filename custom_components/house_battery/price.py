@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
+from math import isfinite
 from statistics import median
 from typing import Any
 
@@ -31,7 +32,7 @@ def _datetime(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -48,13 +49,17 @@ def _row(row: Any) -> tuple[datetime, datetime | None, float] | None:
         price = float(raw_price)
     except (TypeError, ValueError):
         return None
-    if start is None:
+    if (
+        start is None or start.tzinfo is None or not isfinite(price)
+        or (end is not None and end.tzinfo is None)
+        or (row.get("end") is not None and end is None)
+    ):
         return None
     # Handle midnight rollover: intervals like 23:45→00:00 have end < start
     # because the end is on the next calendar day.  Add one day when the raw
     # end precedes the start, which is the standard way price feeds express
     # overnight intervals (e.g. 23:45-00:00).
-    if end is not None and end <= start:
+    if end is not None and end < start:
         end = end + timedelta(days=1)
     if (end is not None and end <= start) or price < -20 or price > 100:
         return None

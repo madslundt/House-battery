@@ -7,7 +7,9 @@ from typing import Any
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.loader import async_get_integration
 
+from .const import DOMAIN
 from .coordinator import Fbp1200Coordinator
 
 _REDACT = {
@@ -31,9 +33,10 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return the complete local evidence model with sensitive fields removed."""
     coordinator: Fbp1200Coordinator = entry.runtime_data
+    integration = await async_get_integration(hass, DOMAIN)
     return async_redact_data(
         {
-            "integration": {"version": "1.6.7", "title": entry.title},
+            "integration": {"version": str(integration.version), "title": entry.title},
             "configuration": coordinator.config,
             "export": coordinator.export_data(),
         },

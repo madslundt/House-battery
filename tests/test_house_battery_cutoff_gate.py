@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -337,4 +338,64 @@ def test_unverified_discharge_still_exits_at_reserve_soc():
         assert "reserve SOC protection" in status["command_result"]
         assert not coord.runtime.backup_cutoff_verified
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("override", ["auto", "battery"])
+@pytest.mark.parametrize("reserve_soc,soc", [(20, 19), (20, 20), (10, 0), (10, 10)])
+def test_reserve_soc_cuts_published_discharge_plan_immediately(
+    monkeypatch, override, reserve_soc, soc,
+):
+    """A physical reserve exit must also end the published battery block."""
+    import house_battery.coordinator as coordinator_module
+
+    now = datetime(2026, 10, 29, 19, 5, tzinfo=UTC)
+    clock = [now]
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            current = clock[0]
+            return current.astimezone(tz) if tz else current.replace(tzinfo=None)
+
+    async def scenario():
+        coord, client, hass, _ = await coordinator(override=override, now=now)
+        published = coord.runtime.daily_plan.slot_at(now)
+        coord.runtime.settings["reserve_soc"] = reserve_soc
+        client.soc = soc
+        if soc == 0:
+            # Empty telemetry is accepted after a confirming frame and must
+            # report no active battery output; exercise the real validator.
+            snapshot = replace(await client.async_snapshot(), discharge_power_w=0)
+
+            async def empty_snapshot():
+                return snapshot
+
+            monkeypatch.setattr(client, "async_snapshot", empty_snapshot)
+            coord._local_telemetry_validator.validate(snapshot, now - timedelta(minutes=1))
+
+        status = await coord._async_update_data()
+
+        assert hass.states.get("switch.grid_input").state == "on"
+        assert client.calls == [("grid_idle", reserve_soc, 90)]
+        assert status["executable_slot"]["action"] == "grid"
+        assert coord.runtime.daily_plan.slot_at(now).action is Action.GRID
+        stopped = [slot for slot in coord.runtime.daily_plan.slots
+                   if slot.start == published.start and slot.action is Action.BATTERY]
+        assert len(stopped) == 1
+        assert stopped[0].end == now
+        assert coord.runtime.decisions[-1]["action"] == "grid"
+
+        clock[0] += timedelta(seconds=30)
+        resumed = await coord._async_update_data()
+
+        assert hass.states.get("switch.grid_input").state == "on"
+        assert client.calls == [("grid_idle", reserve_soc, 90)] * 2
+        assert resumed["executable_slot"]["action"] == "grid"
+        assert coord.runtime.daily_plan.slot_at(clock[0]).action is Action.GRID
+        assert [slot for slot in coord.runtime.daily_plan.slots
+                if slot.start == published.start and slot.action is Action.BATTERY] == stopped
+        assert coord.runtime.decisions[-1]["action"] == "grid"
+
+    monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
     asyncio.run(scenario())

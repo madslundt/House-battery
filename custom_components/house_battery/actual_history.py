@@ -15,6 +15,7 @@ class ActualDailyHistory:
     days: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     last_sample_at: str | None = None
     sample_count: int = 0
+    _sample_continuity: bool = field(default=False, init=False, repr=False, compare=False)
 
     def prune(self, now: datetime) -> None:
         """Retain eight local calendar days, including after offline gaps."""
@@ -56,44 +57,44 @@ class ActualDailyHistory:
         prior_timestamp = (
             datetime.fromisoformat(self.last_sample_at) if self.last_sample_at else None
         )
-        elapsed = 0.0
-        if prior_timestamp is not None and prior_timestamp.date() == now.date():
-            elapsed = min(
-                120.0,
-                max(
-                    0.0,
-                    (
-                        now.astimezone(UTC) - prior_timestamp.astimezone(UTC)
-                    ).total_seconds(),
-                ),
-            )
+        gap = (
+            max(0.0, (now.astimezone(UTC) - prior_timestamp.astimezone(UTC)).total_seconds())
+            if prior_timestamp is not None else 0.0
+        )
+        offline_gap = prior_timestamp is not None and gap > 0 and (
+            not self._sample_continuity or gap > 120
+        )
+        elapsed = gap if (
+            prior_timestamp is not None and prior_timestamp.date() == now.date()
+            and not offline_gap
+        ) else 0.0
 
         charge = _nonnegative(charge_w)
         discharge = _nonnegative(discharge_w)
+        soc = _optional_number(soc)
+        price = _optional_number(price)
         action = _activity(charge, discharge)
         blocks = self.days.setdefault(day, [])
         block = blocks[-1] if blocks else None
+        if offline_gap:
+            if block is None or block["action"] != "unknown":
+                gap_start = max(
+                    prior_timestamp, now.replace(hour=0, minute=0, second=0, microsecond=0)
+                )
+                block = _new_block(gap_start.isoformat(), "unknown", None)
+                blocks.append(block)
+            block["end"] = timestamp
+        if action == "unknown" or (block is not None and block["action"] == "unknown"):
+            # A recovered sample cannot describe energy during the preceding
+            # unknown interval. Resume integration with the next fresh sample.
+            elapsed = 0.0
         if block is None or block["action"] != action:
             if block is not None:
                 block["end"] = (
-                    prior_timestamp.isoformat() if prior_timestamp else timestamp
+                    timestamp if block["action"] == "unknown"
+                    else prior_timestamp.isoformat() if prior_timestamp else timestamp
                 )
-            block = {
-                "start": timestamp,
-                "end": timestamp,
-                "action": action,
-                "soc_start": soc,
-                "soc_end": soc,
-                "soc_min": soc,
-                "soc_max": soc,
-                "charge_kwh": 0.0,
-                "discharge_kwh": 0.0,
-                "charge_cost_dkk": 0.0,
-                "discharge_value_dkk": 0.0,
-                "priced_charge_kwh": 0.0,
-                "priced_discharge_kwh": 0.0,
-                "samples": 0,
-            }
+            block = _new_block(timestamp, action, soc)
             blocks.append(block)
 
         hours = elapsed / 3600
@@ -122,6 +123,7 @@ class ActualDailyHistory:
 
         self.sample_count += 1
         self.last_sample_at = timestamp
+        self._sample_continuity = True
         # Keep one week of compact, coalesced daily blocks for review.
         self.days = dict(sorted(self.days.items())[-8:])
         activity_changed = block["samples"] == 1
@@ -195,7 +197,7 @@ class ActualDailyHistory:
         for day, blocks in data.get("days", {}).items():
             if not isinstance(day, str) or not isinstance(blocks, list):
                 continue
-            days[day] = [dict(block) for block in blocks if isinstance(block, dict)]
+            days[day] = [_restore_block(block) for block in blocks if isinstance(block, dict)]
         return cls(
             days=dict(sorted(days.items())[-8:]),
             last_sample_at=(
@@ -203,7 +205,7 @@ class ActualDailyHistory:
                 if isinstance(data.get("last_sample_at"), str)
                 else None
             ),
-            sample_count=max(0, int(data.get("sample_count", 0))),
+            sample_count=int(_nonnegative(data.get("sample_count")) or 0),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -242,3 +244,34 @@ def _optional_number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if isfinite(number) else None
+
+
+def _restore_block(value: dict[str, Any]) -> dict[str, Any]:
+    """Repair old JSON nulls without inventing priced energy evidence."""
+    block = dict(value)
+    for key in ("charge_kwh", "discharge_kwh", "priced_charge_kwh", "priced_discharge_kwh"):
+        block[key] = _nonnegative(block.get(key)) or 0.0
+    for cost_key, energy_key in (
+        ("charge_cost_dkk", "priced_charge_kwh"),
+        ("discharge_value_dkk", "priced_discharge_kwh"),
+    ):
+        cost = _optional_number(block.get(cost_key))
+        block[cost_key] = cost if cost is not None else 0.0
+        if cost is None:
+            block[energy_key] = 0.0
+    for key in ("soc_start", "soc_end", "soc_min", "soc_max"):
+        block[key] = _optional_number(block.get(key))
+    block["samples"] = int(_nonnegative(block.get("samples")) or 0)
+    block.setdefault("action", "unknown")
+    return block
+
+
+def _new_block(timestamp: str, action: str, soc: float | None) -> dict[str, Any]:
+    return {
+        "start": timestamp, "end": timestamp, "action": action,
+        "soc_start": soc, "soc_end": soc, "soc_min": soc, "soc_max": soc,
+        "charge_kwh": 0.0, "discharge_kwh": 0.0,
+        "charge_cost_dkk": 0.0, "discharge_value_dkk": 0.0,
+        "priced_charge_kwh": 0.0, "priced_discharge_kwh": 0.0,
+        "samples": 0,
+    }

@@ -9,6 +9,12 @@ charge/discharge power, round-trip losses, switching cost, degradation cost,
 and the minimum required profit. Mode switching cost is fixed internally;
 there is no user-configurable mode lock or daily transition budget.
 
+Charging may use a lower native SOC ceiling when that is enough for a profitable
+peak. The planner considers integer ceilings supported by the device; legacy
+provider controls retain their native bounds and step sizes. A published current
+interval keeps its charge ceiling until the tariff boundary. Manual overrides
+continue to use the configured normal ceiling.
+
 The internal low-SOC charging premium and high-SOC discharge margin discount
 change the optimizer's marginal energy value smoothly between their configured
 SOC breakpoints. They can favor restoring a depleted battery and using energy
@@ -18,9 +24,11 @@ cost, or reported plan savings.
 The switching cost discourages routine chattering. A partial first price slot
 continues the current action through its tariff boundary. During automatic
 operation, the integration applies the arbitrage reserve as the inverter's
-native minimum SOC before changing modes, so a failed mode command cannot
-expose stored reserve. The lower absolute emergency SOC is used only for the
-safe/outage mode.
+native minimum SOC before changing modes. Actual SOC independently ends a held
+discharge at the reserve and requests mains restoration. Native read-back does
+not establish a separate backup-output cutoff while mains are isolated. The
+lower absolute emergency SOC is requested only for a confirmed grid outage;
+ordinary safe requests and data faults preserve the arbitrage reserve.
 
 It therefore does not cycle the battery merely because the next interval is a
 little more expensive. The normal economic floor is **Arbitrage reserve SOC**;
@@ -28,12 +36,13 @@ little more expensive. The normal economic floor is **Arbitrage reserve SOC**;
 
 When **Allow opportunistic full charge** is enabled, the coordinator compares
 the normal-target plan with a second plan using a fixed 100% target. The higher
-target is selected only when known prices support
-a complete extra charge/discharge cycle, the added energy is scheduled back
-below the normal target before known prices end, and realized plan savings
-improve after round-trip losses, degradation, switching cost, and **Minimum
-required profit**. A forecast-only opportunity or terminal value assigned to
-unused stored energy cannot activate the higher target.
+target is selected when it adds meaningful charging and improves the planner's
+risk-adjusted objective after losses, degradation, switching cost, and **Minimum
+required profit**. That objective includes uncertainty-buffered forecasts when
+enabled and a conservative terminal value for energy carried beyond the horizon.
+The extra energy need not be discharged before known prices end, so estimated
+future value can justify charging even when cash savings within the horizon fall.
+Manual operating overrides always retain the configured normal charge ceiling.
 
 ## External price forecasts
 
