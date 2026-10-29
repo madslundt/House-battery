@@ -9,6 +9,15 @@ charge/discharge power, round-trip losses, switching cost, degradation cost,
 and the minimum required profit. Mode switching cost is fixed internally;
 there is no user-configurable mode lock or daily transition budget.
 
+If observed SOC is below **Arbitrage reserve SOC**, restoring the reserve is
+required even when that purchase cannot pay for itself through arbitrage. The
+planner chooses the cheapest feasible recovery within the contiguous known-price
+horizon, accounting for losses, power limits, and any held current interval.
+Cheaper forecast prices cannot postpone recovery beyond confirmed prices. If
+the known horizon is too short to restore the reserve, the plan recovers as much
+as physically possible. Optional charging and cycling above the reserve still
+use the normal profit rules. Recovery can make reported plan savings negative.
+
 Charging may use a lower native SOC ceiling when that is enough for a profitable
 peak. The planner considers integer ceilings supported by the device; legacy
 provider controls retain their native bounds and step sizes. A published current

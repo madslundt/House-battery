@@ -122,9 +122,10 @@ def test_reserve_is_never_crossed() -> None:
 
 
 @pytest.mark.parametrize("price", [5.0, -1.0])
-def test_below_reserve_energy_changes_only_by_feasible_charging(price: float) -> None:
+@pytest.mark.parametrize("source", ["known", "forecast"])
+def test_below_reserve_energy_changes_only_by_feasible_charging(price, source) -> None:
     """A drained battery cannot acquire its reserve without buying that energy."""
-    data = [PriceSlot(BASE, BASE + timedelta(minutes=1), price, 0)]
+    data = [PriceSlot(BASE, BASE + timedelta(minutes=1), price, 0, source)]
     plan = optimize(
         data, now=BASE, soc=0,
         settings=settings(
@@ -140,7 +141,7 @@ def test_below_reserve_energy_changes_only_by_feasible_charging(price: float) ->
     assert slot.grid_import_wh <= 20 + 1e-9
     assert slot.battery_charge_wh <= 18 + 1e-9
     assert slot.soc_end * 20 == pytest.approx(slot.battery_charge_wh)
-    if price > 0:
+    if price > 0 and source != "known":
         assert slot.action is Action.GRID
         assert slot.soc_end == 0
     else:
@@ -256,6 +257,85 @@ def test_exact_economic_wash_preserves_zero_throughput_path(price):
 
     assert plan.battery_throughput_kwh == 0
     assert all(slot.action is Action.GRID for slot in plan.slots)
+
+
+def test_depleted_battery_recovers_at_cheapest_known_price_without_arbitrage():
+    data = [
+        PriceSlot(BASE + timedelta(hours=i), BASE + timedelta(hours=i + 1), price, 0)
+        for i, price in enumerate([4, 1, 3])
+    ]
+    plan = optimize(
+        data, now=BASE, soc=1,
+        settings=settings(capacity_wh=2000, reserve_soc=10, round_trip_efficiency=.81),
+    )
+
+    assert [slot.action for slot in plan.slots] == [Action.GRID, Action.CHARGE, Action.GRID]
+    assert plan.slots[0].soc_end == 1
+    assert plan.slots[1].soc_end >= 10
+    assert plan.slots[1].charge_target_soc == 11
+    assert plan.slots[-1].soc_end >= 10
+    assert plan.expected_cost_dkk > plan.baseline_cost_dkk
+
+
+def test_recovery_cannot_wait_for_a_cheaper_forecast_after_known_prices_end():
+    data = [
+        PriceSlot(BASE, BASE + timedelta(hours=1), 4, 0),
+        PriceSlot(BASE + timedelta(hours=1), BASE + timedelta(hours=2), 3, 0),
+        PriceSlot(BASE + timedelta(hours=2), BASE + timedelta(hours=3), .01, 0, "forecast"),
+    ]
+    plan = optimize(
+        data, now=BASE, soc=1,
+        settings=settings(capacity_wh=2000, reserve_soc=10, round_trip_efficiency=.81),
+    )
+
+    assert plan.slots[0].action is Action.GRID
+    assert plan.slots[1].action is Action.CHARGE
+    assert plan.slots[1].price_source == "known"
+    assert plan.slots[1].soc_end >= 10
+
+
+def test_infeasible_recovery_uses_only_the_known_horizons_physical_charge_budget():
+    data = [
+        PriceSlot(BASE, BASE + timedelta(minutes=1), 4, 0),
+        PriceSlot(BASE + timedelta(minutes=1), BASE + timedelta(minutes=2), 1, 0),
+        PriceSlot(BASE + timedelta(minutes=2), BASE + timedelta(hours=1), .01, 0, "forecast"),
+    ]
+    plan = optimize(
+        data, now=BASE, soc=0,
+        settings=settings(capacity_wh=2000, reserve_soc=10, round_trip_efficiency=.81),
+    )
+
+    assert [slot.action for slot in plan.slots[:2]] == [Action.CHARGE, Action.CHARGE]
+    assert plan.slots[1].soc_end == 1.5  # Two feasible 15 Wh discretized movements.
+    for slot in plan.slots[:2]:
+        assert slot.grid_import_wh <= 20
+        assert slot.battery_charge_wh <= 18
+
+
+def test_recovery_keeps_the_profit_hurdle_for_optional_discharge():
+    data = [
+        PriceSlot(BASE + timedelta(hours=i), BASE + timedelta(hours=i + 1), price, load)
+        for i, (price, load) in enumerate([(4, 0), (1, 0), (3, 100)])
+    ]
+    plan = optimize(
+        data, now=BASE, soc=1,
+        settings=settings(
+            capacity_wh=2000, reserve_soc=10, round_trip_efficiency=.81,
+            minimum_profit_dkk_per_kwh=10,
+        ),
+    )
+
+    assert plan.slots[1].action is Action.CHARGE
+    assert plan.slots[1].charge_target_soc == 11
+    assert all(slot.battery_discharge_wh == 0 for slot in plan.slots)
+
+
+def test_observed_reserve_soc_does_not_force_recovery_for_quantization_only():
+    data = [PriceSlot(BASE, BASE + timedelta(hours=1), 5, 0)]
+    plan = optimize(data, now=BASE, soc=10, settings=settings(reserve_soc=10))
+
+    assert plan.slots[0].action is Action.GRID
+    assert plan.battery_throughput_kwh == 0
 
 
 def test_target_is_never_crossed() -> None:

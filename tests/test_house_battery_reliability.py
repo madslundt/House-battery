@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -24,6 +25,55 @@ from house_battery.const import (
 from house_battery.local_tcp import LocalProtocolError
 from house_battery.models import Action, PriceSlot
 from test_house_battery_cutoff_gate import coordinator
+
+
+def test_depleted_battery_publishes_cheapest_known_recovery_and_keeps_current_grid(monkeypatch):
+    import house_battery.coordinator as module
+
+    now = datetime(2026, 10, 29, 21, 7, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    async def scenario():
+        coord, client, hass, _ = await coordinator(now=now)
+        client.soc = 1
+        coord.runtime.settings.update({
+            "reserve_soc": 10, "minimum_profit_dkk_per_kwh": 10,
+            "charge_power_w": 1100,
+        })
+        published = coord.runtime.daily_plan.slots[0]
+        coord.runtime.daily_plan = replace(coord.runtime.daily_plan, slots=(replace(
+            published, action=Action.GRID, battery_discharge_wh=0,
+            grid_import_wh=published.expected_load_wh, soc_start=1, soc_end=1,
+        ),))
+        coord.runtime.last_action = "grid"
+        hass.states.async_set("switch.grid_input", "on")
+        hass.states.async_set("sensor.prices", "4", {"prices": [
+            {"start": (published.start + timedelta(minutes=15 * i)).isoformat(),
+             "end": (published.start + timedelta(minutes=15 * (i + 1))).isoformat(),
+             "price": price}
+            for i, price in enumerate([4, 4, 1, 10])
+        ]})
+
+        status = await coord._async_update_data()
+
+        assert status["healthy"]
+        assert status["executable_slot"]["action"] == "grid"
+        charges = [slot for slot in coord.runtime.daily_plan.slots
+                   if slot.action is Action.CHARGE]
+        assert len(charges) == 1
+        assert charges[0].start == published.start + timedelta(minutes=30)
+        assert "Restore reserve" in charges[0].reason
+        assert coord.runtime.daily_plan.slots[-1].soc_end >= 10
+        assert all(slot.battery_discharge_wh == 0 for slot in coord.plan.slots)
+        assert not any(call[:2] == ("mode", "Charge") for call in client.calls)
+        assert hass.states.get("switch.grid_input").state == "on"
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("operation", ["disable", "force_safe"])

@@ -481,6 +481,17 @@ def optimize(
     maximum_step = int(
         settings.capacity_wh * settings.target_soc / 100 // step_wh
     )
+    recovery_deadline: int | None = None
+    if soc < settings.reserve_soc and initial_step < minimum_step:
+        # Restoring an observed reserve deficit is a planning requirement,
+        # rather than an arbitrage purchase that must pay for itself. Constrain
+        # the known-price prefix only: an uncertain cheap forecast cannot push
+        # recovery beyond the last confirmed tariff. The cost objective still
+        # chooses when to buy recovery energy and values any optional cycling.
+        for index, slot in enumerate(valid):
+            if slot.source != "known":
+                break
+            recovery_deadline = index
     initial = _State(initial_step, current_action)
     layers: list[dict[_State, _Node]] = [{initial: _Node(0.0, 0.0, None, None)}]
     for slot_index, slot in enumerate(valid):
@@ -590,6 +601,15 @@ def optimize(
                 layer[next_state] = candidate
         if not layer:
             return Plan(now, (), 0, 0, 0, 0, 0, "No plan satisfies battery constraints")
+        if slot_index == recovery_deadline:
+            # Recover fully when possible; a short horizon or insufficient
+            # power may only permit partial recovery. Retain its best physical
+            # reserve coverage without inventing energy or relaxing limits.
+            recoverable_step = max(min(state.energy_step, minimum_step) for state in layer)
+            layer = {
+                state: node for state, node in layer.items()
+                if state.energy_step >= recoverable_step
+            }
         layers.append(layer)
 
     # An unavailable discharge path cannot redeem stored energy later. Giving
@@ -653,6 +673,11 @@ def optimize(
         next_energy = next_state.energy_step * step_wh
         baseline = max(0.0, slot.expected_load_wh) / 1000 * slot.price
         charge_target = node.charge_target_soc
+        if (
+            recovery_deadline is not None and slot.source == "known"
+            and charged_wh > 0 and previous_energy < minimum_step * step_wh
+        ):
+            reason = "Restore reserve at the cheapest feasible known prices; " + reason
         planned.append(
             PlannedSlot(
                 start=slot.start,

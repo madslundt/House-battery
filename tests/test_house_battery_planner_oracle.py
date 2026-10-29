@@ -27,6 +27,7 @@ class _OraclePath:
     objective_cost: float
     throughput_wh: float
     actions: tuple[Action, ...]
+    energy_steps: tuple[int, ...] = ()
 
 
 def _low_soc_area(start_wh: float, end_wh: float, settings: PlannerSettings) -> float:
@@ -178,6 +179,7 @@ def _oracle_transition(
         objective_cost=path.objective_cost + interval_cost,
         throughput_wh=path.throughput_wh + throughput_wh,
         actions=path.actions + (action,),
+        energy_steps=path.energy_steps + (new_step,),
     )
 
 
@@ -228,6 +230,25 @@ def _oracle(
                         alternatives.add(candidate)
             expanded.extend(alternatives)
         paths = expanded
+
+    if soc < settings.reserve_soc and initial_step < minimum_step:
+        known_prefix = 0
+        for slot in slots:
+            if slot.source != "known":
+                break
+            known_prefix += 1
+        if known_prefix:
+            # Inspect complete physical paths independently of DP pruning.
+            # Their stored energy at the confirmed-price boundary establishes
+            # the achievable reserve coverage required of the final winner.
+            coverage = min(
+                minimum_step,
+                max(path.energy_steps[known_prefix - 1] for path in paths),
+            )
+            paths = [
+                path for path in paths
+                if path.energy_steps[known_prefix - 1] >= coverage
+            ]
 
     discharge_efficiency = sqrt(settings.round_trip_efficiency)
     end = max(slot.end for slot in slots)
@@ -298,6 +319,31 @@ def _plan_key(
         throughput_wh,
         plan_slots[-1].action.value,
     )
+
+
+@pytest.mark.parametrize("reserve_soc,minutes", [(25, 60), (75, 15)])
+def test_recovery_matches_exhaustive_paths_at_the_known_forecast_boundary(reserve_soc, minutes):
+    configured = _settings(reserve_soc=reserve_soc)
+    data = _price_slots(
+        [4, 1, .01], minutes=[minutes, minutes, 60], loads_wh=[0, 0, 0],
+        sources=["known", "known", "forecast"], uncertainties=[0, 0, .25],
+    )
+    expected_key, expected_path = _oracle(
+        data, soc=0, settings=configured, current_action=Action.GRID,
+    )
+    plan = optimize(data, now=BASE, soc=0, settings=configured)
+
+    assert _plan_key(
+        plan.slots, plan.terminal_value_dkk,
+        settings=configured, current_action=Action.GRID,
+    ) == pytest.approx(expected_key)
+    assert plan.slots[1].soc_end == expected_path.energy_steps[1] * 25 / 200 * 100
+    if reserve_soc == 25:
+        assert plan.slots[1].soc_end >= reserve_soc
+        assert plan.slots[0].action is Action.GRID
+    else:
+        assert plan.slots[1].soc_end == 25  # Only 50 Wh can be restored before forecast.
+        assert all(slot.action is Action.CHARGE for slot in plan.slots[:2])
 
 
 @pytest.mark.parametrize(
