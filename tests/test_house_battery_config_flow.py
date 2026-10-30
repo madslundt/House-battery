@@ -37,7 +37,8 @@ from house_battery.const import (
 def test_options_can_remove_optional_bindings_selected_during_setup(direct_local: bool) -> None:
     async def scenario() -> None:
         submitted = {
-            CONF_GRID_AVAILABLE: "binary_sensor.grid", CONF_PRICE_ENTITIES: ["sensor.price"],
+            CONF_GRID_AVAILABLE: "binary_sensor.grid",
+            CONF_PRICE_ENTITIES: ["sensor.price", "binary_sensor.tomorrow"],
             CONF_COMMISSIONED: True,
         }
         optional = {
@@ -73,7 +74,7 @@ def test_options_can_remove_optional_bindings_selected_during_setup(direct_local
 
         assert all(not merged.get(key) for key in optional)
         assert not merged.get(CONF_PRICE_FORECAST_ENTITY)
-        assert merged[CONF_PRICE_ENTITIES] == ["sensor.price"]
+        assert merged[CONF_PRICE_ENTITIES] == ["sensor.price", "binary_sensor.tomorrow"]
         assert merged[CONF_COMMISSIONED]
 
     asyncio.run(scenario())

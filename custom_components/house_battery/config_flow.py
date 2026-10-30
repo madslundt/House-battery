@@ -77,7 +77,7 @@ def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
         _required(CONF_OPERATING_MODE, defaults): _entity("select"),
         _required(CONF_PRICE_ENTITIES, defaults): selector.EntitySelector(
             selector.EntitySelectorConfig(
-                domain="sensor", multiple=True
+                domain=["sensor", "binary_sensor"], multiple=True
             )
         ),
         _optional(CONF_PRICE_FORECAST_ENTITIES, defaults): selector.EntitySelector(
@@ -117,7 +117,7 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
         _optional(CONF_ACCOUNTING_LOAD_POWER, defaults): _entity("sensor"),
         _required(CONF_PRICE_ENTITIES, defaults): selector.EntitySelector(
             selector.EntitySelectorConfig(
-                domain="sensor", multiple=True
+                domain=["sensor", "binary_sensor"], multiple=True
             )
         ),
         _optional(CONF_PRICE_FORECAST_ENTITIES, defaults): selector.EntitySelector(
