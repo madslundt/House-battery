@@ -1,6 +1,8 @@
 """Tests for the public optimizer sensor catalogue."""
 
+import asyncio
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,11 +10,110 @@ from typing import Any
 
 import pytest
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
-from homeassistant.const import UnitOfEnergy, UnitOfPower
+from homeassistant.const import UnitOfEnergy, UnitOfPower, UnitOfTime
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.sensor import SENSORS, FbpValueSensor, daily_plan_blocks
+from house_battery.models import PlannerSettings, estimate_battery_runtime_hours
+from house_battery.sensor import (
+    SENSORS,
+    FbpBatteryRuntimeSensor,
+    FbpValueSensor,
+    daily_plan_blocks,
+)
+
+
+def _runtime_settings(**changes: float) -> PlannerSettings:
+    return replace(PlannerSettings(
+        capacity_wh=2000, reserve_soc=20, target_soc=90,
+        charge_power_w=1200, discharge_power_w=800,
+        round_trip_efficiency=0.81, degradation_cost_dkk_per_kwh=0,
+        minimum_profit_dkk_per_kwh=0, switching_penalty_dkk=0,
+    ), **changes)
+
+
+@pytest.mark.parametrize(("soc", "load", "hours"), [
+    (80, 250, 4.32), (100, 100, 14.4), (20, 250, 0), (10, 250, 0),
+])
+def test_runtime_uses_energy_above_reserve_and_discharge_losses(soc, load, hours):
+    assert estimate_battery_runtime_hours(soc, load, _runtime_settings()) == pytest.approx(hours)
+
+
+@pytest.mark.parametrize(("soc", "load"), [
+    (None, 250), (50, None), (50, 0), (50, -10),
+    (-1, 250), (101, 250), (float("nan"), 250), (float("inf"), 250),
+    (50, float("nan")), (50, float("inf")),
+])
+def test_runtime_does_not_invent_a_duration_without_valid_soc_and_load(soc, load):
+    assert estimate_battery_runtime_hours(soc, load, _runtime_settings()) is None
+
+
+@pytest.mark.parametrize("changes", [
+    {"capacity_wh": 0}, {"capacity_wh": float("inf")},
+    {"reserve_soc": -1}, {"reserve_soc": 101}, {"reserve_soc": float("nan")},
+    {"round_trip_efficiency": 0}, {"round_trip_efficiency": 1.1},
+    {"round_trip_efficiency": float("nan")},
+])
+def test_runtime_rejects_invalid_energy_settings(changes):
+    assert estimate_battery_runtime_hours(50, 250, _runtime_settings(**changes)) is None
+
+
+@pytest.mark.parametrize(("hours", "display"), [
+    (None, None), (0, "0 min"), (0.001, "<1 min"), (0.5, "30 min"),
+    (1, "1 h"), (4 + 20 / 60, "4 h 20 min"),
+    (1 + 59.8 / 60, "2 h"), (27.5, "1 d 3 h 30 min"), (48, "2 d"),
+])
+def test_runtime_has_a_human_readable_display(hours, display):
+    sensor = SimpleNamespace(coordinator=SimpleNamespace(data={"battery_runtime_hours": hours}))
+    assert FbpBatteryRuntimeSensor.native_value.fget(sensor) == display
+
+
+def test_numeric_runtime_is_an_optional_duration_sensor():
+    description = next(item for item in SENSORS if item.key == "battery_runtime_hours")
+    assert description.unit == UnitOfTime.HOURS
+    assert description.device_class is SensorDeviceClass.DURATION
+    assert description.state_class is SensorStateClass.MEASUREMENT
+    assert not description.enabled_by_default
+
+
+def test_human_runtime_is_enabled_and_explains_its_inputs():
+    sensor = FbpBatteryRuntimeSensor(SimpleNamespace(
+        entry=SimpleNamespace(entry_id="runtime"), config={}, device_info={},
+        data={"battery_runtime_hours": 4.32, "soc": 80, "load_power_w": 250,
+              "battery_runtime_reserve_soc": 20},
+    ))
+    assert sensor.entity_registry_enabled_default
+    assert sensor.native_value == "4 h 19 min"
+    assert sensor.extra_state_attributes == {
+        "hours": 4.32, "soc": 80, "load_power_w": 250, "reserve_soc": 20,
+    }
+
+
+def test_runtime_updates_from_live_load_even_while_grid_supplies_it():
+    from test_house_battery_cutoff_gate import coordinator as make_coordinator
+
+    async def scenario():
+        coord, client, hass, _ = await make_coordinator(override="grid")
+        coord.runtime.settings.update(capacity_kwh=2, reserve_soc=20, round_trip_efficiency=81)
+        client.soc = 80
+        status = await coord._async_update_data()
+        assert status["battery_runtime_hours"] == pytest.approx(4.32)
+        assert status["battery_runtime_reserve_soc"] == 20
+        # Promoted capacity and efficiency estimates replace configured fallbacks.
+        for _ in range(5):
+            coord.runtime.battery_learner.add_capacity_sample(1800)
+            coord.runtime.battery_learner.add_efficiency_sample(0.64)
+        status = await coord._async_update_data()
+        assert status["battery_runtime_hours"] == pytest.approx(3.456)
+        # A price-feed failure must not erase an otherwise valid physical estimate.
+        hass.states.async_remove("sensor.prices")
+        status = await coord._async_update_data()
+        assert status["battery_runtime_hours"] == pytest.approx(3.456)
+        client.unavailable = True
+        status = await coord._async_update_data()
+        assert status["battery_runtime_hours"] is None
+
+    asyncio.run(scenario())
 
 
 def _fake_daily_plan() -> dict[str, Any]:

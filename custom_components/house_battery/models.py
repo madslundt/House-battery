@@ -102,6 +102,32 @@ class PlannerSettings:
             raise ValueError("Partial charge targets must be integer SOC percentages")
 
 
+def estimate_battery_runtime_hours(
+    soc: float | None, load_w: float | None, settings: PlannerSettings
+) -> float | None:
+    """Estimate constant-load runtime to reserve using the planner's loss model.
+
+    This is independent of current charge/discharge mode and the tariff plan.
+    Zero or missing load has no finite runtime estimate.
+    """
+    values = (
+        soc, load_w, settings.capacity_wh, settings.reserve_soc,
+        settings.round_trip_efficiency,
+    )
+    if any(value is None or not math.isfinite(value) for value in values):
+        return None
+    if (
+        not 0 <= soc <= 100
+        or load_w <= 0
+        or settings.capacity_wh <= 0
+        or not 0 <= settings.reserve_soc <= 100
+        or not 0 < settings.round_trip_efficiency <= 1
+    ):
+        return None
+    usable_wh = settings.capacity_wh * max(0.0, soc - settings.reserve_soc) / 100
+    return usable_wh * math.sqrt(settings.round_trip_efficiency) / load_w
+
+
 @dataclass(frozen=True, slots=True)
 class PlannedSlot:
     """One executable, explainable optimizer decision."""

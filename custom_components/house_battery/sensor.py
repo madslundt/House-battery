@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
@@ -48,6 +48,15 @@ SENSORS = (
         unit=PERCENTAGE,
         precision=1,
         device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    FbpSensorDescription(
+        key="battery_runtime_hours",
+        name="Battery runtime hours",
+        icon="mdi:battery-clock",
+        unit=UnitOfTime.HOURS,
+        precision=2,
+        device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     FbpSensorDescription(
@@ -392,6 +401,7 @@ async def async_setup_entry(
     async_add_entities(
         [
             FbpSystemStateSensor(coordinator),
+            FbpBatteryRuntimeSensor(coordinator),
             FbpModeSensor(coordinator),
             FbpPowerSourceSensor(coordinator),
             FbpPlanSensor(coordinator),
@@ -466,6 +476,43 @@ class FbpSystemStateSensor(Fbp1200Entity, SensorEntity):
             "last_refresh",
         )
         return {key: self.coordinator.data.get(key) for key in keys}
+
+
+class FbpBatteryRuntimeSensor(Fbp1200Entity, SensorEntity):
+    """Show remaining runtime at the current connected load in human time."""
+
+    _attr_name = "Battery runtime"
+    _attr_icon = "mdi:battery-clock"
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "battery_runtime")
+
+    @property
+    def native_value(self) -> str | None:
+        hours = self.coordinator.data.get("battery_runtime_hours")
+        if hours is None:
+            return None
+        if 0 < hours < 1 / 60:
+            return "<1 min"
+        minutes = int(hours * 60 + 0.5)
+        days, minutes = divmod(minutes, 24 * 60)
+        whole_hours, minutes = divmod(minutes, 60)
+        parts = [
+            f"{value} {unit}"
+            for value, unit in ((days, "d"), (whole_hours, "h"), (minutes, "min"))
+            if value
+        ]
+        return " ".join(parts) or "0 min"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        return {
+            "hours": data.get("battery_runtime_hours"),
+            "soc": data.get("soc"),
+            "load_power_w": data.get("load_power_w"),
+            "reserve_soc": data.get("battery_runtime_reserve_soc"),
+        }
 
 
 class FbpNativeSocSensor(Fbp1200Entity, SensorEntity):

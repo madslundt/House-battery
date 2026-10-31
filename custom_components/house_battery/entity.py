@@ -19,6 +19,7 @@ DEFAULT_ENTITY_KEYS = frozenset(
         "system_state",
         "battery_mode",
         "soc",
+        "battery_runtime",
         "load_power_w",
         "battery_power_w",
         "current_price_dkk_per_kwh",

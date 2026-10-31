@@ -1,0 +1,13 @@
+[ 4732164ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.d18c2184997b3d3d.js:0
+[ 4733169ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.d18c2184997b3d3d.js:0
+[ 4735178ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.d18c2184997b3d3d.js:0
+[ 4738183ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.d18c2184997b3d3d.js:0
+[ 4742189ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.d18c2184997b3d3d.js:0
+[ 4747198ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.d18c2184997b3d3d.js:0
+[ 4752210ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.d18c2184997b3d3d.js:0
+[ 4757225ms] [ERROR] WebSocket connection to 'ws://homeassistant.local/api/websocket' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://homeassistant.local/frontend_latest/core.d18c2184997b3d3d.js:0
+[ 4763393ms] Object
+[ 4763394ms] Object
+[ 4763394ms] Object
+[ 4766285ms] [INFO] %cYou are doing it wrong! color: red; font-weight: bold @ http://homeassistant.local/hacsfiles/lovelace-card-mod/card-mod.js?hacstag=190927524421:0
+[ 4766286ms] [INFO] mod-card should NEVER be used with a card that already has a ha-card element, such as parking-3d-map-card @ http://homeassistant.local/hacsfiles/lovelace-card-mod/card-mod.js?hacstag=190927524421:0

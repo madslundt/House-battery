@@ -49,6 +49,8 @@ local TCP or command failures.
 | Entity | Plain-language description |
 | --- | --- |
 | **Battery state of charge** | Current usable battery percentage reported directly by the battery. |
+| **Battery runtime** | Estimated time to the configured reserve SOC at the current connected load, displayed as `4 h 20 min` or `1 d 3 h 30 min`. Enabled by default. Uses learned capacity and efficiency when ready, otherwise configured values, and the planner's discharge-loss model. Its `hours`, `soc`, `load_power_w`, and `reserve_soc` attributes expose the inputs and numeric duration. |
+| **Battery runtime hours** | Optional numeric version of **Battery runtime**, in hours, for charts and automations. |
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
 | **Local load diagnostics** | Direct-local entries only. Comparison of the FOSSiBOT whole-site meter, smart-load total, backup-load total, and every storage unit's off-grid reading. The complete per-storage off-grid total is automatically used for learning, planning, and automatic control; incomplete stack data fails closed. |
 | **Grid import power** | Current whole-site power bought from the grid; used for balanced evidence, export monitoring, and realized savings when paired with a whole-house load sensor. Optional for direct-local FBP1200 entries. |
@@ -66,6 +68,14 @@ local TCP or command failures.
 | **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before battery cycling is worthwhile. |
 | **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary opportunistic ceiling. |
 | **Extra storage policy** | `normal` or `active`, with the effective target and explanation in attributes. With opt-in enabled, meaningful extra charging can activate when it improves the risk-adjusted objective, including enabled forecasts and conservative value for energy left beyond the horizon. Manual overrides use the normal charge ceiling. |
+
+Runtime assumes the current load remains constant, without future charging.
+It remains available while charging or using the grid and does not predict when
+the price plan will next discharge. The calculation is
+`capacity Wh × max(SOC − reserve SOC, 0) / 100 × sqrt(round-trip efficiency) / load W`.
+It reports `0 min` at or below reserve and `<1 min` for a positive duration under
+one minute. Missing/invalid SOC or load, including zero load, produces an unknown
+estimate instead of an infinite duration.
 
 Battery financial totals update after each completed 15-minute ledger interval
 with sufficient telemetry. Only energy with known prices contributes to the

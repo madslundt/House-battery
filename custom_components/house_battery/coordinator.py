@@ -86,6 +86,7 @@ from .models import (
     PowerFlowSnapshot,
     PriceSlot,
     derive_power_flow,
+    estimate_battery_runtime_hours,
     normalize_grid_flow,
 )
 from .planner import optimize
@@ -1559,7 +1560,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             for name, (start, end) in period_bounds.items()
         }
-        capacity_kwh = self._settings().capacity_wh / 1000
+        runtime_settings = self._settings()
+        capacity_kwh = runtime_settings.capacity_wh / 1000
         nominal_capacity_kwh = self.runtime.settings["capacity_kwh"]
         equivalent_cycles = (
             self.runtime.ledger.total_discharge_kwh / capacity_kwh
@@ -1657,6 +1659,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Direct-local battery sensors always use device telemetry. Its
             # optional independent grid meter supplies whole-house accounting.
             "load_power_w": load_power,
+            "battery_runtime_hours": estimate_battery_runtime_hours(
+                soc, load_power, runtime_settings
+            ),
+            "battery_runtime_reserve_soc": runtime_settings.reserve_soc,
             "grid_flow_power_w": grid_power,
             "grid_import_power_w": grid_import_power,
             "grid_export_power_w": grid_export_power,
