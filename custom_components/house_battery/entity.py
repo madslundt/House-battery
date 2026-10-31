@@ -42,6 +42,8 @@ DEFAULT_ENTITY_KEYS = frozenset(
         "grid_import_power_w",
         "grid_export_power_w",
         "automatic_control",
+        "adaptive_planning",
+        "adaptation_status",
         "opportunistic_full_charge",
         "today_net_savings_dkk",
         "lifetime_net_savings_dkk",

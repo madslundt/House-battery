@@ -20,6 +20,7 @@ from homeassistant.util import dt as dt_util
 
 from .accounting import calendar_period_bounds
 from .actuator import LocalControlAdapter, soc_control_problems
+from .adaptive import adaptive_policy, plan_economics
 from .const import (
     CONF_ACCOUNTING_LOAD_POWER,
     CONF_COMMISSIONED,
@@ -66,6 +67,7 @@ from .forecast import (
     assess_external_forecast,
     detect_extreme_price_movement,
     extend_known_horizon,
+    forecast_adaptation,
 )
 from .forecast_plan import build_forecast_plan
 from .health import fresh_numeric_value, get_health_problems
@@ -129,6 +131,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_status = "not_configured"
         self._forecast_last_updated: str | None = None
         self._forecast_sources: dict[str, dict[str, Any]] = {}
+        self._forecast_adaptation: dict[str, Any] = {}
+        self._adaptation: dict[str, Any] = {}
+        self._adaptation_dirty = False
         self._forecast_planning_source: str | None = None
         # Coarse, non-detailed guideline over the *forecast* horizon only.
         # This is deliberately separate from ``self.plan``: the forecast is
@@ -448,25 +453,45 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         # stale; actual prices arriving later must still close its comparison.
         for accuracy in self.runtime.forecast_accuracies.values():
             accuracy.score_actual_prices(
-                known_slots, uncertainty_dkk_per_kwh=uncertainty
+                known_slots, uncertainty_dkk_per_kwh=uncertainty, now=now,
             )
+        known_end = max((slot.end for slot in known_slots), default=None)
         for source, forecast_slots in available_forecasts:
             accuracy = self.runtime.forecast_accuracy_for(source)
-            accuracy.record_forecasts(forecast_slots)
+            # Published prices are no longer a prediction. In particular,
+            # revised provider rows overlapping today's known prices must not
+            # manufacture perfect evidence for automatic source selection.
+            accuracy.record_forecasts(
+                [slot for slot in forecast_slots
+                 if known_end is None or slot.start >= known_end],
+                now=now,
+            )
             accuracy.score_actual_prices(
-                known_slots, uncertainty_dkk_per_kwh=uncertainty
+                known_slots, uncertainty_dkk_per_kwh=uncertainty, now=now,
             )
         self._forecast_evidence_changed = before != {
             source: accuracy.as_dict()
             for source, accuracy in self.runtime.forecast_accuracies.items()
         }
 
+        self._forecast_adaptation = forecast_adaptation(
+            [source for source in sources if any(
+                available_source == source for available_source, _ in available_forecasts
+            )],
+            self.runtime.forecast_accuracies,
+            now=now,
+            configured_uncertainty=uncertainty,
+            enabled=self.runtime.adaptive_enabled and self.runtime.forecast_enabled,
+        )
+        adaptive_sources = self._forecast_adaptation["sources"]
         extensions = {
             source: extend_known_horizon(
                 known_slots,
                 forecast_slots,
                 now=now,
-                uncertainty_dkk_per_kwh=uncertainty,
+                uncertainty_dkk_per_kwh=adaptive_sources[source][
+                    "effective_uncertainty_dkk_per_kwh"
+                ],
             )
             for source, forecast_slots in available_forecasts
         }
@@ -477,7 +502,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             # The opt-in forecast switch extends, but never replaces or bridges,
             # known prices. Sources are tried in configured order and every
             # forecast slot carries its uncertainty buffer into the optimizer.
-            for source in sources:
+            for source in self._forecast_adaptation["source_order"]:
                 extended = extensions.get(source, known_slots)
                 forecast_count = sum(
                     slot.source == "forecast" for slot in extended
@@ -513,6 +538,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ]
                     self._forecast_planning_source = source
                     self._forecast_used_slot_count = forecast_count
+                    source_data[source]["used_slots"] = forecast_count
                     break
             # Detect extreme price movements using available forecasts.
             # Only flag when future prices deviate sharply from the recent
@@ -554,7 +580,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "within_uncertainty_pct": accuracy.within_uncertainty_pct,
             }
         self._forecast_sources = source_data
-        self._forecast_source = sources[0] if sources else None
+        self._forecast_source = self._forecast_planning_source or (sources[0] if sources else None)
         primary = source_data.get(self._forecast_source or "", {})
         self._forecast_status = primary.get("status", "not_configured")
         self._forecast_last_updated = primary.get("last_updated")
@@ -646,7 +672,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             or values["capacity_kwh"] * 1000
         )
         efficiency, _ = self._planning_efficiency()
-        return PlannerSettings(
+        settings = PlannerSettings(
             capacity_wh=capacity,
             reserve_soc=values["reserve_soc"],
             target_soc=values["target_soc"],
@@ -664,6 +690,35 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             partial_charge_targets=self._partial_charge_targets(),
         )
+        decision = adaptive_policy(
+            settings,
+            enabled=self.runtime.adaptive_enabled,
+            efficiency_summary=self._efficiency_summary(datetime.now(UTC)),
+        )
+        self._adaptation = decision.as_dict()
+        self._record_adaptation(decision.settings)
+        return decision.settings
+
+    def _record_adaptation(self, settings: PlannerSettings) -> None:
+        """Persist changed policy evidence, rather than every planning refresh."""
+        snapshot = {
+            "state": self._adaptation["state"],
+            "planning_efficiency_pct": round(settings.round_trip_efficiency * 100, 2),
+            "effective_minimum_profit_dkk_per_kwh": settings.minimum_profit_dkk_per_kwh,
+            "forecast_source": self._forecast_planning_source,
+            "forecast_uncertainties": {
+                source: round(details["effective_uncertainty_dkk_per_kwh"], 2)
+                for source, details in self._forecast_adaptation.get("sources", {}).items()
+            },
+        }
+        previous = self.runtime.adaptive_history[-1] if self.runtime.adaptive_history else {}
+        if all(previous.get(key) == value for key, value in snapshot.items()):
+            return
+        self.runtime.adaptive_history.append({
+            "timestamp": datetime.now(UTC).isoformat(), **snapshot,
+        })
+        self.runtime.adaptive_history = self.runtime.adaptive_history[-100:]
+        self._adaptation_dirty = True
 
     def _efficiency_source(self) -> str:
         """Identify the meter, load, battery and capacity used by the evidence."""
@@ -1539,12 +1594,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self.runtime.decisions = self.runtime.decisions[-DECISION_HISTORY_LIMIT:]
             self._last_decision_key = decision_key
+        # Even paused/control-error branches publish adaptation diagnostics.
+        # Compute them before the final save so their audit survives a restart.
+        runtime_settings = self._settings()
         if (
             decision_changed
             or self._forecast_evidence_changed
             or self._daily_plan_dirty
             or actual_history_should_save
             or efficiency_should_save
+            or self._adaptation_dirty
         ):
             # RuntimeStore writes atomically, so persisting the whole runtime
             # publishes the reconciled daily plan without risk of a partial
@@ -1552,6 +1611,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             # no-op refresh does not rewrite storage every minute.
             await self.store.save(self.runtime)
             self._daily_plan_dirty = False
+            self._adaptation_dirty = False
 
         period_bounds = calendar_period_bounds(local_now)
         periods = {
@@ -1560,7 +1620,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             for name, (start, end) in period_bounds.items()
         }
-        runtime_settings = self._settings()
         capacity_kwh = runtime_settings.capacity_wh / 1000
         nominal_capacity_kwh = self.runtime.settings["capacity_kwh"]
         equivalent_cycles = (
@@ -1866,6 +1925,42 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "consecutive_command_failures": self._consecutive_command_failures,
             "last_refresh": now.isoformat(),
         }
+        data.update(plan_economics(self.plan, runtime_settings))
+        data["adaptation"] = {
+            **self._adaptation,
+            "planning_efficiency_pct": planning_efficiency * 100,
+            "planning_efficiency_source": planning_efficiency_source,
+            "measurement_entity": self.config.get(CONF_EFFICIENCY_GRID_POWER),
+            "planning_capacity_kwh": capacity_kwh,
+            "capacity_source": "learned" if learned_capacity else "configured",
+            "load_learning_confidence_pct": self.runtime.load_learner.confidence * 100,
+            "forecast_adaptation": self._forecast_adaptation,
+            "recent_changes": self.runtime.adaptive_history[-10:],
+        }
+        forecast_ready = any(
+            details["adaptive_ready"]
+            for details in self._forecast_adaptation.get("sources", {}).values()
+        )
+        forecasting_adaptive = self.runtime.adaptive_enabled and self.runtime.forecast_enabled
+        data["adaptation"]["recommendations"] = [
+            *self._adaptation["recommendations"],
+            {
+                "id": "forecast_reliability",
+                "severity": "info",
+                "status": "automatic" if forecast_ready else "awaiting_measurement"
+                if forecasting_adaptive else "disabled",
+                "message": (
+                    "Forecast error measurements automatically adjust uncertainty; "
+                    "provider preference changes only after comparable evidence"
+                    if forecast_ready else
+                    "Collecting genuine forecast comparisons: at least 24 covered hours "
+                    "across three days are required for automatic tuning"
+                    if forecasting_adaptive else
+                    "Automatic forecast tuning is off; configured uncertainty is retained"
+                ),
+                "evidence": self._forecast_adaptation,
+            },
+        ]
         if self._recovery_reload_scheduled and self._recovery_reload_reason:
             # Dispatch only after the refresh has assembled/published its state;
             # the short delay also lets a config entry finish initial setup.
@@ -1923,6 +2018,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         self._planning_revision += 1
         self.runtime.forecast_enabled = enabled
+        await self.store.save(self.runtime)
+        await self.async_request_refresh()
+
+    async def async_set_adaptive_enabled(self, enabled: bool) -> None:
+        """Use qualified evidence for tuning without rewriting manual settings."""
+        if self._unloading:
+            raise ValueError("House Battery is unloading")
+        self._planning_revision += 1
+        self.actuator.invalidate_pending_commands()
+        self.runtime.adaptive_enabled = enabled
         await self.store.save(self.runtime)
         await self.async_request_refresh()
 

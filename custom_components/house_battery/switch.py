@@ -19,6 +19,7 @@ async def async_setup_entry(
     async_add_entities(
         [
             FbpAutomaticControlSwitch(coordinator),
+            FbpAdaptivePlanningSwitch(coordinator),
             FbpExternalForecastSwitch(coordinator),
             FbpOpportunisticChargingSwitch(coordinator),
         ]
@@ -58,6 +59,57 @@ class FbpAutomaticControlSwitch(Fbp1200Entity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: object) -> None:
         await self.coordinator.async_set_execution_enabled(False)
+
+
+class FbpAdaptivePlanningSwitch(Fbp1200Entity, SwitchEntity):
+    """Opt in to evidence-based planning adjustments without changing limits."""
+
+    _attr_name = "Adaptive planning"
+    _attr_icon = "mdi:brain"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "adaptive_planning")
+
+    @property
+    def is_on(self) -> bool:
+        return getattr(self.coordinator.runtime, "adaptive_enabled", False)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        adaptation = self.coordinator.data.get("adaptation", {})
+        if not isinstance(adaptation, dict):
+            adaptation = {}
+        return {
+            "status": adaptation.get("state", "learning" if self.is_on else "disabled"),
+            "reason": adaptation.get("reason"),
+            "configured_minimum_profit_dkk_per_kwh": adaptation.get(
+                "configured_minimum_profit_dkk_per_kwh",
+                self.coordinator.runtime.settings.get("minimum_profit_dkk_per_kwh"),
+            ),
+            "effective_minimum_profit_dkk_per_kwh": adaptation.get(
+                "effective_minimum_profit_dkk_per_kwh"
+            ),
+            "automatic_changes": adaptation.get("automatic_changes", []),
+            "what_can_change": [
+                "minimum_profit_dkk_per_kwh",
+                "low_soc_charge_premium_dkk_per_kwh",
+                "high_soc_discharge_discount_dkk_per_kwh",
+                "forecast_uncertainty_dkk_per_kwh",
+                "forecast_source_priority",
+            ],
+            "manual_settings_retained": True,
+            "limits": "Configured SOC, capacity and charge/discharge power limits remain in force",
+        }
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        try:
+            await self.coordinator.async_set_adaptive_enabled(True)
+        except ValueError as exc:
+            raise HomeAssistantError(str(exc)) from exc
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        await self.coordinator.async_set_adaptive_enabled(False)
 
 
 class FbpExternalForecastSwitch(Fbp1200Entity, SwitchEntity):

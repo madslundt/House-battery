@@ -6,7 +6,8 @@ Every minute, House Battery validates local telemetry, retains each price
 source's valid interval duration, predicts the connected load, and uses a
 deterministic dynamic-programming plan. The plan respects SOC bounds, capacity,
 charge/discharge power, round-trip losses, switching cost, degradation cost,
-and the minimum required profit. Mode switching cost is fixed internally;
+and the effective minimum required profit. With adaptive planning off, this
+is the configured manual profit margin. Mode switching cost is fixed internally;
 there is no user-configurable mode lock or daily transition budget.
 
 If observed SOC is below **Arbitrage reserve SOC**, restoring the reserve is
@@ -53,6 +54,44 @@ The extra energy need not be discharged before known prices end, so estimated
 future value can justify charging even when cash savings within the horizon fall.
 Manual operating overrides always retain the configured normal charge ceiling.
 
+## Adaptive planning
+
+**Adaptive planning** is an opt-in control. It starts disabled for existing
+installations, retains every manual setting, and reports `learning` while the
+evidence is insufficient. After at least three consistent, independent
+matched-SOC periods qualify the real-meter efficiency estimate, its active
+policy evaluates net savings after conversion losses, wear and switching
+costs without adding an arbitrary extra profit margin or internal SOC-based
+price preferences. Turning it off restores
+the configured **Minimum required profit**; the number itself is never rewritten.
+
+Efficiency learning combines a true active-power grid meter, connected load,
+battery activity and matching starting/ending SOC. Charging energy is estimated
+after subtracting the load and a bracketed idle baseline; only confirmed
+battery-served load contributes delivered energy. Missing readings, unstable
+baselines and implausible cycles are rejected. A whole-home active-power meter
+is valid when its background load is sufficiently stable; a correctly scoped
+phase reading is another option. Apparent-power smart-plug readings are unsuitable.
+There is no fixed efficiency target: the configured fallback applies until the
+measured evidence qualifies, and stale or inconsistent evidence returns planning
+to that fallback.
+
+Adaptive forecast handling can raise the configured uncertainty floor when
+recent errors warrant it. It can compare forecast-source reliability over common
+scored coverage before changing source priority; extra history from one source
+alone is not proof that it is better. Known tariffs remain authoritative and the
+forecast switch still controls whether forecast intervals can drive planning.
+SOC reserves, charge ceilings, capacity, power limits and safety gates remain
+under their existing controls.
+
+**Adaptation status** explains `disabled`, `learning` or `active`, automatic
+changes, recommendations and their evidence. The optional **Planned bill
+savings**, **Planned wear cost** and **Planned switching cost** sensors separate
+the current horizon's electricity-bill benefit from modeled costs; bill savings
+do not include terminal credit for energy left in the battery. Compare these
+components when assessing a plan rather than treating expected future energy
+value as cash already earned.
+
 ## External price forecasts
 
 The optional ordered **External price forecast entities** use precisely the same list
@@ -72,9 +111,10 @@ configured uncertainty; it is never relabeled as a known tariff.
 Known prices remain authoritative. When **Use external price forecast** is
 off, forecast data are collected only for accuracy evidence. Overlapping
 sources are each scored independently against the actual known price. When it
-is on, the optimizer uses the first configured usable source that provides an
-uninterrupted sequence of forecast intervals
-starting immediately after the last known interval. It never overwrites known
+is on, the optimizer normally uses the first configured usable source that provides
+an uninterrupted sequence of forecast intervals starting immediately after the
+last known interval. Adaptive planning may change that priority using recent
+accuracy evidence over common scored coverage. It never overwrites known
 prices, fills a gap in them, or uses forecasts without a known-price horizon.
 It also rejects an unavailable/unknown entity, malformed row, empty or expired
 horizon, and data older than three hours. These are forecast-only conditions:
@@ -135,8 +175,9 @@ manufacturer diagnostics.
 Compare **Expected plan savings** with realized savings and **Load forecast
 mean absolute error**. Persistent load error suggests correcting sensor scope,
 adding scheduled loads, or allowing more history. Compare forecast MAE/bias
-with its uncertainty buffer: if MAE is routinely larger, increase the buffer
-or leave external forecasting disabled. If accuracy is consistently good but
+with its uncertainty buffer: adaptive planning can raise the floor from recent
+errors; otherwise increase the buffer or leave external forecasting disabled.
+If accuracy is consistently good but
 useful late-horizon opportunities are missed, cautiously reduce the buffer.
 
 Estimate ROI from comparable periods: `lifetime realized savings ÷ installed

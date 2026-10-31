@@ -145,6 +145,17 @@ SENSORS = (
         precision=2,
         device_class=SensorDeviceClass.MONETARY,
     ),
+    *(
+        FbpSensorDescription(
+            key=key, name=name, icon=icon, unit="DKK", precision=2,
+            device_class=SensorDeviceClass.MONETARY,
+        )
+        for key, name, icon in (
+            ("planned_bill_savings_dkk", "Planned bill savings", "mdi:cash-plus"),
+            ("planned_wear_cost_dkk", "Planned wear cost", "mdi:battery-heart-outline"),
+            ("planned_switching_cost_dkk", "Planned switching cost", "mdi:swap-horizontal"),
+        )
+    ),
     FbpSensorDescription(
         key="today_net_savings_dkk",
         name="Estimated realized savings today",
@@ -411,6 +422,7 @@ async def async_setup_entry(
             FbpPlannedLoadPowerSensor(coordinator),
             FbpStoragePolicySensor(coordinator),
             FbpBatteryLearningSensor(coordinator),
+            FbpAdaptationSensor(coordinator),
             FbpMeasuredRoundTripEfficiencySensor(coordinator),
             FbpPriceForecastAccuracySensor(coordinator),
             FbpDecisionHistorySensor(coordinator),
@@ -915,6 +927,34 @@ class FbpBatteryLearningSensor(Fbp1200Entity, SensorEntity):
             "learned_efficiency_pct",
         )
         return {key: self.coordinator.data.get(key) for key in keys}
+
+
+class FbpAdaptationSensor(Fbp1200Entity, SensorEntity):
+    """Expose adaptive decisions and recommendations with their evidence."""
+
+    _attr_name = "Adaptation status"
+    _attr_icon = "mdi:brain"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options: ClassVar[list[str]] = ["disabled", "learning", "active"]
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "adaptation_status")
+
+    @property
+    def native_value(self) -> str | None:
+        adaptation = self.coordinator.data.get("adaptation", {})
+        if not isinstance(adaptation, dict):
+            return None
+        value = adaptation.get("state", "disabled")
+        return value if value in self._attr_options else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        adaptation = self.coordinator.data.get("adaptation", {})
+        return {
+            key: value for key, value in adaptation.items() if key != "state"
+        } if isinstance(adaptation, dict) else {}
 
 
 class FbpMeasuredRoundTripEfficiencySensor(Fbp1200Entity, SensorEntity):

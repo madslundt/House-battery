@@ -51,6 +51,10 @@ class RuntimeState:
     transitions: list[str] = field(default_factory=list)
     forecast_enabled: bool = False
     opportunistic_charging_enabled: bool = False
+    # Evidence-gated economic tuning is separate from authorization to control
+    # hardware. Preserve the operator's manual settings for immediate opt-out.
+    adaptive_enabled: bool = False
+    adaptive_history: list[dict[str, Any]] = field(default_factory=list)
     # Manual operating override. `auto` follows the optimizer plan; a forced
     # mode (charge/battery/grid) commands that action every refresh so the
     # physical functions can be verified independently of the price plan.
@@ -82,6 +86,10 @@ class RuntimeState:
             local_now = now
         self.actual_history.prune(local_now)
         self.measured_efficiency.prune(now)
+        self.adaptive_history = [
+            item for item in self.adaptive_history
+            if _is_recent_timestamp(item.get("timestamp"), now - timedelta(days=30))
+        ][-100:]
         if self.daily_plan.date and self.daily_plan.date != local_now.date().isoformat():
             self.daily_plan = DailyPlan(date="")
         cutoff = now - timedelta(days=7)
@@ -156,6 +164,8 @@ class RuntimeState:
             "transitions": self.transitions[-100:],
             "forecast_enabled": self.forecast_enabled,
             "opportunistic_charging_enabled": self.opportunistic_charging_enabled,
+            "adaptive_enabled": self.adaptive_enabled,
+            "adaptive_history": self.adaptive_history[-100:],
             "forecast_accuracies": {
                 source: accuracy.as_dict()
                 for source, accuracy in self.forecast_accuracies.items()
@@ -187,6 +197,8 @@ class RuntimeState:
                     for source, accuracy in self.forecast_accuracies.items()
                 },
             },
+            "adaptive_enabled": self.adaptive_enabled,
+            "adaptive_history": self.adaptive_history[-100:],
         }
 
     @classmethod
@@ -256,6 +268,11 @@ class RuntimeState:
             opportunistic_charging_enabled=bool(
                 data.get("opportunistic_charging_enabled", False)
             ),
+            adaptive_enabled=data.get("adaptive_enabled") is True,
+            adaptive_history=[
+                dict(item) for item in (data.get("adaptive_history") or [])[-100:]
+                if isinstance(item, dict)
+            ] if isinstance(data.get("adaptive_history", []), list) else [],
             override_action=str(data.get("override_action", "auto") or "auto"),
             forecast_accuracies=accuracies,
             daily_plan=DailyPlan.from_dict(data.get("daily_plan", {})),

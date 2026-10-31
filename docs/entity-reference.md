@@ -10,7 +10,7 @@ safety are enabled by default only with a configured meter; household realized
 savings additionally need a whole-house load binding on direct-local entries.
 The external-forecast switch defaults enabled only with a configured source.
 
-Everyday writable controls are Automatic control, Force safe mode, Allow
+Everyday writable controls are Automatic control, Adaptive planning, Force safe mode, Allow
 opportunistic full charge, reserve/maximum SOC, charge/discharge power limits,
 and minimum required profit. Manual Operation mode, fallback battery settings,
 duplicate directional power readings, additional financial periods, and
@@ -35,6 +35,8 @@ when a dashboard or automation needs it. Subsequent reloads keep that choice.
 | **Export detected** | `on` when a configured grid meter reports power flowing to the grid above the noise floor. | Direct-local FBP1200 entries without a CT meter report this as unavailable; their manual discharge is capped below connected load and fails closed when that load is unavailable. |
 | **Export safety fault** | `on` after a configured meter reports export above the safety threshold. It latches and blocks inverter writes. | Meter-based fail-closed protection is available only when a grid meter is configured. After export stops, turn Automatic control off then on to reset the fault; the fault never turns the switch off by itself. |
 | **Automatic control** | Explicit permission for House Battery to issue local mode/limit writes. | Leave off during setup. It cannot turn on until the entry is commissioned and native SOC controls pass validation. |
+| **Adaptive planning** | Opt-in evidence-based tuning while retaining manual settings. | `learning` retains the configured profit margin until at least three consistent real-meter matched-SOC periods qualify. Once active, plans evaluate net benefit after wear and losses without an extra profit margin; forecast error allowances can rise above the manual floor. Turning it off restores manual planning preferences. It does not change SOC, capacity or power limits, and it does not grant automatic-control permission. |
+| **Adaptation status** | `disabled`, `learning`, or `active`, with the reason, automatic changes, recommendations and supporting evidence. | Inspect this enabled-by-default diagnostic to see what changed automatically and what still needs attention. Recommendations include a severity/status and evidence; they do not themselves change hardware limits. |
 | **Use external price forecast** | Enables valid, fresh forecast intervals after the end of known prices. | Leave it off while measuring forecast quality. Its `status` attribute explains `used`, `stale`, `invalid`, `empty`, or another non-use result; none of these affects known-price planning. |
 | **Allow opportunistic full charge** | Permits the optimizer to compare the normal target with the optional higher target. | Enable it only if occasional 100% charging is acceptable. Its attributes show whether the higher target is currently active, the incremental savings, and the reason. |
 | **Force safe mode** | Button that turns automatic control off and requests the configured safe local mode. | Use immediately if real battery behavior disagrees with the plan. |
@@ -60,12 +62,15 @@ local TCP or command failures.
 | **Native minimum/maximum SOC** | Read-only diagnostics for the battery's hardware SOC registers. | House Battery validates and writes limits through its local adapter; these sensors show the latest readback. |
 | **Current electricity price** | Price for the current known price interval. |
 | **Expected plan savings** | Forecast saving across the current planning horizon (known prices plus any enabled, valid extension) versus buying expected load from grid. It is a forecast, not cash earned. |
+| **Planned bill savings** | Optional estimate of electricity-bill savings over the current horizon before modeled wear and switching costs. Excludes terminal credit for energy left in the battery. |
+| **Planned wear cost** | Optional estimated battery-wear cost for the current plan, in DKK. Read alongside planned bill savings. |
+| **Planned switching cost** | Optional modeled cost of the current plan's action changes, in DKK. This is a planning allowance rather than a utility charge. |
 | **Estimated realized savings today/month/total** | Ledger estimate from sampled observed power and price. Direct-local FBP1200 entries need both a CT meter and whole-house load sensor for balanced grid/battery savings. Compare matching tariff periods, not one unusual day. |
 | **Average charge price / discharge value** | Energy-weighted known tariff for charge/discharge energy estimated by integrating reported battery power. Corresponding DKK cost/value totals are available. These are battery-energy tariff estimates, not a complete household bill calculation. |
 | **Battery charge cost / discharge value** | Recorded charge energy × tariff paid and discharge energy × tariff avoided, summed for today, yesterday, this/last week, this/last month, and total. Works from battery telemetry and known prices without a CT meter or whole-house load sensor. |
 | **Battery net savings** | Discharge value minus charge cost in DKK for the same periods. This is the battery's recorded monetary return before wear and purchase cost; it is separate from the balanced household **Estimated realized savings** estimate. |
 | **Known price spread** | Highest minus lowest price in the known future horizon. |
-| **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear **Minimum required profit** before battery cycling is worthwhile. |
+| **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear the effective profit margin; the configured **Minimum required profit** applies while adaptive planning is off or still learning. |
 | **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary opportunistic ceiling. |
 | **Extra storage policy** | `normal` or `active`, with the effective target and explanation in attributes. With opt-in enabled, meaningful extra charging can activate when it improves the risk-adjusted objective, including enabled forecasts and conservative value for energy left beyond the horizon. Manual overrides use the normal charge ceiling. |
 
@@ -107,7 +112,7 @@ known expensive window has enough forecast load to use the extra energy. With
 | **Estimated remaining capacity** | 100% minus the estimated degradation. |
 | **Learned usable capacity** | Capacity inferred from sufficiently stable charge/discharge observations. |
 | **Learned round-trip efficiency** | Qualified round-trip efficiency adopted by planning. With an efficiency grid meter bound, three consistent independent matched-SOC periods are required; otherwise the configured fallback applies. Legacy balanced-flow learning remains available without that binding. |
-| **Measured round-trip efficiency** | With a true active-power efficiency meter configured, estimates charging input after idle-baseline subtraction and connected load delivered across matching-SOC periods. Attributes identify candidate/qualified values, accepted periods, quality reason and the effective planning source. Without the meter, the original seven-day battery-telemetry ratio remains diagnostic only. |
+| **Measured round-trip efficiency** | With a true active-power efficiency meter configured, estimates charging input after idle-baseline subtraction and connected load delivered across matching-SOC periods. A stable whole-home meter or correctly scoped phase meter can be used. Attributes identify candidate/qualified values, accepted periods, quality reason and the effective planning source. There is no hardcoded target efficiency; the configured fallback applies until evidence qualifies. Without the meter, the original seven-day battery-telemetry ratio remains diagnostic only. |
 | **Battery learning** | `learning` until both capacity and efficiency are reliable; attributes show sample counts/readiness. |
 | **Load learning coverage** | Percentage of the 7-day, 15-minute demand profile with enough observations. Higher is better. |
 | **Load forecast mean absolute error** | Typical absolute load-forecast error in W. A persistent high value means inspect the load sensor scope or add scheduled loads. |
@@ -154,7 +159,7 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **Maximum discharge power** | Planner and native command power cap. | Lower discharge 800→500 W if the load path or battery behaves better at a lower sustained output. |
 | **Fallback round-trip efficiency** | Used before measured efficiency is ready. | Set 80% rather than 85% to make early plans more conservative. |
 | **Battery degradation cost** | Wear cost charged to each discharged kWh. | Raise 0.35→0.60 DKK/kWh if avoiding wear matters more than short-term savings. |
-| **Minimum required profit** | Extra margin required for discharge. | Raise 0.75→1.25 DKK/kWh to reject marginal cycles. |
+| **Minimum required profit** | Manual extra margin for discharge, retained when adaptive planning is enabled. | Raise 0.75→1.25 DKK/kWh to reject marginal cycles in manual planning. Qualified active adaptation evaluates net benefit after wear without adding this margin; disabling adaptation restores it. |
 | **Cycle-life reference** | Legacy fallback degradation model denominator. | Available only for legacy provider entries. Direct-local entries use an internal default because they lack a trustworthy grid/battery throughput balance. |
 | **External price forecast uncertainty** | Conservative error allowance for external price forecasts. Disabled by default. | Set 0.25 DKK/kWh if the forecast's MAE is about 0.20; forecast charging is evaluated 0.25 higher and discharge 0.25 lower. |
 

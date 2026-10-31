@@ -21,6 +21,7 @@ from house_battery.forecast import (
     assess_external_forecast,
     detect_extreme_price_movement,
     extend_known_horizon,
+    forecast_adaptation,
 )
 from house_battery.forecast_plan import ForecastPlan
 from house_battery.models import Action, PriceSlot
@@ -727,3 +728,244 @@ def test_stale_external_forecast_is_rejected_even_when_its_rows_are_valid() -> N
 
     assert assessment.status == "stale"
     assert not assessment.usable
+
+
+_ADAPT_NOW = datetime(2026, 10, 31, 12, tzinfo=UTC)
+
+
+def _adaptive_accuracy(
+    error: float, *, quarter_hour: bool = False, days: int = 3,
+    hours_per_day: int = 8, age_days: int = 3,
+) -> ForecastAccuracy:
+    accuracy = ForecastAccuracy()
+    cadence = timedelta(minutes=15) if quarter_hour else timedelta(hours=1)
+    predicted, actual = [], []
+    for day in range(days):
+        base = _ADAPT_NOW - timedelta(days=age_days - day)
+        for index in range(hours_per_day * (4 if quarter_hour else 1)):
+            start = base + cadence * index
+            predicted.append(PriceSlot(start, start + cadence, 1 + error))
+            actual.append(PriceSlot(start, start + cadence, 1))
+    accuracy.record_forecasts(predicted, now=predicted[0].start - timedelta(hours=1))
+    accuracy.score_actual_prices(actual, uncertainty_dkk_per_kwh=.35, now=_ADAPT_NOW)
+    return accuracy
+
+
+def _adapt(accuracies: dict[str, ForecastAccuracy], *, enabled: bool = True,
+           floor: float = .35, now: datetime = _ADAPT_NOW) -> dict:
+    return forecast_adaptation(
+        list(accuracies), accuracies, now=now,
+        configured_uncertainty=floor, enabled=enabled,
+    )
+
+
+def test_forecast_adaptation_raises_uncertainty_and_prefers_common_period_accuracy() -> None:
+    poor, good = _adaptive_accuracy(.6), _adaptive_accuracy(.1, quarter_hour=True)
+    result = _adapt({"poor": poor, "good": good})
+    assert result["source_order"] == ["good", "poor"]
+    assert result["sources"]["poor"]["adaptive_ready"]
+    assert result["sources"]["poor"]["covered_hours"] == 24
+    assert result["sources"]["poor"]["effective_uncertainty_dkk_per_kwh"] == pytest.approx(.6)
+    assert result["sources"]["good"]["effective_uncertainty_dkk_per_kwh"] == .35
+
+
+@pytest.mark.parametrize("quarter_hour", [False, True])
+def test_adaptive_confidence_counts_actual_hours_not_forecast_rows(quarter_hour: bool) -> None:
+    accuracy = _adaptive_accuracy(.8, quarter_hour=quarter_hour, hours_per_day=2)
+    source = _adapt({"source": accuracy})["sources"]["source"]
+    assert source["covered_hours"] == 6
+    assert not source["adaptive_ready"]
+    assert source["effective_uncertainty_dkk_per_kwh"] == .35
+
+
+def test_twenty_four_hours_from_one_day_are_not_enough_for_adaptation() -> None:
+    accuracy = _adaptive_accuracy(.8, days=1, hours_per_day=24, age_days=1)
+    source = _adapt({"source": accuracy})["sources"]["source"]
+    assert source["covered_hours"] == 24
+    assert not source["adaptive_ready"]
+
+
+def test_legacy_aggregate_scores_remain_display_only_and_never_drive_adaptation() -> None:
+    legacy = ForecastAccuracy.from_dict({
+        "errors_dkk_per_kwh": [.9] * 1000, "within_uncertainty": [False] * 1000,
+    })
+    assert legacy.samples == 1000
+    assert legacy.mean_absolute_error_dkk_per_kwh == .9
+    source = _adapt({"legacy": legacy})["sources"]["legacy"]
+    assert not source["adaptive_ready"]
+    assert source["covered_hours"] == 0
+    assert source["effective_uncertainty_dkk_per_kwh"] == .35
+
+
+def test_stale_error_evidence_cannot_raise_uncertainty_or_change_priority() -> None:
+    scores = {"poor": _adaptive_accuracy(.9), "good": _adaptive_accuracy(.1)}
+    result = _adapt(scores, now=_ADAPT_NOW + timedelta(days=8))
+    assert result["source_order"] == ["poor", "good"]
+    assert all(not s["adaptive_ready"] for s in result["sources"].values())
+    assert all(s["effective_uncertainty_dkk_per_kwh"] == .35 for s in result["sources"].values())
+
+
+def test_forecast_sources_require_matching_historical_hours_before_reordering() -> None:
+    scores = {"poor": _adaptive_accuracy(.9), "good": _adaptive_accuracy(.1, age_days=6)}
+    result = _adapt(scores)
+    assert all(s["adaptive_ready"] for s in result["sources"].values())
+    assert result["source_order"] == ["poor", "good"]
+
+
+@pytest.mark.parametrize("errors", [(0, 0), (.2, .19)])
+def test_ties_and_improvements_below_ten_percent_keep_configured_order(errors: tuple) -> None:
+    result = _adapt({"first": _adaptive_accuracy(errors[0]),
+                     "second": _adaptive_accuracy(errors[1])})
+    assert result["source_order"] == ["first", "second"]
+
+
+def test_disabled_adaptation_preserves_user_floor_and_source_priority() -> None:
+    scores = {"poor": _adaptive_accuracy(.9), "good": _adaptive_accuracy(.1)}
+    result = _adapt(scores, enabled=False, floor=.7)
+    assert result["source_order"] == ["poor", "good"]
+    assert all(s["effective_uncertainty_dkk_per_kwh"] == .7 for s in result["sources"].values())
+    assert all(not s["adaptive_ready"] for s in result["sources"].values())
+
+
+def test_timestamped_forecast_errors_survive_restore_and_score_only_once() -> None:
+    original = _adaptive_accuracy(.6)
+    restored = ForecastAccuracy.from_dict(original.as_dict())
+    assert restored.error_samples == original.error_samples
+    assert _adapt({"source": restored})["sources"]["source"]["adaptive_ready"]
+    first = restored.error_samples[0]
+    interval = PriceSlot(datetime.fromisoformat(first["start"]),
+                         datetime.fromisoformat(first["end"]), 1)
+    restored.record_forecasts([interval])
+    assert restored.score_actual_prices([interval], uncertainty_dkk_per_kwh=.35,
+                                        now=_ADAPT_NOW) == 0
+    assert len(restored.error_samples) == len(original.error_samples)
+
+
+def test_malformed_timestamped_errors_are_not_trusted_or_serialized_as_nan() -> None:
+    import json
+
+    original = _adaptive_accuracy(.8).as_dict()
+    original["error_samples"] += [None, {}, {"start": "invalid", "error_dkk_per_kwh": float("nan")}]
+    original["outstanding"] = None
+    original["scored_intervals"] = None
+    original["errors_dkk_per_kwh"] = [float("nan"), "broken", .8]
+    restored = ForecastAccuracy.from_dict(original)
+    assert len(restored.error_samples) == 24
+    assert _adapt({"source": restored})["sources"]["source"]["adaptive_ready"]
+    json.dumps(restored.as_dict(), allow_nan=False)
+
+
+def test_overlapping_error_rows_never_inflate_historical_coverage() -> None:
+    accuracy = _adaptive_accuracy(.8, hours_per_day=2)
+    accuracy.error_samples *= 20
+    source = _adapt({"source": accuracy})["sources"]["source"]
+    assert source["covered_hours"] == 6
+    assert not source["adaptive_ready"]
+
+
+def test_duration_weighted_p90_is_independent_of_error_row_cadence() -> None:
+    accuracy = _adaptive_accuracy(.1)
+    high_hours = accuracy.error_samples[:2]
+    accuracy.error_samples = accuracy.error_samples[2:]
+    for hour in high_hours:
+        start = datetime.fromisoformat(hour["start"])
+        for quarter in range(4):
+            left = start + timedelta(minutes=15 * quarter)
+            accuracy.error_samples.append({
+                "start": left.isoformat(), "end": (left + timedelta(minutes=15)).isoformat(),
+                "error_dkk_per_kwh": 1, "scored_at": _ADAPT_NOW.isoformat(),
+                "issued_at": hour["issued_at"],
+            })
+    source = _adapt({"source": accuracy}, floor=0)["sources"]["source"]
+    assert source["covered_hours"] == 24
+    assert source["effective_uncertainty_dkk_per_kwh"] == pytest.approx(.1)
+
+
+def test_hourly_forecast_errors_do_not_cancel_against_quarter_hour_actuals() -> None:
+    accuracy = ForecastAccuracy()
+    predicted, actual = [], []
+    for day in range(3):
+        base = _ADAPT_NOW - timedelta(days=3 - day)
+        for hour in range(8):
+            start = base + timedelta(hours=hour)
+            predicted.append(PriceSlot(start, start + timedelta(hours=1), 1))
+            for quarter in range(4):
+                left = start + timedelta(minutes=15 * quarter)
+                actual.append(PriceSlot(left, left + timedelta(minutes=15), 0 if quarter % 2 else 2))
+    accuracy.record_forecasts(predicted, now=predicted[0].start - timedelta(hours=1))
+    accuracy.score_actual_prices(actual, uncertainty_dkk_per_kwh=.35, now=_ADAPT_NOW)
+    assert accuracy.mean_absolute_error_dkk_per_kwh == 0  # Backward-compatible display.
+    source = _adapt({"source": accuracy})["sources"]["source"]
+    assert source["adaptive_ready"]
+    assert source["effective_uncertainty_dkk_per_kwh"] == 1
+
+
+def test_legacy_pending_forecasts_cannot_become_fresh_adaptive_evidence() -> None:
+    accuracy = ForecastAccuracy()
+    predicted = _slot(1, 1.2)
+    accuracy.record_forecasts([predicted])
+    accuracy.score_actual_prices([_slot(1, 1)], uncertainty_dkk_per_kwh=.35,
+                                 now=_ADAPT_NOW)
+    assert accuracy.samples == 1
+    assert not accuracy.error_samples
+
+
+def test_future_published_actual_prices_do_not_yet_count_as_historical_coverage() -> None:
+    accuracy = ForecastAccuracy()
+    predicted = PriceSlot(_ADAPT_NOW + timedelta(hours=1),
+                          _ADAPT_NOW + timedelta(hours=2), 1.8)
+    actual = PriceSlot(predicted.start, predicted.end, 1)
+    accuracy.record_forecasts([predicted], now=_ADAPT_NOW)
+    accuracy.score_actual_prices([actual], uncertainty_dkk_per_kwh=.35, now=_ADAPT_NOW)
+    source = _adapt({"source": accuracy})["sources"]["source"]
+    assert len(accuracy.error_samples) == 1
+    assert source["covered_hours"] == 0
+
+
+def test_overlapping_or_forecast_actual_rows_never_score_a_prediction() -> None:
+    accuracy = ForecastAccuracy()
+    accuracy.record_forecasts([_slot(1, 1.2)], now=_slot(0, 1).start)
+    assert accuracy.score_actual_prices([_slot(1, 1), _slot(1, 1)],
+        uncertainty_dkk_per_kwh=.35, now=_ADAPT_NOW) == 0
+    forecast_actual = PriceSlot(_slot(1, 1).start, _slot(1, 1).end, 1, source="forecast")
+    assert accuracy.score_actual_prices([forecast_actual],
+        uncertainty_dkk_per_kwh=.35, now=_ADAPT_NOW) == 0
+    assert not accuracy.error_samples
+
+
+def test_earliest_issued_forecast_wins_when_provider_changes_interval_cadence() -> None:
+    accuracy = ForecastAccuracy()
+    base = _ADAPT_NOW - timedelta(days=4)
+    for day in range(3):
+        start = base + timedelta(days=day)
+        actual = [PriceSlot(start + timedelta(hours=hour),
+                            start + timedelta(hours=hour + 1), 1) for hour in range(24)]
+        accuracy.record_forecasts([PriceSlot(start, start + timedelta(hours=24), 5)],
+                                  now=start - timedelta(days=1))
+        accuracy.record_forecasts(actual, now=start - timedelta(hours=1))
+        for interval in actual:
+            accuracy.score_actual_prices([interval], uncertainty_dkk_per_kwh=.1,
+                                         now=interval.end)
+        # The earlier 24-hour prediction can only score after its entire
+        # actual cover is available; its issue time must still take priority.
+        accuracy.score_actual_prices(actual, uncertainty_dkk_per_kwh=.1,
+                                     now=start + timedelta(days=1))
+    restored = ForecastAccuracy.from_dict(accuracy.as_dict())
+    source = _adapt({"source": restored}, floor=.1)["sources"]["source"]
+    assert source["covered_hours"] == 72
+    assert source["adaptive_ready"]
+    assert source["effective_uncertainty_dkk_per_kwh"] == 4
+
+
+def test_earlier_unscored_prediction_blocks_later_overlapping_accuracy_evidence() -> None:
+    accuracy = _adaptive_accuracy(0)
+    first = datetime.fromisoformat(accuracy.error_samples[0]["start"])
+    for day in range(3):
+        start = first + timedelta(days=day)
+        accuracy.record_forecasts([PriceSlot(start, start + timedelta(hours=24), 5)],
+                                  now=first - timedelta(days=2))
+    # The better revisions cannot qualify while earlier overlapping
+    # predictions are still awaiting their complete actual-price cover.
+    source = _adapt({"source": accuracy})["sources"]["source"]
+    assert source["covered_hours"] == 0
+    assert not source["adaptive_ready"]
