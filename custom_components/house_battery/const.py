@@ -25,6 +25,9 @@ STORAGE_KEY = f"{DOMAIN}.state"
 CONF_SOC = "soc_entity"
 CONF_LOAD_POWER = "load_power_entity"
 CONF_GRID_IMPORT_POWER = "grid_import_power_entity"
+# Independent active-power source for efficiency learning. A supplying phase
+# can be quieter than the whole-site meter used for grid/export protection.
+CONF_EFFICIENCY_GRID_POWER = "efficiency_grid_power_entity"
 CONF_ACCOUNTING_LOAD_POWER = "accounting_load_power_entity"
 CONF_GRID_AVAILABLE = "grid_available_entity"
 CONF_BATTERY_CHARGE_POWER = "battery_charge_power_entity"

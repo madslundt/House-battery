@@ -9,7 +9,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.config_flow import Fbp1200OptionsFlow
+from house_battery.config_flow import (
+    Fbp1200ConfigFlow,
+    Fbp1200OptionsFlow,
+    _direct_schema,
+    _schema,
+)
 from house_battery.const import (
     CONF_ACCOUNTING_LOAD_POWER,
     CONF_BATTERY_CHARGE_POWER,
@@ -17,6 +22,7 @@ from house_battery.const import (
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
     CONF_DISCHARGE_POWER_CONTROL,
+    CONF_EFFICIENCY_GRID_POWER,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
@@ -44,6 +50,7 @@ def test_options_can_remove_optional_bindings_selected_during_setup(direct_local
         optional = {
             CONF_GRID_ISOLATION_SWITCH: "switch.old_plug",
             CONF_PRICE_FORECAST_ENTITIES: ["sensor.old_forecast"],
+            CONF_EFFICIENCY_GRID_POWER: "sensor.old_efficiency_phase",
         }
         if direct_local:
             optional.update({
@@ -76,5 +83,95 @@ def test_options_can_remove_optional_bindings_selected_during_setup(direct_local
         assert not merged.get(CONF_PRICE_FORECAST_ENTITY)
         assert merged[CONF_PRICE_ENTITIES] == ["sensor.price", "binary_sensor.tomorrow"]
         assert merged[CONF_COMMISSIONED]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("direct_local", [True, False])
+def test_efficiency_source_is_optional_and_separate_from_safety_meter(
+    direct_local: bool,
+) -> None:
+    """Selecting a phase for learning must not replace the whole-site safety meter."""
+    submitted = {
+        CONF_GRID_AVAILABLE: "binary_sensor.grid",
+        CONF_PRICE_ENTITIES: ["sensor.price"],
+        CONF_GRID_IMPORT_POWER: "sensor.whole_site_grid",
+    }
+    if not direct_local:
+        submitted.update({
+            "name": "Battery",
+            CONF_SOC: "sensor.soc",
+            CONF_LOAD_POWER: "sensor.load",
+            CONF_OPERATING_MODE: "select.mode",
+            CONF_BATTERY_CHARGE_POWER: "sensor.charge",
+            CONF_BATTERY_DISCHARGE_POWER: "sensor.discharge",
+        })
+    schema = (_direct_schema if direct_local else _schema)({})
+
+    assert CONF_EFFICIENCY_GRID_POWER not in schema(submitted)
+    validated = schema({
+        **submitted,
+        CONF_EFFICIENCY_GRID_POWER: "sensor.watts_live_phase_l1",
+    })
+    assert validated[CONF_GRID_IMPORT_POWER] == "sensor.whole_site_grid"
+    assert validated[CONF_EFFICIENCY_GRID_POWER] == "sensor.watts_live_phase_l1"
+    key = next(key for key in schema.schema if key == CONF_EFFICIENCY_GRID_POWER)
+    assert schema.schema[key].config["filter"] == [
+        {"domain": ["sensor"], "unit_of_measurement": ["W"]}
+    ]
+
+
+@pytest.mark.parametrize("direct_local", [True, False])
+def test_options_replace_efficiency_source_without_rebinding_grid_safety(
+    direct_local: bool,
+) -> None:
+    async def scenario() -> None:
+        original = {
+            CONF_GRID_AVAILABLE: "binary_sensor.grid",
+            CONF_PRICE_ENTITIES: ["sensor.price"],
+            CONF_GRID_IMPORT_POWER: "sensor.whole_site_grid",
+            CONF_EFFICIENCY_GRID_POWER: "sensor.old_phase",
+        }
+        submitted = {**original, CONF_EFFICIENCY_GRID_POWER: "sensor.new_phase"}
+        if direct_local:
+            original["host"] = "192.0.2.1"
+        else:
+            submitted.update({
+                CONF_SOC: "sensor.soc", CONF_LOAD_POWER: "sensor.load",
+                CONF_OPERATING_MODE: "select.mode",
+                CONF_BATTERY_CHARGE_POWER: "sensor.charge",
+                CONF_BATTERY_DISCHARGE_POWER: "sensor.discharge",
+                CONF_MIN_SOC_CONTROL: "number.minimum",
+                CONF_MAX_SOC_CONTROL: "number.maximum",
+            })
+        flow = Fbp1200OptionsFlow(SimpleNamespace(data=original, options={}))
+        form = await flow.async_step_init()
+        result = await flow.async_step_init(form["data_schema"](submitted))
+        merged = {**original, **result["data"]}
+
+        assert merged[CONF_EFFICIENCY_GRID_POWER] == "sensor.new_phase"
+        assert merged[CONF_GRID_IMPORT_POWER] == "sensor.whole_site_grid"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("efficiency_source", [None, "sensor.watts_live_phase_l1"])
+def test_direct_setup_stores_only_explicit_efficiency_source(
+    efficiency_source: str | None,
+) -> None:
+    async def scenario() -> None:
+        flow = Fbp1200ConfigFlow()
+        flow._connection = {"host": "192.0.2.1", "port": 8080, "name": "Battery"}
+        submitted = {
+            CONF_GRID_AVAILABLE: "binary_sensor.grid",
+            CONF_PRICE_ENTITIES: ["sensor.price"],
+        }
+        if efficiency_source:
+            submitted[CONF_EFFICIENCY_GRID_POWER] = efficiency_source
+        form = await flow.async_step_household()
+        result = await flow.async_step_household(form["data_schema"](submitted))
+
+        assert result["data"].get(CONF_EFFICIENCY_GRID_POWER) == efficiency_source
+        assert not result["data"][CONF_COMMISSIONED]
 
     asyncio.run(scenario())

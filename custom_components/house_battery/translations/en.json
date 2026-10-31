@@ -24,7 +24,11 @@
           "discharge_power_control_entity": "Discharge power control (optional)",
           "grid_isolation_switch_entity": "Grid input smart plug (optional)",
           "minimum_soc_control_entity": "Discharge limit control (required before commissioning)",
-          "maximum_soc_control_entity": "Charge limit control (required before commissioning)"
+          "maximum_soc_control_entity": "Charge limit control (required before commissioning)",
+          "efficiency_grid_power_entity": "Efficiency measurement grid power"
+        },
+        "data_description": {
+          "efficiency_grid_power_entity": "Optional true active power in W. Prefer the Watts Live phase supplying the battery; do not use an inaccurate smart-plug reading. Shared-meter measurements with unstable competing loads are rejected, and planning keeps the fallback until enough reliable matched-SOC periods agree."
         }
       },
       "household": {
@@ -36,7 +40,11 @@
           "grid_available_entity": "Grid available / on-grid state",
           "price_entities": "Known electricity-price entities",
           "price_forecast_entities": "External price forecast entities (optional, ordered)",
-          "grid_isolation_switch_entity": "Grid input smart plug (optional; off in Battery mode, on in other modes)"
+          "grid_isolation_switch_entity": "Grid input smart plug (optional; off in Battery mode, on in other modes)",
+          "efficiency_grid_power_entity": "Efficiency measurement grid power"
+        },
+        "data_description": {
+          "efficiency_grid_power_entity": "Optional true active power in W. Prefer the Watts Live phase supplying the battery; do not use an inaccurate smart-plug reading. Shared-meter measurements with unstable competing loads are rejected, and planning keeps the fallback until enough reliable matched-SOC periods agree."
         }
       }
     },
@@ -67,7 +75,11 @@
           "grid_isolation_switch_entity": "Grid input smart plug (optional; off in Battery mode, on in other modes)",
           "minimum_soc_control_entity": "Discharge limit control (required for automatic control)",
           "maximum_soc_control_entity": "Charge limit control (required for automatic control)",
-          "commissioned": "I verified local control, read-back, limits, wiring, and legal export settings"
+          "commissioned": "I verified local control, read-back, limits, wiring, and legal export settings",
+          "efficiency_grid_power_entity": "Efficiency measurement grid power"
+        },
+        "data_description": {
+          "efficiency_grid_power_entity": "Optional true active power in W. Prefer the Watts Live phase supplying the battery; do not use an inaccurate smart-plug reading. Shared-meter measurements with unstable competing loads are rejected, and planning keeps the fallback until enough reliable matched-SOC periods agree."
         }
       }
     }

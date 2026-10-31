@@ -96,8 +96,8 @@ known expensive window has enough forecast load to use the extra energy. With
 | **Estimated battery degradation** | Capacity loss estimated from learned capacity when available, otherwise from cycle-life reference. It is not a BMS warranty value. |
 | **Estimated remaining capacity** | 100% minus the estimated degradation. |
 | **Learned usable capacity** | Capacity inferred from sufficiently stable charge/discharge observations. |
-| **Learned round-trip efficiency** | Measured energy-out versus energy-in estimate once enough stable samples exist. |
-| **Measured round-trip efficiency** | Read-only comparison estimate from measured charge and discharge energy over the recent seven-day window. It is shown only when the window begins and ends within 5 SOC percentage points; it does not affect planning. Its attributes include the configured fallback value and measurement details. |
+| **Learned round-trip efficiency** | Qualified round-trip efficiency adopted by planning. With an efficiency grid meter bound, three consistent independent matched-SOC periods are required; otherwise the configured fallback applies. Legacy balanced-flow learning remains available without that binding. |
+| **Measured round-trip efficiency** | With a true active-power efficiency meter configured, estimates charging input after idle-baseline subtraction and connected load delivered across matching-SOC periods. Attributes identify candidate/qualified values, accepted periods, quality reason and the effective planning source. Without the meter, the original seven-day battery-telemetry ratio remains diagnostic only. |
 | **Battery learning** | `learning` until both capacity and efficiency are reliable; attributes show sample counts/readiness. |
 | **Load learning coverage** | Percentage of the 7-day, 15-minute demand profile with enough observations. Higher is better. |
 | **Load forecast mean absolute error** | Typical absolute load-forecast error in W. A persistent high value means inspect the load sensor scope or add scheduled loads. |

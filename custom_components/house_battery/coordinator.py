@@ -8,6 +8,7 @@ import math
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from hashlib import sha256
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -22,6 +23,7 @@ from .actuator import LocalControlAdapter, soc_control_problems
 from .const import (
     CONF_ACCOUNTING_LOAD_POWER,
     CONF_COMMISSIONED,
+    CONF_EFFICIENCY_GRID_POWER,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
     CONF_GRID_ISOLATION_SWITCH,
@@ -642,10 +644,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.runtime.battery_learner.learned_capacity_wh
             or values["capacity_kwh"] * 1000
         )
-        efficiency = (
-            self.runtime.battery_learner.learned_efficiency
-            or values["round_trip_efficiency"] / 100
-        )
+        efficiency, _ = self._planning_efficiency()
         return PlannerSettings(
             capacity_wh=capacity,
             reserve_soc=values["reserve_soc"],
@@ -664,6 +663,128 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             partial_charge_targets=self._partial_charge_targets(),
         )
+
+    def _efficiency_source(self) -> str:
+        """Identify the meter, load, battery and capacity used by the evidence."""
+        config = self.config
+        if not config.get(CONF_EFFICIENCY_GRID_POWER):
+            return ""
+        load = DIRECT_LOAD_SOURCE if self.is_direct_local else config.get(CONF_LOAD_POWER)
+        battery = config.get(CONF_HOST) if self.is_direct_local else config.get(CONF_SOC)
+        fingerprint = repr((
+            config[CONF_EFFICIENCY_GRID_POWER], load, battery,
+            config.get("port", DEFAULT_PORT),
+            config.get("battery_charge_power_entity"),
+            config.get("battery_discharge_power_entity"),
+            config.get(CONF_GRID_ISOLATION_SWITCH),
+            config.get(CONF_GRID_IMPORT_POWER),
+            config.get(CONF_ACCOUNTING_LOAD_POWER),
+            self.runtime.settings["capacity_kwh"],
+        ))
+        return f"{config[CONF_EFFICIENCY_GRID_POWER]}:{sha256(fingerprint.encode()).hexdigest()}"
+
+    def _efficiency_summary(self, now: datetime) -> dict[str, Any]:
+        """Configure and read qualified measurements, keeping telemetry diagnostic."""
+        model = self.runtime.measured_efficiency
+        source = self._efficiency_source()
+        model.configure(source)
+        if source:
+            return model.summary(now)
+        summary = self.runtime.actual_history.round_trip_summary(dt_util.as_local(now))
+        summary.update({
+            "method": "battery_telemetry_diagnostic",
+            "source": None,
+            "sample_count": 0,
+            "planning_efficiency_pct": None,
+            "accepted_windows": [],
+            "reason": "Bind a true active-power meter to enable matched-SOC efficiency learning",
+        })
+        return summary
+
+    def _planning_efficiency(self, now: datetime | None = None) -> tuple[float, str]:
+        """Prefer qualified matched-SOC evidence, otherwise retain the fallback."""
+        if self.config.get(CONF_EFFICIENCY_GRID_POWER):
+            summary = self._efficiency_summary(now or datetime.now(UTC))
+            measured = summary.get("planning_efficiency_pct")
+            if isinstance(measured, (int, float)) and math.isfinite(measured) and 50 <= measured <= 100:
+                return measured / 100, "matched_soc_grid_meter"
+            # A newly bound meter must not silently use incompatible legacy
+            # learning while its independent evidence is still qualifying.
+        elif learned := self.runtime.battery_learner.learned_efficiency:
+            return learned, "legacy_balanced_flow"
+        return self.runtime.settings["round_trip_efficiency"] / 100, "configured_fallback"
+
+    def _efficiency_grid_power(self, now: datetime) -> float | None:
+        """Read fresh active watts independently of the export-safety binding."""
+        return self._efficiency_value(CONF_EFFICIENCY_GRID_POWER, now, "W")
+
+    def _efficiency_value(
+        self, key: str, now: datetime, unit: str | None = None
+    ) -> float | None:
+        """Efficiency evidence requires reports no older than ninety seconds."""
+        state = self._state(key)
+        if state is None or (
+            unit is not None and state.attributes.get("unit_of_measurement") != unit
+        ):
+            return None
+        reported = getattr(state, "last_reported", None) or state.last_updated
+        age = (now - reported.astimezone(UTC)).total_seconds()
+        if not 0 <= age <= 90:
+            return None
+        return fresh_numeric_value(state, now)
+
+    def _efficiency_activity(
+        self, charge_w: float | None, discharge_w: float | None
+    ) -> str:
+        """Classify activity only when the connected load's supply is established."""
+        if any(
+            value is None or not math.isfinite(value) or value < 0
+            for value in (charge_w, discharge_w)
+        ):
+            return "unknown"
+        charging, discharging = charge_w > 10, discharge_w > 10
+        if charging and discharging:
+            return "unknown"
+        if discharging:
+            # A raw inverter-output value does not prove it supplies the whole
+            # load. Accept delivered load only with physical grid isolation,
+            # or an independent balanced flow corroborating full supply.
+            relay = self._state(CONF_GRID_ISOLATION_SWITCH)
+            if relay is not None:
+                return "discharging" if relay.state == "off" else "unknown"
+            flow = self.power_flow
+            if flow is None or not flow.flow_available:
+                return "unknown"
+            now = datetime.now(UTC)
+            if self._efficiency_value(CONF_GRID_IMPORT_POWER, now, "W") is None:
+                return "unknown"
+            if self.is_direct_local and self._efficiency_value(
+                CONF_ACCOUNTING_LOAD_POWER, now, "W"
+            ) is None:
+                return "unknown"
+            load = self._load_power()
+            if load is None or flow.battery_output_power_w < load - FLOW_NOISE_FLOOR_W:
+                return "unknown"
+            return "discharging"
+        relay = self._state(CONF_GRID_ISOLATION_SWITCH)
+        if self.config.get(CONF_GRID_ISOLATION_SWITCH) and (
+            relay is None or relay.state != "on"
+        ):
+            return "unknown"
+        return "charging" if charging else "idle"
+
+    def _efficiency_load(self, now: datetime) -> float | None:
+        """Require recent legacy load telemetry as well as the dedicated meter."""
+        if not self.is_direct_local:
+            return self._efficiency_value(CONF_LOAD_POWER, now, "W")
+        return self._load_power()
+
+    def _efficiency_healthy(self, now: datetime) -> bool:
+        """Do not learn through safe stops or independently measured exports."""
+        if self.runtime.pending_safe or self.runtime.export_safety_fault_latched:
+            return False
+        grid = self._float(CONF_GRID_IMPORT_POWER)
+        return grid is None or grid >= -FLOW_NOISE_FLOOR_W
 
     def _partial_charge_targets(self) -> tuple[int, ...] | None:
         """Only plan ceilings supported by the bound native number control."""
@@ -990,10 +1111,6 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             else None
         )
         local_now = dt_util.as_local(now)
-        round_trip_summary = self.runtime.actual_history.round_trip_summary(local_now)
-        round_trip_summary["configured_efficiency_pct"] = self.runtime.settings[
-            "round_trip_efficiency"
-        ]
         actual_history_should_save = self.runtime.actual_history.record(
             local_now,
             soc,
@@ -1001,6 +1118,38 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             actual_discharge_power,
             price,
         )
+        # Efficiency learning has its own real-power source and quality gates.
+        # Missing optional measurement inputs invalidate its window without
+        # becoming a control/safety failure for an otherwise healthy battery.
+        # TCP reads await I/O: a meter report arriving meanwhile is newer than
+        # the planning timestamp, but is the freshest valid observation.
+        measurement_now = datetime.now(UTC)
+        self.runtime.measured_efficiency.configure(self._efficiency_source())
+        efficiency_should_save = False
+        if self.config.get(CONF_EFFICIENCY_GRID_POWER):
+            efficiency_should_save = self.runtime.measured_efficiency.observe(
+                measurement_now,
+                soc=soc if self.is_direct_local else self._efficiency_value(CONF_SOC, measurement_now),
+                grid_power_w=self._efficiency_grid_power(measurement_now),
+                load_power_w=self._efficiency_load(measurement_now),
+                activity=self._efficiency_activity(
+                    actual_charge_power, actual_discharge_power
+                ),
+                reported_charge_power_w=actual_charge_power,
+                healthy=(
+                    not problems and not local_problem and not local_tcp_recovering
+                    and grid_available is True
+                    and self._efficiency_healthy(measurement_now)
+                ),
+                capacity_kwh=self.runtime.settings["capacity_kwh"],
+            )
+        round_trip_summary = self._efficiency_summary(measurement_now)
+        planning_efficiency, planning_efficiency_source = self._planning_efficiency(measurement_now)
+        round_trip_summary.update({
+            "configured_efficiency_pct": self.runtime.settings["round_trip_efficiency"],
+            "effective_planning_efficiency_pct": planning_efficiency * 100,
+            "planning_efficiency_source": planning_efficiency_source,
+        })
         await self.evidence.async_observe(
             now,
             price,
@@ -1394,6 +1543,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             or self._forecast_evidence_changed
             or self._daily_plan_dirty
             or actual_history_should_save
+            or efficiency_should_save
         ):
             # RuntimeStore writes atomically, so persisting the whole runtime
             # publishes the reconciled daily plan without risk of a partial
@@ -1642,10 +1792,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else None
             ),
             "learned_efficiency_pct": (
-                self.runtime.battery_learner.learned_efficiency * 100
-                if self.runtime.battery_learner.learned_efficiency
-                else None
+                round_trip_summary.get("planning_efficiency_pct")
+                if self.config.get(CONF_EFFICIENCY_GRID_POWER)
+                else self.runtime.battery_learner.learned_efficiency * 100
+                if self.runtime.battery_learner.learned_efficiency else None
             ),
+            "planning_efficiency_pct": planning_efficiency * 100,
+            "planning_efficiency_source": planning_efficiency_source,
             "load_learning_confidence_pct": self.runtime.load_learner.confidence * 100,
             "load_forecast_error_w": self.runtime.load_learner.mean_absolute_error_w,
             "learning_observations": self.runtime.load_learner.observations,
@@ -1694,8 +1847,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "capacity_learning_ready": self.runtime.battery_learner.capacity_ready,
             "efficiency_learning_samples": len(
                 self.runtime.battery_learner.efficiency_samples
+            ) if not self.config.get(CONF_EFFICIENCY_GRID_POWER) else round_trip_summary.get("sample_count", 0),
+            "efficiency_learning_ready": (
+                planning_efficiency_source == "matched_soc_grid_meter"
+                if self.config.get(CONF_EFFICIENCY_GRID_POWER)
+                else self.runtime.battery_learner.efficiency_ready
             ),
-            "efficiency_learning_ready": self.runtime.battery_learner.efficiency_ready,
             "scheduled_load_count": len(self.runtime.scheduled_loads),
             "recent_decisions": self.runtime.decisions[-20:],
             "health_problems": reported_health_problems,

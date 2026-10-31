@@ -17,6 +17,7 @@ from .const import (
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
     CONF_DISCHARGE_POWER_CONTROL,
+    CONF_EFFICIENCY_GRID_POWER,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
@@ -39,6 +40,12 @@ from .local_tcp import FbpLocalTcpClient, LocalProtocolError
 
 def _entity(domain: str | list[str]) -> selector.EntitySelector:
     return selector.EntitySelector(selector.EntitySelectorConfig(domain=domain))
+
+
+def _efficiency_meter() -> selector.EntitySelector:
+    return selector.EntitySelector(selector.EntitySelectorConfig(
+        filter={"domain": "sensor", "unit_of_measurement": "W"}
+    ))
 
 
 def _required(key: str, defaults: dict[str, Any]) -> vol.Required:
@@ -73,6 +80,7 @@ def _schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
         _required(CONF_SOC, defaults): _entity("sensor"),
         _required(CONF_LOAD_POWER, defaults): _entity("sensor"),
         _required(CONF_GRID_IMPORT_POWER, defaults): _entity("sensor"),
+        _optional(CONF_EFFICIENCY_GRID_POWER, defaults): _efficiency_meter(),
         _required(CONF_GRID_AVAILABLE, defaults): _entity(["sensor", "binary_sensor"]),
         _required(CONF_OPERATING_MODE, defaults): _entity("select"),
         _required(CONF_PRICE_ENTITIES, defaults): selector.EntitySelector(
@@ -114,6 +122,7 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
     fields: dict[Any, Any] = {
         _required(CONF_GRID_AVAILABLE, defaults): _entity(["sensor", "binary_sensor"]),
         _optional(CONF_GRID_IMPORT_POWER, defaults): _entity("sensor"),
+        _optional(CONF_EFFICIENCY_GRID_POWER, defaults): _efficiency_meter(),
         _optional(CONF_ACCOUNTING_LOAD_POWER, defaults): _entity("sensor"),
         _required(CONF_PRICE_ENTITIES, defaults): selector.EntitySelector(
             selector.EntitySelectorConfig(
@@ -230,7 +239,11 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
             # Explicit cleared values override the original setup bindings
             # when the coordinator merges entry data with these options.
             data = {
-                **dict.fromkeys((*optional_keys, CONF_GRID_ISOLATION_SWITCH)),
+                **dict.fromkeys((
+                    *optional_keys,
+                    CONF_GRID_ISOLATION_SWITCH,
+                    CONF_EFFICIENCY_GRID_POWER,
+                )),
                 CONF_PRICE_FORECAST_ENTITIES: [],
                 CONF_PRICE_FORECAST_ENTITY: None,
                 **user_input,

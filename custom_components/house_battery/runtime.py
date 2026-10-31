@@ -19,6 +19,7 @@ from .const import (
     STORAGE_VERSION,
 )
 from .dailyplan import DailyPlan
+from .efficiency import MatchedSocEfficiency
 from .forecast import ForecastAccuracy
 from .learning import BatteryLearner, LoadLearner
 
@@ -31,6 +32,7 @@ class RuntimeState:
     load_learner: LoadLearner = field(default_factory=LoadLearner)
     load_learner_source: str | None = None
     battery_learner: BatteryLearner = field(default_factory=BatteryLearner)
+    measured_efficiency: MatchedSocEfficiency = field(default_factory=MatchedSocEfficiency)
     ledger: EnergyLedger = field(default_factory=EnergyLedger)
     accounting_interval: IntervalAccumulator | None = None
     accounting_sample_at: datetime | None = None
@@ -79,6 +81,7 @@ class RuntimeState:
         except (ZoneInfoNotFoundError, ValueError):
             local_now = now
         self.actual_history.prune(local_now)
+        self.measured_efficiency.prune(now)
         if self.daily_plan.date and self.daily_plan.date != local_now.date().isoformat():
             self.daily_plan = DailyPlan(date="")
         cutoff = now - timedelta(days=7)
@@ -133,6 +136,7 @@ class RuntimeState:
             "load_learner": self.load_learner.as_dict(),
             "load_learner_source": self.load_learner_source,
             "battery_learner": self.battery_learner.as_dict(),
+            "measured_efficiency": self.measured_efficiency.as_dict(),
             "ledger": self.ledger.as_dict(),
             "accounting_interval": (
                 self.accounting_interval.as_dict() if self.accounting_interval else None
@@ -171,6 +175,7 @@ class RuntimeState:
             "status": status,
             "load_model": self.load_learner.as_dict(),
             "battery_model": self.battery_learner.as_dict(),
+            "efficiency_model": self.measured_efficiency.as_dict(),
             "ledger": self.ledger.as_dict(),
             "actual_history": self.actual_history.as_dict(),
             "decisions": self.decisions,
@@ -220,6 +225,9 @@ class RuntimeState:
                 BatteryLearner()
                 if is_legacy
                 else BatteryLearner.from_dict(data.get("battery_learner", {}))
+            ),
+            measured_efficiency=MatchedSocEfficiency.from_dict(
+                data.get("measured_efficiency", {})
             ),
             ledger=(
                 EnergyLedger()

@@ -34,6 +34,17 @@ estimate usable capacity and round-trip efficiency. Until sufficient evidence
 exists, it uses the configured nominal capacity and fallback efficiency. The
 estimate and readiness/sample counts are exposed by **Battery learning**.
 
+`MatchedSocEfficiency` provides independent, meter-based efficiency learning
+when an efficiency grid-power entity is selected. It combines true active grid
+power, connected load, SOC and corroborated activity. A pre/post idle baseline
+removes other phase loads from charging energy; only substantial matching-SOC
+cycles with stable baselines can become evidence. Three consistent independent
+cycles qualify for planning. Recent accepted evidence is persisted, while
+unfinished cycles restart after a process interruption. Source/capacity changes
+invalidate incompatible measurements. This model takes precedence over legacy
+efficiency learning when its meter is bound; unqualified evidence uses the
+configured fallback rather than old telemetry-based learning.
+
 ## Planner
 
 The pure planner operates over only valid, chronological, contiguous price
@@ -103,10 +114,12 @@ estimates. Balanced whole-house flow is still required for measured realized
 savings. Direct-local entries need both a CT meter and a whole-house load
 entity for that calculation; the CT meter alone enables export monitoring.
 
-The **Measured round-trip efficiency** diagnostic divides recent measured
-discharge energy by charge energy when the seven-day window starts and ends
-within five SOC percentage points. It is kept separate from the planner's
-efficiency input and exists only for comparison with the configured fallback.
+The **Measured round-trip efficiency** sensor shows matched-SOC evidence and
+the effective planning value when an efficiency meter is bound. Its delivered
+energy uses connected load corroborated by physical grid isolation or balanced
+flow, not raw inverter output. The optional measurement meter never replaces
+the export-safety grid binding. Without it, the old seven-day telemetry ratio
+remains a separate comparison diagnostic and cannot promote planner efficiency.
 
 ### Zero export enforcement
 

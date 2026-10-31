@@ -871,7 +871,7 @@ class FbpBatteryLearningSensor(Fbp1200Entity, SensorEntity):
 
 
 class FbpMeasuredRoundTripEfficiencySensor(Fbp1200Entity, SensorEntity):
-    """Report measured energy-out/in efficiency for user comparison only."""
+    """Explain measured efficiency and whether it qualifies for planning."""
 
     _attr_name = "Measured round-trip efficiency"
     _attr_icon = "mdi:battery-sync-outline"
@@ -906,7 +906,21 @@ class FbpMeasuredRoundTripEfficiencySensor(Fbp1200Entity, SensorEntity):
             "soc_change_pct_points": summary.get("soc_change_pct_points"),
             "window_start": summary.get("window_start"),
             "window_end": summary.get("window_end"),
+            "measurement_source": summary.get("source"),
+            "measurement_method": summary.get("method"),
+            "quality_reason": summary.get("reason"),
+            "matched_soc_periods": summary.get("sample_count", 0),
+            "planning_efficiency_pct": summary.get("effective_planning_efficiency_pct"),
+            "planning_efficiency_source": summary.get("planning_efficiency_source"),
+            "qualified_measured_efficiency_pct": summary.get("planning_efficiency_pct"),
+            "accepted_windows": summary.get("accepted_windows", []),
             "note": (
+                "Real grid charging energy after bracketed idle-load subtraction, "
+                "compared with connected load delivered over matching SOC periods. "
+                "Three consistent independent periods qualify for planning; the "
+                "configured fallback applies until then."
+                if summary.get("method") != "battery_telemetry_diagnostic"
+                and summary.get("source") else
                 "Diagnostic only: discharge energy divided by charge energy over "
                 "the recent seven-day window, reported only when boundary SOC "
                 "differs by at most 5 percentage points. The planner does not use "

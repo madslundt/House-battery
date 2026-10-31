@@ -21,6 +21,7 @@ those known rows.
 | Battery-served local load | Local telemetry | Direct-local entries automatically use the complete per-storage off-grid total. Smart-load and backup-load readings remain diagnostics. An incomplete stack total fails closed. Legacy entries bind a load sensor. |
 | Grid import power | Legacy entries: required `sensor`; direct-local entries: optional `sensor` (single signed reading: import positive, export negative, or separate import/export entities) | Numeric watts. A direct-local CT meter enables export detection. Pair it with the whole-house load sensor below for balanced-flow accounting and realized-savings estimates. Battery throughput and tariff valuation use battery telemetry without either binding. |
 | Whole-house load power for accounting | Direct-local entries: optional `sensor` | Numeric watts. Bind this together with the optional CT meter to enable a balanced household savings estimate. It is separate from the battery-served local load used for planning and control. |
+| Efficiency measurement grid power | Optional `sensor` in W | True active power, preferably the Watts Live phase supplying the battery. Used with connected load, SOC, and observed activity for matched-SOC efficiency learning. This is independent of the grid-import sensor used for export safety. |
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
 | External price forecast entities | optional ordered `sensor` list | Same row format; each is scored independently; the first usable source that can safely extend the horizon is used for planning. |
@@ -36,6 +37,35 @@ grid, and SOC balance. Direct-local entries use measured battery charge/output
 telemetry for throughput and tariff valuation; an optional whole-house CT meter
 and whole-house load sensor together add the balance needed for realized-savings
 accounting.
+
+## Measured efficiency for planning
+
+In the integration's **Configure** flow, select **Efficiency measurement grid
+power**. Prefer the Watts Live phase supplying the battery over the whole-house
+total: appliances on other phases then cannot contaminate charging measurements.
+The source must measure true active watts. Do not select a plug whose apparent
+power is reported as W, and do not apply a fixed watt offset to it.
+
+House Battery subtracts connected load and a bracketed idle baseline from that
+meter to estimate charging input. It integrates connected load during verified
+discharge and compares the energies over substantial, non-overlapping periods
+that return to the same SOC. Direct-local discharge must be corroborated by the
+grid-input relay being off, or by an independent balanced flow proving the full
+load is battery supplied. Reported charge power only corroborates a session;
+reported battery output never supplies the delivered-energy numerator.
+
+Three consistent qualified periods are required before the planner automatically
+uses the measured round-trip efficiency. Until then it uses **Fallback round-trip
+efficiency**. **Measured round-trip efficiency** exposes the candidate estimate,
+quality reason, accepted periods, selected source and effective planning value.
+Missing optional measurement data pauses learning, not otherwise healthy control.
+Gaps, outages, exports, unstable baselines and inconsistent periods are rejected.
+
+Recent accepted evidence survives restarts; an unfinished measurement does not
+integrate across the offline gap. Changing the meter, battery/load bindings or
+nominal capacity clears incompatible evidence. Without this optional binding,
+the original recent battery-telemetry ratio remains diagnostic only, and existing
+legacy balanced-flow learning is retained.
 
 ## Grid availability is not grid use
 
