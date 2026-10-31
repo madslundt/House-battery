@@ -117,6 +117,9 @@ DEFAULT_SETTINGS: dict[str, float] = {
     "minimum_profit_dkk_per_kwh": 0.75,
     "cycle_life": 6000.0,
     "forecast_uncertainty_dkk_per_kwh": 0.25,
+    "sizing_expansion_capacity_kwh": 1.958,
+    "sizing_expansion_cost_dkk": 3000.0,
+    "sizing_payback_target_years": 10.0,
 }
 
 SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
@@ -131,6 +134,9 @@ SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
     "minimum_profit_dkk_per_kwh": (0.0, 10.0, 0.05, "DKK/kWh"),
     "cycle_life": (500.0, 15000.0, 100.0, "cycles"),
     "forecast_uncertainty_dkk_per_kwh": (0.0, 10.0, 0.01, "DKK/kWh"),
+    "sizing_expansion_capacity_kwh": (0.1, 100.0, 0.001, "kWh"),
+    "sizing_expansion_cost_dkk": (0.0, 100000.0, 100.0, "DKK"),
+    "sizing_payback_target_years": (1.0, 30.0, 1.0, "years"),
 }
 
 TELEMETRY_STALE_AFTER = timedelta(minutes=5)

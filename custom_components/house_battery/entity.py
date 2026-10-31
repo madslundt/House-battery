@@ -44,6 +44,7 @@ DEFAULT_ENTITY_KEYS = frozenset(
         "automatic_control",
         "adaptive_planning",
         "adaptation_status",
+        "battery_sizing",
         "opportunistic_full_charge",
         "today_net_savings_dkk",
         "lifetime_net_savings_dkk",

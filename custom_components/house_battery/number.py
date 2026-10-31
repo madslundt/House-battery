@@ -31,6 +31,12 @@ SETTING_NAMES = {
         "External price forecast uncertainty",
         "mdi:chart-bell-curve-cumulative",
     ),
+    "sizing_expansion_capacity_kwh": (
+        "Sizing expansion capacity",
+        "mdi:battery-plus-outline",
+    ),
+    "sizing_expansion_cost_dkk": ("Sizing expansion cost", "mdi:cash-plus"),
+    "sizing_payback_target_years": ("Sizing payback target", "mdi:calendar-clock"),
 }
 
 

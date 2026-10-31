@@ -5,8 +5,8 @@ entity picker; names below are the stable, user-facing names.
 
 The default entity set covers live battery/load power, SOC, current and planned
 operation, consumption-learning coverage, today's energy and net return,
-lifetime energy and net return, and safety. Grid-meter readings and export
-safety are enabled by default only with a configured meter; household realized
+lifetime energy and net return, battery sizing, and safety. Grid-meter readings
+and export safety are enabled by default only with a configured meter; household realized
 savings additionally need a whole-house load binding on direct-local entries.
 The external-forecast switch defaults enabled only with a configured source.
 
@@ -53,6 +53,7 @@ local TCP or command failures.
 | **Battery state of charge** | Current usable battery percentage reported directly by the battery. |
 | **Battery runtime** | Estimated time to the configured reserve SOC at the current connected load, displayed as `4 h 20 min` or `1 d 3 h 30 min`. Enabled by default. Uses learned capacity and efficiency when ready, otherwise configured values, and the planner's discharge-loss model. Its `hours`, `soc`, `load_power_w`, and `reserve_soc` attributes expose the inputs and numeric duration. |
 | **Battery runtime hours** | Optional numeric version of **Battery runtime**, in hours, for charts and automations. |
+| **Battery sizing** | Enabled-by-default read-only assessment: `learning`, `bigger_battery_better`, `size_is_fine`, or `battery_too_big`. Attributes include the reason, evidence, capacity comparisons, marginal annual savings and payback. Updates daily independently of adaptive planning. It annualizes qualified recent measured-load/known-price hindsight with measured efficiency, losses, wear and switching costs; it does not forecast annual returns or value backup runtime. See [qualification and recommendation rules](optimization.md#battery-sizing). |
 | **Connected load power** | Power currently demanded by the load the battery can actually serve. It trains the forecast. |
 | **Local load diagnostics** | Direct-local entries only. Comparison of the FOSSiBOT whole-site meter, smart-load total, backup-load total, and every storage unit's off-grid reading. The complete per-storage off-grid total is automatically used for learning, planning, and automatic control; incomplete stack data fails closed. |
 | **Grid import power** | Current whole-site power bought from the grid; used for balanced evidence, export monitoring, and realized savings when paired with a whole-house load sensor. Optional for direct-local FBP1200 entries. |
@@ -162,13 +163,17 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **Minimum required profit** | Manual extra margin for discharge, retained when adaptive planning is enabled. | Raise 0.75→1.25 DKK/kWh to reject marginal cycles in manual planning. Qualified active adaptation evaluates net benefit after wear without adding this margin; disabling adaptation restores it. |
 | **Cycle-life reference** | Legacy fallback degradation model denominator. | Available only for legacy provider entries. Direct-local entries use an internal default because they lack a trustworthy grid/battery throughput balance. |
 | **External price forecast uncertainty** | Conservative error allowance for external price forecasts. Disabled by default. | Set 0.25 DKK/kWh if the forecast's MAE is about 0.20; forecast charging is evaluated 0.25 higher and discharge 0.25 lower. |
+| **Sizing expansion capacity** | Additional capacity compared by the read-only sizing assessment. Defaults to 1.958 kWh; range 0.1–100 kWh. | Enter the usable capacity of the pack being considered. This does not change installed capacity or battery controls. |
+| **Sizing expansion cost** | Purchase cost used for expansion payback. Defaults to 3000 DKK; range 0–100000 DKK. | Enter the complete expansion cost. Zero represents a free pack and gives zero payback years when its modeled benefit is positive. |
+| **Sizing payback target** | Maximum acceptable simple payback for recommending expansion. Defaults to ten years; range 1–30 years. | Lower the target if a faster financial return is required. |
 
 The mode-switching penalty is an internal fixed cost of 0.05 DKK per action
 change. Opportunistic full-charge planning uses a fixed 100% target. Fallback
 capacity/efficiency, emergency SOC, wear cost, cycle life, and forecast
-uncertainty controls are disabled by default; enable them when tuning the
-installation. Consumption learning and accounting run independently of whether
-their diagnostic entities are enabled.
+uncertainty and sizing controls are disabled by default; enable them when tuning
+the installation. Sizing recommendations never change hardware limits.
+Consumption learning and accounting run independently of whether their
+diagnostic entities are enabled.
 
 Change one number at a time. Observe at least several similar tariff days, then
 compare **realized savings**, **equivalent cycles**, forecast error, and the

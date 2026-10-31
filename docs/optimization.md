@@ -92,6 +92,31 @@ do not include terminal credit for energy left in the battery. Compare these
 components when assessing a plan rather than treating expected future energy
 value as cash already earned.
 
+## Battery sizing
+
+**Battery sizing** is a read-only financial assessment, updated daily in the
+background even when adaptive planning is off. It remains `learning` until
+qualified real-meter round-trip efficiency and 28 complete days of hourly
+measured connected load and known prices are available, including at least
+eight weekend days. Evidence is retained for 90 days; incomplete days do not
+qualify. The sensor's reason and evidence explain missing coverage.
+
+The assessment replays half the current capacity, the current capacity, and the
+current capacity plus **Sizing expansion capacity**. Each case starts and ends
+at the same SOC, so stored energy is not treated as free inventory. It includes
+conversion losses, modeled wear and switching costs. Extra capacity is judged
+against **Sizing expansion cost** and **Sizing payback target**, defaulting to
+1.958 kWh, 3000 DKK and ten years. A free expansion has zero payback years when
+it provides a positive benefit.
+
+`bigger_battery_better` means the expansion meets the configured payback target.
+`size_is_fine` can still mean extra storage helps but does not justify its price.
+`battery_too_big` means half the capacity retains at least 95% of the modeled
+net savings while losing no more than 50 DKK per year. That conclusion concerns
+price arbitrage only; it does not value backup runtime. The financial figures
+annualize the recent period with hindsight, rather than forecast a full year's
+return. No recommendation changes installed capacity, SOC or power limits.
+
 ## External price forecasts
 
 The optional ordered **External price forecast entities** use precisely the same list

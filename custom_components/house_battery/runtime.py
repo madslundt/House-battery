@@ -22,6 +22,7 @@ from .dailyplan import DailyPlan
 from .efficiency import MatchedSocEfficiency
 from .forecast import ForecastAccuracy
 from .learning import BatteryLearner, LoadLearner
+from .sizing import SizingHistory
 
 
 @dataclass(slots=True)
@@ -55,6 +56,8 @@ class RuntimeState:
     # hardware. Preserve the operator's manual settings for immediate opt-out.
     adaptive_enabled: bool = False
     adaptive_history: list[dict[str, Any]] = field(default_factory=list)
+    sizing_history: SizingHistory = field(default_factory=SizingHistory)
+    sizing_assessment: dict[str, Any] = field(default_factory=dict)
     # Manual operating override. `auto` follows the optimizer plan; a forced
     # mode (charge/battery/grid) commands that action every refresh so the
     # physical functions can be verified independently of the price plan.
@@ -86,6 +89,7 @@ class RuntimeState:
             local_now = now
         self.actual_history.prune(local_now)
         self.measured_efficiency.prune(now)
+        self.sizing_history.prune(now)
         self.adaptive_history = [
             item for item in self.adaptive_history
             if _is_recent_timestamp(item.get("timestamp"), now - timedelta(days=30))
@@ -166,6 +170,8 @@ class RuntimeState:
             "opportunistic_charging_enabled": self.opportunistic_charging_enabled,
             "adaptive_enabled": self.adaptive_enabled,
             "adaptive_history": self.adaptive_history[-100:],
+            "sizing_history": self.sizing_history.as_dict(),
+            "sizing_assessment": self.sizing_assessment,
             "forecast_accuracies": {
                 source: accuracy.as_dict()
                 for source, accuracy in self.forecast_accuracies.items()
@@ -199,6 +205,8 @@ class RuntimeState:
             },
             "adaptive_enabled": self.adaptive_enabled,
             "adaptive_history": self.adaptive_history[-100:],
+            "sizing_history": self.sizing_history.as_dict(),
+            "sizing_assessment": self.sizing_assessment,
         }
 
     @classmethod
@@ -273,6 +281,11 @@ class RuntimeState:
                 dict(item) for item in (data.get("adaptive_history") or [])[-100:]
                 if isinstance(item, dict)
             ] if isinstance(data.get("adaptive_history", []), list) else [],
+            sizing_history=SizingHistory.from_dict(data.get("sizing_history", {})),
+            sizing_assessment=(
+                dict(data["sizing_assessment"])
+                if isinstance(data.get("sizing_assessment"), dict) else {}
+            ),
             override_action=str(data.get("override_action", "auto") or "auto"),
             forecast_accuracies=accuracies,
             daily_plan=DailyPlan.from_dict(data.get("daily_plan", {})),

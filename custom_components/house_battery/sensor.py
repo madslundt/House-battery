@@ -423,6 +423,7 @@ async def async_setup_entry(
             FbpStoragePolicySensor(coordinator),
             FbpBatteryLearningSensor(coordinator),
             FbpAdaptationSensor(coordinator),
+            FbpBatterySizingSensor(coordinator),
             FbpMeasuredRoundTripEfficiencySensor(coordinator),
             FbpPriceForecastAccuracySensor(coordinator),
             FbpDecisionHistorySensor(coordinator),
@@ -955,6 +956,36 @@ class FbpAdaptationSensor(Fbp1200Entity, SensorEntity):
         return {
             key: value for key, value in adaptation.items() if key != "state"
         } if isinstance(adaptation, dict) else {}
+
+
+class FbpBatterySizingSensor(Fbp1200Entity, SensorEntity):
+    """Expose a read-only sizing assessment and its financial evidence."""
+
+    _attr_name = "Battery sizing"
+    _attr_icon = "mdi:battery-plus-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options: ClassVar[list[str]] = [
+        "learning", "bigger_battery_better", "size_is_fine", "battery_too_big",
+    ]
+
+    def __init__(self, coordinator: Fbp1200Coordinator) -> None:
+        super().__init__(coordinator, "battery_sizing")
+
+    @property
+    def native_value(self) -> str | None:
+        sizing = self.coordinator.data.get("battery_sizing", {})
+        if not isinstance(sizing, dict):
+            return None
+        value = sizing.get("state", "learning")
+        return value if value in self._attr_options else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        sizing = self.coordinator.data.get("battery_sizing", {})
+        return {
+            key: value for key, value in sizing.items() if key != "state"
+        } if isinstance(sizing, dict) else {}
 
 
 class FbpMeasuredRoundTripEfficiencySensor(Fbp1200Entity, SensorEntity):

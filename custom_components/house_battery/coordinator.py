@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -101,6 +102,7 @@ from .policy import (
 )
 from .price import extract_rows, is_forecast_data, normalize_price_rows
 from .runtime import RuntimeState, RuntimeStore
+from .sizing import assess_sizing, sizing_prerequisites
 
 _LOGGER = logging.getLogger(__name__)
 _BAD_STATES = {"unknown", "unavailable", "none", ""}
@@ -134,6 +136,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_adaptation: dict[str, Any] = {}
         self._adaptation: dict[str, Any] = {}
         self._adaptation_dirty = False
+        self._sizing_task: asyncio.Task | None = None
+        self._sizing_request_key: str | None = None
+        self._sizing_retry_after: datetime | None = None
         self._forecast_planning_source: str | None = None
         # Coarse, non-detailed guideline over the *forecast* horizon only.
         # This is deliberately separate from ``self.plan``: the forecast is
@@ -1069,6 +1074,14 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Revoke old work and drain it before a replacement entry can write."""
         stop_required = self.runtime.execution_enabled or self.runtime.pending_safe
         self._unloading = True
+        self._sizing_request_key = None
+        sizing_task = self._sizing_task
+        if sizing_task is not None:
+            sizing_task.cancel()
+            try:
+                await sizing_task
+            except asyncio.CancelledError:
+                pass
         self._planning_revision += 1
         self.actuator.invalidate_pending_commands()
         async with self._refresh_lock:
@@ -1167,6 +1180,27 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             else None
         )
         local_now = dt_util.as_local(now)
+        sizing_source = sha256(repr((
+            DIRECT_LOAD_SOURCE if self.is_direct_local else self.config.get(CONF_LOAD_POWER),
+            self.config.get(CONF_HOST) if self.is_direct_local else None,
+            self.config.get("port", DEFAULT_PORT) if self.is_direct_local else None,
+            tuple(self.config.get(CONF_PRICE_ENTITIES, [])),
+        )).encode()).hexdigest()
+        old_sizing_source = self.runtime.sizing_history.source
+        self.runtime.sizing_history.configure(sizing_source)
+        if old_sizing_source != sizing_source:
+            self._sizing_request_key = None
+        current_price_slot = next((
+            slot for slot in slots if slot.start <= now < slot.end and slot.source == "known"
+        ), None)
+        sizing_should_save = self.runtime.sizing_history.observe(
+            now,
+            load_w=self._load_power()
+            if not local_problem and grid_available is True else None,
+            price=current_price_slot.price if current_price_slot else None,
+            price_start=(current_price_slot.tariff_start or current_price_slot.start)
+            if current_price_slot else None,
+        ) or old_sizing_source != sizing_source
         actual_history_should_save = self.runtime.actual_history.record(
             local_now,
             soc,
@@ -1604,6 +1638,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             or actual_history_should_save
             or efficiency_should_save
             or self._adaptation_dirty
+            or sizing_should_save
         ):
             # RuntimeStore writes atomically, so persisting the whole runtime
             # publishes the reconciled daily plan without risk of a partial
@@ -1926,6 +1961,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_refresh": now.isoformat(),
         }
         data.update(plan_economics(self.plan, runtime_settings))
+        data["battery_sizing"] = self._battery_sizing_status(
+            local_now, runtime_settings, round_trip_summary,
+        )
         data["adaptation"] = {
             **self._adaptation,
             "planning_efficiency_pct": planning_efficiency * 100,
@@ -1968,6 +2006,93 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._recovery_reload_reason = None
             self.hass.async_create_task(self._async_reload_for_recovery(reason))
         return data
+
+    def _battery_sizing_status(
+        self, now: datetime, settings: PlannerSettings, efficiency_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Publish cached sizing evidence and schedule bounded offline evaluation."""
+        slots, evidence = self.runtime.sizing_history.completed_slots(now)
+        settings = replace(
+            settings,
+            target_soc=OPPORTUNISTIC_TARGET_SOC
+            if self.runtime.opportunistic_charging_enabled else settings.target_soc,
+        )
+        values = self.runtime.settings
+        options = {
+            "expansion_capacity_kwh": values["sizing_expansion_capacity_kwh"],
+            "expansion_cost_dkk": values["sizing_expansion_cost_dkk"],
+            "payback_target_years": values["sizing_payback_target_years"],
+        }
+        reason = sizing_prerequisites(
+            settings, evidence=evidence, efficiency_summary=efficiency_summary,
+        )
+        learning = {
+            "state": "learning", "reason": reason or "Analyzing recorded usage and prices",
+            "evidence": evidence, "current_capacity_kwh": settings.capacity_wh / 1000,
+            "planning_efficiency_pct": settings.round_trip_efficiency * 100,
+            "assessment_ready": reason is None,
+            "efficiency_measurement_status": efficiency_summary.get("status"),
+            **options,
+        }
+        if reason:
+            self._sizing_request_key = None
+            return learning
+        request_key = sha256(repr((
+            settings, options, self.runtime.sizing_history.source,
+            efficiency_summary.get("source"),
+            [(slot.start, slot.end, slot.price, slot.expected_load_wh) for slot in slots],
+        )).encode()).hexdigest()
+        self._sizing_request_key = request_key
+        cached = self.runtime.sizing_assessment
+        if cached.get("request_key") == request_key and _valid_sizing_result(cached):
+            return deepcopy(cached)
+        if self._sizing_retry_after is not None and now < self._sizing_retry_after:
+            return {
+                **learning,
+                "reason": "Sizing analysis could not complete; an automatic retry is scheduled",
+                "next_retry_at": self._sizing_retry_after.isoformat(),
+            }
+        if (self._sizing_task is None or self._sizing_task.done()) and (
+            self._sizing_retry_after is None or now >= self._sizing_retry_after
+        ) and not self._unloading:
+            self._sizing_task = self.hass.async_create_task(
+                self._async_assess_battery_size(
+                    request_key, tuple(slots), settings, deepcopy(evidence),
+                    deepcopy(efficiency_summary), options,
+                ),
+            )
+        return learning
+
+    async def _async_assess_battery_size(
+        self, request_key: str, slots: tuple[PriceSlot, ...], settings: PlannerSettings,
+        evidence: dict[str, Any], efficiency_summary: dict[str, Any], options: dict[str, float],
+    ) -> None:
+        """Keep sizing simulations outside the battery-control refresh and event loop."""
+        try:
+            result = await self.hass.async_add_executor_job(partial(
+                assess_sizing, slots, settings, evidence=evidence,
+                efficiency_summary=efficiency_summary, **options,
+            ))
+            if not _valid_sizing_result(result):
+                raise ValueError("Sizing assessment is not a finite supported result")
+            if self._unloading or self._sizing_request_key != request_key:
+                return
+            self.runtime.sizing_assessment = {
+                **result, "request_key": request_key,
+                "evaluated_at": datetime.now(UTC).isoformat(),
+            }
+            await self.store.save(self.runtime)
+            if not self._unloading and self._sizing_request_key == request_key:
+                self.async_set_updated_data({
+                    **(self.data or {}),
+                    "battery_sizing": deepcopy(self.runtime.sizing_assessment),
+                })
+            self._sizing_retry_after = None
+        except Exception:
+            _LOGGER.exception("Battery sizing analysis failed; normal control continues")
+            self._sizing_retry_after = datetime.now(UTC) + timedelta(hours=1)
+        finally:
+            self._sizing_task = None
 
     async def async_set_execution_enabled(self, enabled: bool) -> None:
         if self._unloading:
@@ -2034,6 +2159,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_set_opportunistic_charging_enabled(self, enabled: bool) -> None:
         """Opt in to a higher target only when a known profitable cycle exists."""
         self._planning_revision += 1
+        self._sizing_request_key = None
         self.actuator.invalidate_pending_commands()
         self.runtime.opportunistic_charging_enabled = enabled
         await self.store.save(self.runtime)
@@ -2041,6 +2167,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_set_setting(self, key: str, value: float) -> None:
         self._planning_revision += 1
+        self._sizing_request_key = None
         self.actuator.invalidate_pending_commands()
         if key == "target_soc" and value < self.runtime.settings[key]:
             # An explicit user reduction cancels old held ceilings. Keep past
@@ -2193,6 +2320,23 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def export_data(self) -> dict[str, Any]:
         return self.runtime.export(self.entry.title, self.data)
+
+
+def _valid_sizing_result(value: Any) -> bool:
+    """Never publish malformed or non-finite restored financial estimates."""
+    return isinstance(value, dict) and value.get("state") in {
+        "learning", "bigger_battery_better", "size_is_fine", "battery_too_big",
+    } and _finite_json(value)
+
+
+def _finite_json(value: Any) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _finite_json(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return all(_finite_json(item) for item in value)
+    return value is None or isinstance(value, (str, int, bool))
 
 
 def _control_number(controls: dict[str, str], key: str) -> float | None:
