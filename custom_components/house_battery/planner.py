@@ -6,7 +6,7 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from math import ceil, floor, sqrt
+from math import ceil, floor, isfinite, sqrt
 
 from .models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 
@@ -30,7 +30,8 @@ _TERMINAL_PRICE_LOOKBACK = timedelta(hours=3)
 _TERMINAL_PRICE_HAIRCUT = 0.75
 
 
-def _future_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
+def future_price_slots(slots: Iterable[PriceSlot], now: datetime) -> list[PriceSlot]:
+    """Return the valid future tariff prefix, stopping at gaps or overlaps."""
     ordered = sorted(
         (slot for slot in slots if slot.end > now), key=lambda item: item.start
     )
@@ -426,19 +427,25 @@ def optimize(
     settings: PlannerSettings,
     current_action: Action = Action.GRID,
     committed_slot: PlannedSlot | None = None,
+    terminal_price_floor_dkk_per_kwh: float = 0.0,
 ) -> Plan:
     """Plan future intervals from observed SOC and an optional held current slot.
 
     The coordinator supplies the already-published action and permitted charge
     ceiling. They constrain only the remainder of that same tariff interval.
+    Optional storage policy may supply a conservative carryover price floor;
+    it affects the optimization objective and terminal credit, never cash cost.
     """
     settings.validate()
+    if (not isfinite(terminal_price_floor_dkk_per_kwh)
+            or terminal_price_floor_dkk_per_kwh < 0):
+        raise ValueError("Terminal price floor must be finite and nonnegative")
     source_slots = tuple(slots)
     first_slot_is_partial = any(
         (slot.tariff_start or slot.start) < now < slot.end
         for slot in source_slots
     )
-    valid = _future_slots(source_slots, now)
+    valid = future_price_slots(source_slots, now)
     if valid and valid[0].start > now:
         return Plan(
             now,
@@ -614,7 +621,9 @@ def optimize(
 
     # An unavailable discharge path cannot redeem stored energy later. Giving
     # it a carryover credit would buy power for an unexecutable arbitrage cycle.
-    terminal_price = _terminal_price(valid) if settings.discharge_enabled else 0.0
+    terminal_price = max(
+        _terminal_price(valid), terminal_price_floor_dkk_per_kwh,
+    ) if settings.discharge_enabled else 0.0
     discharge_efficiency = sqrt(settings.round_trip_efficiency)
     # Value leftover energy at its best future discharge opportunity: the
     # replacement price less the real degradation wear. The required profit

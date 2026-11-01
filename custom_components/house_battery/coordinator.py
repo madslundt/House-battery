@@ -92,12 +92,13 @@ from .models import (
     estimate_battery_runtime_hours,
     normalize_grid_flow,
 )
-from .planner import optimize
+from .planner import future_price_slots, optimize
 from .policy import (
     OpportunisticPlanDecision,
     action_from_operating_mode,
     apply_storage_policy,
     parse_grid_available,
+    relative_storage_value,
     select_opportunistic_plan,
 )
 from .price import extract_rows, is_forecast_data, normalize_price_rows
@@ -884,6 +885,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.runtime.opportunistic_charging_enabled
             if opportunistic_enabled is None else opportunistic_enabled
         )
+        # Compare both ceilings using the same continuation value. Historical
+        # prices temper the forecast reference; neither changes cash savings.
+        # Only credit intervals accepted by the optimizer's horizon validation.
+        storage_value = relative_storage_value(
+            future_price_slots(slots, now),
+            historical_slots=self.runtime.sizing_history.recent_price_slots(now),
+        ) if enabled else 0.0
         normal_plan = optimize(
             slots,
             now=now,
@@ -891,6 +899,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             settings=settings,
             current_action=current_action,
             committed_slot=committed_slot,
+            terminal_price_floor_dkk_per_kwh=storage_value,
         )
         opportunistic_settings = replace(
             settings,
@@ -914,14 +923,25 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             settings=opportunistic_settings,
             current_action=current_action,
             committed_slot=committed_slot,
+            terminal_price_floor_dkk_per_kwh=storage_value,
         )
-        return select_opportunistic_plan(
+        decision = select_opportunistic_plan(
             normal_plan,
             opportunistic_plan,
             settings,
             opportunistic_settings,
             enabled=True,
         )
+        if storage_value > 0:
+            decision = replace(
+                decision,
+                reason=(
+                    f"{decision.reason}; relative storage reference "
+                    f"{storage_value:.2f} DKK/kWh from upcoming prices and "
+                    "qualified recent history when available"
+                ),
+            )
+        return decision
 
     def _observed_action(self) -> Action:
         if self.is_direct_local:

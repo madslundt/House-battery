@@ -23,7 +23,7 @@ from house_battery.const import (
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.dailyplan import merge_adjacent_blocks
 from house_battery.models import Action, PlannerSettings, PriceSlot
-from house_battery.planner import _future_slots, optimize
+from house_battery.planner import future_price_slots, optimize
 from house_battery.price import normalize_price_rows_with_report
 
 FIXTURE = Path(__file__).parent / "fixtures" / "prices_2026-09-25_26.json"
@@ -296,7 +296,7 @@ def test_native_fall_back_horizon_reaches_peak_and_plans_cheap_charging():
     slots = [replace(slot, expected_load_wh=222 * .25) for slot in report.slots]
     now = datetime(2026, 10, 24, 22, tzinfo=UTC)
     horizon_end = datetime(2026, 10, 25, 23, tzinfo=UTC)
-    future = _future_slots(slots, now)
+    future = future_price_slots(slots, now)
     assert len(future) == 100
     assert future[-1].end == horizon_end
 

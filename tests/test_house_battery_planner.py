@@ -14,6 +14,60 @@ from house_battery.planner import optimize
 BASE = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
 
 
+def test_relative_cheap_prices_fill_battery_even_when_some_energy_is_carried_over():
+    from house_battery.policy import relative_storage_value
+
+    prices = [.2] * 2 + [2] * 40 + [5] * 3 + [.3] * 3
+    horizon = [PriceSlot(BASE + timedelta(hours=i), BASE + timedelta(hours=i + 1),
+                         price, 25) for i, price in enumerate(prices)]
+    policy = settings(capacity_wh=2000, target_soc=100)
+    original = optimize(horizon, now=BASE, soc=20, settings=policy)
+    plan = optimize(
+        horizon, now=BASE, soc=20, settings=policy,
+        terminal_price_floor_dkk_per_kwh=relative_storage_value(horizon),
+    )
+
+    assert max(slot.soc_end for slot in original.slots[:2]) < 90
+    assert max(slot.soc_end for slot in plan.slots[:2]) == 100
+    assert any(slot.action is Action.BATTERY for slot in plan.slots if slot.price == 5)
+    assert plan.slots[-1].soc_end > 80
+    assert plan.realized_savings_dkk == pytest.approx(
+        plan.baseline_cost_dkk - plan.expected_cost_dkk,
+    )
+    assert plan.expected_savings_dkk == pytest.approx(
+        plan.realized_savings_dkk + plan.terminal_value_dkk,
+    )
+
+
+@pytest.mark.parametrize("floor", [-1, float("nan"), float("inf"), float("-inf")])
+def test_terminal_price_floor_rejects_invalid_values(floor):
+    with pytest.raises(ValueError, match="Terminal price floor"):
+        optimize(slots([1]), now=BASE, soc=20, settings=settings(),
+                 terminal_price_floor_dkk_per_kwh=floor)
+
+
+def test_relative_storage_value_does_not_create_a_flat_price_arbitrage():
+    from house_battery.policy import relative_storage_value
+
+    horizon = [PriceSlot(BASE + timedelta(hours=i), BASE + timedelta(hours=i + 1), 2, 25)
+               for i in range(48)]
+    plan = optimize(horizon, now=BASE, soc=20, settings=settings(target_soc=100),
+                    terminal_price_floor_dkk_per_kwh=relative_storage_value(horizon))
+
+    assert all(slot.action is Action.GRID for slot in plan.slots)
+    assert plan.battery_throughput_kwh == 0
+
+
+def test_storage_floor_does_not_credit_an_unavailable_discharge_path():
+    plan = optimize(
+        slots([.2] * 8 + [4] * 16), now=BASE, soc=20,
+        settings=settings(discharge_enabled=False), terminal_price_floor_dkk_per_kwh=10,
+    )
+
+    assert plan.terminal_value_dkk == 0
+    assert all(slot.action is Action.GRID for slot in plan.slots)
+
+
 @pytest.mark.parametrize("soc", [20, 70])
 def test_disabled_discharge_has_no_arbitrage_or_terminal_credit(soc) -> None:
     plan = optimize(

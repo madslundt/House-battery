@@ -73,7 +73,7 @@ local TCP or command failures.
 | **Known price spread** | Highest minus lowest price in the known future horizon. |
 | **Best effective price margin** | Best spread after round-trip losses and degradation cost. It must clear the effective profit margin; the configured **Minimum required profit** applies while adaptive planning is off or still learning. |
 | **Effective charge target SOC** | Actual ceiling for this plan: normal maximum or the temporary opportunistic ceiling. |
-| **Extra storage policy** | `normal` or `active`, with the effective target and explanation in attributes. With opt-in enabled, meaningful extra charging can activate when it improves the risk-adjusted objective, including enabled forecasts and conservative value for energy left beyond the horizon. Manual overrides use the normal charge ceiling. |
+| **Extra storage policy** | `normal` or `active`, with the effective target and explanation in attributes. With opt-in enabled, meaningful extra charging can activate when it improves the risk-adjusted objective, including enabled forecasts and conservative value for energy left beyond the horizon. A relative-price reference uses the next seven days and qualified recent historical import prices, allowing very cheap periods to fill to 100% even when some energy remains stored. Manual overrides use the normal charge ceiling. |
 
 Runtime assumes the current load remains constant, without future charging.
 It remains available while charging or using the grid and does not predict when

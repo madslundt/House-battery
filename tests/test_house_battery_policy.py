@@ -5,6 +5,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from house_battery.models import PlannerSettings, PriceSlot
@@ -12,8 +14,79 @@ from house_battery.planner import optimize
 from house_battery.policy import (
     apply_storage_policy,
     parse_grid_available,
+    relative_storage_value,
     select_opportunistic_plan,
 )
+
+
+def test_relative_storage_value_uses_future_prices_and_qualified_history():
+    start = datetime(2026, 11, 1, tzinfo=UTC)
+    future = [PriceSlot(start + timedelta(hours=i), start + timedelta(hours=i + 1), 2)
+              for i in range(48)]
+    history = [PriceSlot(start - timedelta(hours=i + 1), start - timedelta(hours=i), 1)
+               for i in range(72)]
+
+    assert relative_storage_value(future) == 1.5
+    assert relative_storage_value(future, historical_slots=history) == .75
+
+
+def _hourly_prices(prices, *, uncertainty=0):
+    start = datetime(2026, 11, 1, tzinfo=UTC)
+    return [PriceSlot(start + timedelta(hours=i), start + timedelta(hours=i + 1),
+                      price, source="forecast" if uncertainty else "known",
+                      uncertainty_dkk_per_kwh=uncertainty)
+            for i, price in enumerate(prices)]
+
+
+@pytest.mark.parametrize("prices,uncertainty,expected", [
+    ([.2] * 2 + [2] * 43 + [.3] * 3, 0, 1.5),
+    ([2] * 48, 1, .75),
+    ([2] * 48, 3, 0),
+    ([4] * 24 + [.2] * 24, 0, .15),
+    ([1] * (7 * 24) + [100] * (7 * 24), 0, .75),
+    ([2] * 23, 0, 0),
+])
+def test_relative_storage_value_uses_a_conservative_week_ahead(prices, uncertainty, expected):
+    assert relative_storage_value(_hourly_prices(prices, uncertainty=uncertainty)) == pytest.approx(expected)
+
+
+def test_relative_storage_value_weights_duration_instead_of_interval_count():
+    hourly = _hourly_prices([.2] * 6 + [2] * 42)
+    mixed = hourly[:6] + [
+        replace(slot, start=slot.start + timedelta(minutes=15 * i),
+                end=slot.start + timedelta(minutes=15 * (i + 1)))
+        for slot in hourly[6:] for i in range(4)
+    ]
+
+    assert relative_storage_value(hourly) == 1.5
+    assert relative_storage_value(mixed) == 1.5
+    assert relative_storage_value(hourly[:12] + hourly[13:]) == 0
+
+
+def test_relative_storage_value_ignores_invalid_price_evidence():
+    future = _hourly_prices([2] * 48)
+    invalid = replace(future[0], price=float("nan"))
+    naive = replace(future[0], start=future[0].start.replace(tzinfo=None))
+    reversed_slot = replace(future[0], end=future[0].start - timedelta(hours=1))
+
+    assert relative_storage_value([invalid, naive, reversed_slot, *future]) == 1.5
+    assert relative_storage_value(future, historical_slots=[invalid, naive]) == 1.5
+
+
+def test_history_can_temper_a_forecast_but_cannot_override_lower_future_prices():
+    future = _hourly_prices([4] * 24 + [.2] * 24)
+    start = future[0].start
+    history = [PriceSlot(start - timedelta(hours=i + 1), start - timedelta(hours=i), 10)
+               for i in range(72)]
+
+    assert relative_storage_value(future, historical_slots=history) == pytest.approx(.15)
+    low_history = [replace(slot, price=.1) for slot in history]
+    assert relative_storage_value(future, historical_slots=low_history) == pytest.approx(.075)
+    stale_history = [replace(slot, start=slot.start - timedelta(days=8),
+                             end=slot.end - timedelta(days=8)) for slot in low_history]
+    assert relative_storage_value(future, historical_slots=stale_history) == pytest.approx(.15)
+    assert relative_storage_value(future, historical_slots=low_history[:23]) == pytest.approx(.15)
+    assert relative_storage_value(future, historical_slots=low_history[:48]) == pytest.approx(.15)
 
 
 def settings() -> PlannerSettings:

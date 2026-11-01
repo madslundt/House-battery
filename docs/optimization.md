@@ -52,6 +52,22 @@ required profit**. That objective includes uncertainty-buffered forecasts when
 enabled and a conservative terminal value for energy carried beyond the horizon.
 The extra energy need not be discharged before known prices end, so estimated
 future value can justify charging even when cash savings within the horizon fall.
+For unusually cheap periods, this opt-in policy also compares upcoming prices
+with recent confirmed import prices. With at least 24 contiguous future hours,
+the duration-weighted lower price quartile over the next seven days, less a 25%
+uncertainty haircut, provides a conservative floor for carryover value. Forecast
+prices are reduced by their configured uncertainty before this comparison.
+If at least 24 covered historical hours across three UTC dates are available
+within the previous seven days, their weighted median, with the same haircut,
+caps this additional reference. Each historical hour needs at least 90% coverage;
+incomplete hours and old data are excluded. Higher historical prices never raise
+the reference above what upcoming prices support. During initial learning,
+future prices alone can provide the reference. Both candidate plans use the same
+reference, and the existing terminal estimate remains the fallback for short
+horizons. This can fill the battery to 100% even when only part of that energy
+will be used within the current horizon; full charging still requires sufficient
+time, power and economic benefit. Terminal credit remains separate from planned
+bill savings and measured savings.
 Manual operating overrides always retain the configured normal charge ceiling.
 
 ## Adaptive planning

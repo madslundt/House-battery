@@ -176,6 +176,28 @@ class SizingHistory:
             }
         return model
 
+    def recent_price_slots(self, now: datetime) -> list[PriceSlot]:
+        """Return confirmed hourly prices from the past seven days.
+
+        Each completed hour needs at least 90% measured coverage. Unlike a
+        sizing assessment, a storage-price reference does not require 28
+        complete days or qualified efficiency. Source scope still applies.
+        """
+        if now.tzinfo is None:
+            raise ValueError("Sizing timestamps must be timezone-aware")
+        cutoff = now.timestamp() - 7 * 86400
+        hours = self._hours.copy()
+        return [PriceSlot(
+            datetime.fromtimestamp(start, UTC),
+            datetime.fromtimestamp(start + 3600, UTC),
+            values["price_seconds"] / values["coverage_seconds"],
+            expected_load_wh=values["load_wh"] * 3600 / values["coverage_seconds"],
+        ) for start, values in sorted(hours.items()) if (
+            cutoff <= start and start + 3600 <= now.timestamp()
+            and values["coverage_seconds"] >= 3600 * _MIN_HOUR_COVERAGE
+            and values["covered_until"] <= now.timestamp()
+        )]
+
     def completed_slots(self, now: datetime) -> tuple[list[PriceSlot], dict[str, Any]]:
         """Select recent covered local days, extending for sufficient weekend evidence."""
         self.prune(now)

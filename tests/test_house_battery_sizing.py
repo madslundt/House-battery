@@ -24,6 +24,31 @@ def settings() -> PlannerSettings:
     )
 
 
+def test_recent_price_slots_need_covered_completed_hours_without_sizing_readiness():
+    now = datetime(2026, 11, 1, 12, 30, tzinfo=UTC)
+    hours = []
+    for start, coverage, price in (
+        (now.replace(hour=10, minute=0), 3240, 1),
+        (now.replace(hour=11, minute=0), 3600, 2),
+        (now.replace(hour=9, minute=0), 3000, 3),
+        (now.replace(minute=0), 1800, 4),
+        (now.replace(minute=0) - timedelta(days=7), 3600, 5),
+        (now.replace(hour=13, minute=0), 3600, 6),
+    ):
+        hours.append({"start": start.isoformat(), "coverage_seconds": coverage,
+                      "load_wh": 100, "price_seconds": price * coverage})
+    history = SizingHistory.from_dict({"source": "confirmed-import", "hours": hours})
+    before = history.as_dict()
+
+    slots = history.recent_price_slots(now)
+
+    assert [(slot.start.hour, slot.price) for slot in slots] == [(10, 1), (11, 2)]
+    assert all(slot.hours == 1 and slot.source == "known" for slot in slots)
+    assert history.as_dict() == before
+    history.configure("changed-import-source")
+    assert history.recent_price_slots(now) == []
+
+
 def measurement(**changes) -> dict:
     return {"source": "independent-meter-fingerprint", "method": "matched_soc_grid_meter",
             "status": "ready", "planning_efficiency_pct": 80, "sample_count": 3, **changes}

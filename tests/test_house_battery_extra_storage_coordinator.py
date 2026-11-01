@@ -29,6 +29,7 @@ from house_battery.const import (
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.dailyplan import DailyPlan
 from house_battery.models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
+from house_battery.price import normalize_price_rows
 from house_battery.runtime import RuntimeState
 
 NOW = datetime(2026, 9, 21, 10, tzinfo=UTC)
@@ -177,6 +178,100 @@ def test_coordinator_selects_full_charge_only_when_opted_in_and_profitable() -> 
         for slot in decision.plan.slots if slot.action is Action.CHARGE
     )
     assert any(slot.charge_target_soc == 100 for slot in decision.plan.slots)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_relative_price_reference_is_shared_by_both_ceiling_plans(monkeypatch, enabled):
+    """History and forecasts must value normal/full carryover identically."""
+    runtime = RuntimeState(opportunistic_charging_enabled=enabled)
+    coordinator = SimpleNamespace(runtime=runtime)
+    slots = [
+        PriceSlot(NOW + timedelta(hours=i), NOW + timedelta(hours=i + 1), price, 25)
+        for i, price in enumerate([.2] * 2 + [2.] * 43 + [.3] * 3)
+    ]
+    settings = PlannerSettings(
+        capacity_wh=2000, reserve_soc=20, target_soc=90,
+        charge_power_w=1200, discharge_power_w=800,
+        round_trip_efficiency=.85, degradation_cost_dkk_per_kwh=.35,
+        minimum_profit_dkk_per_kwh=.75, switching_penalty_dkk=.05,
+    )
+    historical = [
+        PriceSlot(NOW - timedelta(hours=i + 1), NOW - timedelta(hours=i), 1.)
+        for i in range(72)
+    ]
+    monkeypatch.setattr(
+        type(runtime.sizing_history), "recent_price_slots", lambda self, now: historical
+    )
+    solver = coordinator_module.optimize
+    floors = []
+
+    def capture(*args, **kwargs):
+        floors.append(kwargs["terminal_price_floor_dkk_per_kwh"])
+        return solver(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator_module, "optimize", capture)
+    decision = Fbp1200Coordinator._optimize_with_storage_policy(
+        coordinator, slots, now=NOW, soc=20, settings=settings,
+        current_action=Action.GRID,
+    )
+    assert floors == ([.75, .75] if enabled else [0.])
+    if enabled:
+        assert decision.active
+        assert max(slot.soc_end for slot in decision.plan.slots[:2]) == 100
+        assert decision.plan.slots[-1].soc_end > 80
+        assert "relative storage reference 0.75 DKK/kWh" in decision.reason
+    else:
+        assert not decision.active
+
+
+@pytest.mark.parametrize("overlap_minute", [0, 30])
+@pytest.mark.parametrize("now_minute", [0, 5])
+def test_overlapping_prices_do_not_credit_rejected_future_intervals(
+    monkeypatch, overlap_minute, now_minute,
+):
+    """Overlapping feeds must not turn a one-hour plan into extra charging."""
+    rows = [
+        {"start": NOW + timedelta(hours=i), "end": NOW + timedelta(hours=i + 1),
+         "price": .2 if i == 0 else 2.}
+        for i in range(48)
+    ]
+    rows.append({
+        "start": NOW + timedelta(minutes=overlap_minute),
+        "end": NOW + timedelta(minutes=overlap_minute + 15), "price": .2,
+    })
+    slots = [
+        PriceSlot(slot.start, slot.end, slot.price, expected_load_wh=25 * slot.hours)
+        for slot in normalize_price_rows(rows)
+    ]
+    settings = PlannerSettings(
+        capacity_wh=2000, reserve_soc=20, target_soc=90,
+        charge_power_w=1200, discharge_power_w=800,
+        round_trip_efficiency=.85, degradation_cost_dkk_per_kwh=.35,
+        minimum_profit_dkk_per_kwh=.75, switching_penalty_dkk=.05,
+    )
+    coordinator = SimpleNamespace(
+        runtime=RuntimeState(opportunistic_charging_enabled=True),
+    )
+    solver = coordinator_module.optimize
+    floors = []
+
+    def capture(*args, **kwargs):
+        floors.append(kwargs["terminal_price_floor_dkk_per_kwh"])
+        return solver(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator_module, "optimize", capture)
+    decision = Fbp1200Coordinator._optimize_with_storage_policy(
+        coordinator, slots, now=NOW + timedelta(minutes=now_minute), soc=20,
+        settings=settings, current_action=Action.GRID,
+    )
+
+    assert floors == [0., 0.]
+    assert len(decision.plan.slots) == 1
+    assert decision.plan.slots[0].end == NOW + timedelta(hours=1)
+    assert decision.plan.slots[0].action is Action.GRID
+    assert decision.plan.slots[0].soc_end == 20
+    assert decision.plan.expected_cost_dkk == pytest.approx(.005 * (1 - now_minute / 60))
+    assert not decision.active
 
 
 def test_plan_today_dict_filters_out_tomorrow() -> None:

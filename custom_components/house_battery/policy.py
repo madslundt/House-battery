@@ -2,12 +2,82 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, timedelta
+from math import isfinite
 
-from .models import Action, Plan, PlannerSettings
+from .models import Action, Plan, PlannerSettings, PriceSlot
 
 _GRID_AVAILABLE = {"1", "on", "available", "grid", "on_grid", "connected", "true"}
 _GRID_UNAVAILABLE = {"0", "off", "no_grid", "disconnected", "false"}
+
+
+def relative_storage_value(
+    slots: Iterable[PriceSlot], *, historical_slots: Iterable[PriceSlot] = (),
+) -> float:
+    """Conservative carryover price from the next and previous seven days.
+
+    Callers supply the contiguous future planning horizon, starting at now.
+    At least 24 hours are required. Its duration-weighted lower price quartile
+    uses forecast prices minus uncertainty. Qualified history spanning at least
+    three UTC dates and 24 hours can cap that reference at its weighted median;
+    it can never raise the value above what upcoming prices justify. A 25%
+    haircut allows for prices beyond the horizon being unknown. Missing or
+    short history leaves the future reference usable during initial learning.
+    """
+    future = sorted((slot for slot in slots if (
+        slot.start.tzinfo is not None and slot.end.tzinfo is not None
+        and slot.end > slot.start and isfinite(slot.discharge_price_dkk_per_kwh)
+    )), key=lambda slot: slot.start)
+    if not future:
+        return 0.0
+    start = future[0].start.astimezone(UTC)
+    end = start + timedelta(days=7)
+    samples: list[tuple[float, float]] = []
+    cursor = start
+    for slot in future:
+        left, right = max(start, slot.start), min(end, slot.end)
+        if left > cursor:
+            break
+        left = max(left, cursor)
+        if right <= left:
+            continue
+        samples.append((slot.discharge_price_dkk_per_kwh,
+                        (right.astimezone(UTC) - left.astimezone(UTC)).total_seconds()))
+        cursor = right
+    if sum(weight for _, weight in samples) < 24 * 3600:
+        return 0.0
+    reference = _weighted_price_quantile(samples, .25)
+
+    history_start = start - timedelta(days=7)
+    historical: list[tuple[float, float]] = []
+    historical_days = set()
+    cursor = history_start
+    history = sorted((slot for slot in historical_slots if (
+        slot.source == "known" and slot.start.tzinfo is not None
+        and slot.end.tzinfo is not None and isfinite(slot.price) and slot.end <= start
+    )), key=lambda slot: slot.start)
+    for slot in history:
+        left, right = max(history_start, slot.start, cursor), slot.end
+        if right <= left:
+            continue
+        historical.append((slot.price,
+                           (right.astimezone(UTC) - left.astimezone(UTC)).total_seconds()))
+        historical_days.add(left.astimezone(UTC).date())
+        cursor = right
+    if len(historical_days) >= 3 and sum(weight for _, weight in historical) >= 24 * 3600:
+        reference = min(reference, _weighted_price_quantile(historical, .5))
+    return max(0.0, reference * .75)
+
+
+def _weighted_price_quantile(samples: list[tuple[float, float]], quantile: float) -> float:
+    remaining = sum(weight for _, weight in samples) * quantile
+    for price, weight in sorted(samples):
+        remaining -= weight
+        if remaining <= 0:
+            return price
+    return samples[-1][0]
 
 
 def parse_grid_available(value: str | None) -> bool | None:
