@@ -487,6 +487,13 @@ class FbpSystemStateSensor(Fbp1200Entity, SensorEntity):
             "command_result",
             "health_problems",
             "last_refresh",
+            "control_capabilities",
+            "load_forecast_status",
+            "issued_load_forecast_accuracy",
+            "policy_replay_evidence",
+            "planning_evidence_error",
+            "price_input_diagnostics",
+            "load_model_smoothing_error_w",
         )
         return {key: self.coordinator.data.get(key) for key in keys}
 

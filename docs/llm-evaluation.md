@@ -26,6 +26,42 @@ and price-forecast accuracy. Review the data before sending it outside Home
 Assistant. It is designed to omit common secrets, but it is still your
 operational data.
 
+## Offline policy replay
+
+New exports include `load_forecast_evidence` and `replay`. Replay preserves issued
+price/load horizons, effective settings, terminal-value anchor, current discharge
+eligibility, SOC, action and published commitment. Realized demand and known
+prices are recorded separately. Older history is not backfilled as if issued
+inputs had existed. The summary shows actual retained input bounds; the 256
+snapshot cap can retain only several hours at minute cadence.
+
+Save the direct `house_battery.export_data` response as JSON, then run locally
+from this repository using its Home Assistant development environment:
+
+```bash
+.venv/bin/python scripts/replay_policies.py /absolute/path/evidence.json --settlement-price 1.50
+```
+
+Choose an explicit common all-in DKK/kWh replacement price for settling final
+stored inventory. The output compares captured effective DP settings, the
+same settings with a zero profit hurdle, and a no-battery reference. Each
+candidate carries its own simulated SOC and sees only issued inputs; stock
+settlement is reported separately from cash cost. Metrics include bill cost,
+wear, switching, throughput, cycles, reserve shortfalls, interventions, energy
+balance and data coverage. This evaluates captured effective settings, rather
+than replaying adaptation or reselecting opportunistic target settings from an
+uncaptured historical learner.
+
+These are simulated policy comparisons using a common conservative scalar-loss
+plant, not measured savings. Demand is a mean within each actual quarter-hour;
+intervals with less than 90% coverage, missing tariffs, or multiple different
+tariffs within a quarter are excluded. Substantially covered load is normalized
+to the full interval and original coverage remains reported. Stale inputs,
+scope changes and gaps split the simulation and settle inventory. Standby,
+temperature/taper curves and measured SOC prediction-error metrics require
+additional plant evidence. No replay command connects to Home Assistant or
+controls the battery.
+
 Use a 14 to 28 day window when the battery has been operating normally. A
 shorter window is useful for diagnosing an incident; it is not enough evidence
 for a policy change. Exclude or label outages, `DEGRADED`/`RECOVERING` periods,

@@ -50,10 +50,11 @@ def test_current_tariff_preserves_remaining_scheduled_load_and_mode(monkeypatch)
     async def scenario():
         coord, client, hass, _ = await make_coordinator(now=now)
         coord._local_snapshot = await client.async_snapshot()
+        coord.runtime.load_learner.baseline_fallback(now - timedelta(minutes=1), 250, [])
         coord.runtime.scheduled_loads = [{
             "start": now.isoformat(),
             "end": (now + timedelta(minutes=15)).isoformat(),
-            "additional_w": 1000,
+            "additional_w": 500,
             "label": "Cooking",
         }]
         start = now.replace(minute=0)
@@ -65,13 +66,13 @@ def test_current_tariff_preserves_remaining_scheduled_load_and_mode(monkeypatch)
 
         slots = coord._price_slots(now)
         assert slots[0].start == now
-        # 250 W baseline and 1000 W scheduled load both remain for 15 minutes.
-        assert slots[0].expected_load_wh == pytest.approx(312.5)
+        # 250 W baseline and 500 W extra load remain within the isolated 800 W limit.
+        assert slots[0].expected_load_wh == pytest.approx(187.5)
         plan = optimize(
             slots, now=now, soc=50, settings=coord._settings(),
             current_action=Action.BATTERY,
         )
-        assert plan.slots[0].expected_load_wh == pytest.approx(312.5)
+        assert plan.slots[0].expected_load_wh == pytest.approx(187.5)
         assert plan.slots[0].action is Action.BATTERY
 
     monkeypatch.setattr(coordinator_module, "datetime", Clock)

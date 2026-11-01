@@ -17,17 +17,27 @@ Direct-local battery telemetry or legacy provider entities + price + load
       native SOC/power controls + local battery mode command
 ```
 
-The integration never controls relays, grid wiring, or a transfer switch. The
-direct-local TCP adapter supplies FBP1200 telemetry and control. Legacy entries
-can use entities from an existing battery provider instead.
+The direct-local TCP adapter supplies FBP1200 telemetry and control. An explicitly
+configured mains-input plug is isolated before direct Battery mode and restored
+on exit. The integration does not manage grid wiring or act as a transfer-switch
+safety controller. Legacy entries can use entities from an existing provider.
 
 ## Forecasting
 
 `LoadLearner` continuously records observed load in 15-minute buckets. Its
-forecast combines a time-of-week profile over the preceding seven days with a
-recent-observation blend. The plan adds any future manual scheduled loads to
-that baseline. The integration exposes coverage and mean absolute forecast
-error so poor evidence is observable rather than hidden.
+forecast combines a weekday/time profile with a recent-observation blend.
+Quarter-hour observations are integrated across each tariff interval. History
+begins contributing at the fourth matching weekly observation and reaches its
+full weight at twelve. Scheduled incremental loads use a separately held
+background; overlapping declared windows are excluded from baseline training.
+Missing credible background during an active declaration withholds planning.
+
+`LoadForecastEvidence` stores first-issued quarter-hour predictions per lead
+band, independently integrates raw total demand, and scores substantially
+covered actual intervals. Restart and missing-data gaps are never bridged.
+The forecast MAE sensor uses this evidence; online smoothing error remains a
+separate diagnostic. Analytics capture failures are exposed without interrupting
+the control loop.
 
 `BatteryLearner` accumulates stable observed charge/discharge windows to
 estimate usable capacity and round-trip efficiency. Until sufficient evidence
@@ -63,6 +73,13 @@ For each slot it considers `grid`, `charge`, and `battery`, constrained by:
 - charge/discharge power limits;
 - round-trip efficiency;
 - expected battery-served load.
+
+`ControlCapabilities` shares direct setpoint feasibility with the actuator and
+distinguishes grid-parallel from mains-isolated supply. Isolated slots cannot
+leave grid-supplied shortfalls. Fresh actual-load infeasibility cancels the first
+discharge interval, including a previously held slot, without banning later
+forecast-based discharge. Discretization withholding is explicit in
+`planning_rounding_loss_wh` and never counted as physical throughput.
 
 Ties are resolved deterministically by total cost, battery throughput, and
 action name. Given the same telemetry, stored learning state, settings, and
@@ -201,6 +218,8 @@ gaps or when planning inputs are unavailable:
 | Actual activity | Eight local calendar dates of coalesced blocks. |
 | Decisions / transitions | Seven days / 24 hours, also capped at 500 / 100 entries. |
 | Forecast comparisons | At most 1,000 pending intervals per source; unmatched intervals expire after seven days. Completed scores are capped at 1,000. Removed sources are discarded. |
+| Issued load forecasts | Up to 1,600 pending target/lead-band predictions; 5,000 scored records within seven days; daily aggregates within 28 days. Actual scoring requires at least 90% coverage. |
+| Policy replay | Up to 256 issued snapshots and 672 measured quarter-hours within seven days. Count limits may make retained input coverage much shorter. Persistence is losslessly compressed; exports expose the actual retained bounds. |
 | Scheduled loads / daily plan | Expired scheduled loads are removed; only the current local day's plan persists. |
 
 Explanatory entity attributes remain available live but are excluded from Home

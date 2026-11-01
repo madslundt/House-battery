@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
+
+from .capabilities import ControlCapabilities
 
 
 class Action(StrEnum):
@@ -70,8 +72,10 @@ class PlannerSettings:
     # expose a narrower range/cadence; an empty tuple preserves full-target-only
     # charging when their supported partial ceilings cannot be established.
     partial_charge_targets: tuple[int, ...] | None = None
+    control_capabilities: ControlCapabilities = field(default_factory=ControlCapabilities)
 
     def validate(self) -> None:
+        self.control_capabilities.validate()
         if self.capacity_wh <= 0 or self.energy_step_wh <= 0:
             raise ValueError("Capacity and energy step must be positive")
         if not 0 <= self.reserve_soc < self.target_soc <= 100:
@@ -152,6 +156,9 @@ class PlannedSlot:
     # Keep the executable ceiling with the published charge action. Economic
     # replans can select a lower target before that tariff interval finishes.
     charge_target_soc: float | None = None
+    # Conservative energy withheld by the planning grid, not physical loss or
+    # battery throughput. Isolated output cannot use grid energy for rounding.
+    planning_rounding_loss_wh: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)

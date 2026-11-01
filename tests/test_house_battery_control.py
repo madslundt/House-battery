@@ -1425,7 +1425,7 @@ def test_unusable_battery_restores_grid_despite_published_discharge(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("load_w", [None, 0, 25, 50, float("nan"), float("inf")])
+@pytest.mark.parametrize("load_w", [None, 0, 25, 50, 1000, float("nan"), float("inf")])
 @pytest.mark.parametrize("initial_grid_state", ["off", "on"])
 def test_unusable_discharge_load_restores_grid_without_isolating_it(
     load_w: float | None, initial_grid_state: str,

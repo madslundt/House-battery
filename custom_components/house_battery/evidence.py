@@ -9,7 +9,7 @@ meter never invents zero-energy or battery-flow evidence.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import isfinite, sqrt
 
 from .accounting import IntervalAccumulator
@@ -72,9 +72,14 @@ class EvidenceCollector:
         """Learn connected load independently of grid/battery-flow evidence."""
         bucket = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
         runtime = self._runtime()
+        learner = runtime.load_learner
+        learner.baseline_fallback(now, watts, runtime.scheduled_loads)
         if self._load_bucket_start and self._load_bucket_start != bucket:
-            if self._load_bucket_seconds > 0:
-                runtime.load_learner.observe(
+            if self._load_bucket_seconds > 0 and learner.baseline_observation_allowed(
+                self._load_bucket_start, self._load_bucket_start + timedelta(minutes=15),
+                runtime.scheduled_loads,
+            ):
+                learner.observe(
                     self._load_bucket_start,
                     self._load_bucket_wh * 3600 / self._load_bucket_seconds,
                 )

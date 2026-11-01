@@ -14,6 +14,47 @@ from house_battery.planner import optimize
 BASE = datetime(2026, 9, 20, 0, 0, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("load_w", [25, 50, 50.1])
+def test_direct_discharge_never_plans_a_command_the_load_guard_will_refuse(load_w):
+    from house_battery.capabilities import ControlCapabilities
+
+    plan = optimize(
+        slots([10, .1], load_w=load_w), now=BASE, soc=80,
+        settings=settings(control_capabilities=ControlCapabilities.direct_local()),
+    )
+
+    assert plan.slots[0].action is Action.GRID
+    assert plan.slots[0].battery_discharge_wh == 0
+
+
+def test_isolated_battery_serves_the_entire_load_without_phantom_grid_or_energy():
+    from house_battery.capabilities import ControlCapabilities
+
+    plan = optimize(
+        slots([10, .1], load_w=151), now=BASE, soc=80,
+        settings=settings(control_capabilities=ControlCapabilities.direct_local(mains_isolated=True)),
+    )
+    first = plan.slots[0]
+    assert first.action is Action.BATTERY
+    assert first.grid_import_wh == 0
+    assert first.battery_discharge_wh * .85**.5 == pytest.approx(37.75)
+    assert 0 <= first.planning_rounding_loss_wh < 5
+    soc_drop_wh = (first.soc_start - first.soc_end) * 1958 / 100
+    assert soc_drop_wh == pytest.approx(first.battery_discharge_wh + first.planning_rounding_loss_wh)
+
+
+@pytest.mark.parametrize("load_w,soc", [(1000, 80), (151, 21)])
+def test_isolated_battery_does_not_plan_grid_support_for_unserviceable_load(load_w, soc):
+    from house_battery.capabilities import ControlCapabilities
+
+    plan = optimize(
+        slots([10, .1], load_w=load_w), now=BASE, soc=soc,
+        settings=settings(control_capabilities=ControlCapabilities.direct_local(mains_isolated=True)),
+    )
+    assert plan.slots[0].action is Action.GRID
+    assert plan.slots[0].grid_import_wh == load_w / 4
+
+
 def test_relative_cheap_prices_fill_battery_even_when_some_energy_is_carried_over():
     from house_battery.policy import relative_storage_value
 

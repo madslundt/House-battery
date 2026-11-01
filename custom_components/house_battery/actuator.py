@@ -11,6 +11,10 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
+from .capabilities import (
+    DIRECT_SETPOINT_CEILING_W,
+    ControlCapabilities,
+)
 from .const import (
     CONF_CHARGE_POWER_CONTROL,
     CONF_DISCHARGE_POWER_CONTROL,
@@ -53,8 +57,8 @@ _STATE_CONFIRM_POLL_SECONDS = 0.1
 # has no trustworthy grid-flow measurement, so discharge fails closed when
 # connected-load telemetry is missing and otherwise stays below that load by a
 # fixed safety margin.
-DISCHARGE_EXPORT_SAFETY_MARGIN_W = 50.0
-_DIRECT_SETPOINT_CEILING_W = 1200
+DISCHARGE_EXPORT_SAFETY_MARGIN_W = ControlCapabilities.direct_local().discharge_margin_w
+_DIRECT_SETPOINT_CEILING_W = DIRECT_SETPOINT_CEILING_W
 
 
 class _CommandSuperseded(Exception):
@@ -63,12 +67,7 @@ class _CommandSuperseded(Exception):
 
 def discharge_setpoint_below_load(requested_w: float, load_w: float | None) -> float:
     """Return a conservative discharge setpoint for the observed load."""
-    if load_w is None or not math.isfinite(load_w):
-        return 0.0
-    return min(
-        max(requested_w, 0.0),
-        max(load_w - DISCHARGE_EXPORT_SAFETY_MARGIN_W, 0.0),
-    )
+    return ControlCapabilities.direct_local().discharge_setpoint_w(requested_w, load_w)
 
 
 def clamp_setpoint_to_device(power_w: float) -> float:
@@ -244,6 +243,9 @@ class LocalControlAdapter:
             return None
         runtime = self._runtime()
         requested_action = action
+        capabilities = ControlCapabilities.direct_local(
+            mains_isolated=bool(self._config().get(CONF_GRID_ISOLATION_SWITCH)),
+        )
         power_w = round(
             clamp_setpoint_to_device(
                 discharge_setpoint_below_load(
@@ -251,6 +253,8 @@ class LocalControlAdapter:
                 )
             )
         )
+        if not capabilities.discharge_load_feasible(runtime.settings["discharge_power_w"], load_w):
+            power_w = 0
         discharge_inhibited = action is Action.BATTERY and power_w == 0
         if discharge_inhibited:
             # Idle cannot supply an isolated load. Reconnect the grid before
@@ -363,7 +367,7 @@ class LocalControlAdapter:
             return False, result
         if discharge_inhibited:
             return True, (
-                "no usable discharge setpoint for connected load; "
+                "connected load cannot be served within discharge constraints; "
                 "grid restored and Grid/Idle commanded"
             )
         if requested_action is Action.BATTERY and not isolation_confirmed:

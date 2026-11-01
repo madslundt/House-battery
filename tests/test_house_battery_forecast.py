@@ -257,7 +257,11 @@ def test_coordinator_passes_current_and_historical_load_into_price_slots() -> No
         for offset_hours in (1, 18):
             target = now + timedelta(hours=offset_hours)
             for week in range(1, 13):
-                learner.observe(target - timedelta(weeks=week), 500)
+                for quarter in range(4):
+                    learner.observe(
+                        target - timedelta(weeks=week) + timedelta(minutes=quarter * 15),
+                        500,
+                    )
         learner.recent_w.clear()
         learner.recent_w.extend([100] * 8)
 

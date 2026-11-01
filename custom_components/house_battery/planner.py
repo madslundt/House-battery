@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import ceil, floor, isfinite, sqrt
 
+from .capabilities import DeliveryTopology
 from .models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 
 
@@ -22,7 +23,7 @@ class _Node:
     cost: float
     throughput_wh: float
     previous: _State | None
-    detail: tuple[float, float, float, float, float, str] | None
+    detail: tuple[float, float, float, float, float, str, float] | None
     charge_target_soc: float | None = None
 
 
@@ -141,7 +142,7 @@ def _slot_transition(
     maximum_step: int,
     *,
     allow_substep_continuation: bool = False,
-) -> tuple[_State, tuple[float, float, float, float, float, str], float] | None:
+) -> tuple[_State, tuple[float, float, float, float, float, str, float], float] | None:
     if action is Action.BATTERY and not settings.discharge_enabled:
         return None
     energy_wh = state.energy_step * settings.energy_step_wh
@@ -155,6 +156,11 @@ def _slot_transition(
     charged_wh = 0.0
     discharged_wh = 0.0
     can_move = False
+    isolated_discharge = (
+        action is Action.BATTERY
+        and settings.control_capabilities.topology is DeliveryTopology.MAINS_ISOLATED
+    )
+    rounding_loss_wh = 0.0
     reason = "Grid supplies forecast load while energy is held for a better interval"
     if not settings.discharge_enabled:
         reason = "Grid supplies forecast load; battery discharge is disabled"
@@ -197,13 +203,28 @@ def _slot_transition(
         # for its terminal value. Discharge is still capped by the load, which is
         # what keeps the physical model consistent with zero export.
         available_wh = max(0.0, energy_wh - minimum_step * settings.energy_step_wh)
+        load_power_w = load_wh / slot.hours if slot.hours > 0 else 0.0
+        discharge_power_w = settings.control_capabilities.discharge_setpoint_w(
+            settings.discharge_power_w, load_power_w,
+        )
+        if isolated_discharge:
+            # A custom setpoint is only an eligibility guard for backup output:
+            # its physical power semantics remain unverified. Bound isolated
+            # supply by the configured output capability and require the whole
+            # connected load. There is no grid path to cover a shortfall.
+            if (
+                not settings.control_capabilities.discharge_load_feasible(settings.discharge_power_w, load_power_w)
+                or load_wh > available_wh * discharge_efficiency + 1e-9
+            ):
+                return None
+            discharge_power_w = load_power_w
         deliverable_wh = min(
             load_wh,
-            settings.discharge_power_w * slot.hours,
+            discharge_power_w * slot.hours,
             available_wh * discharge_efficiency,
         )
         can_move = deliverable_wh > 0
-        if deliverable_wh > settings.energy_step_wh / 4:
+        if deliverable_wh > settings.energy_step_wh / 4 or isolated_discharge:
             discharged_wh = deliverable_wh / discharge_efficiency
             grid_wh -= deliverable_wh
             reason = "Battery avoids expensive grid import and clears the configured economic margin"
@@ -214,6 +235,11 @@ def _slot_transition(
     # than the load/power cap allows. The discretized model may leave less than
     # one step unused, but must never invent physically unavailable movement.
     if action is Action.CHARGE:
+        new_step = floor(new_energy_wh / settings.energy_step_wh + 1e-9)
+    elif isolated_discharge:
+        # Reserve the next full energy step so full backup delivery cannot
+        # invent a fractional contribution from a disconnected grid. Report
+        # this quantization reserve separately from actual battery energy.
         new_step = floor(new_energy_wh / settings.energy_step_wh + 1e-9)
     elif action is Action.BATTERY:
         new_step = ceil(new_energy_wh / settings.energy_step_wh - 1e-9)
@@ -269,9 +295,12 @@ def _slot_transition(
                 f"{low_soc_charge_weight:.0%}"
             )
     elif action is Action.BATTERY:
-        discharged_wh = max(0.0, -actual_delta_wh)
+        if isolated_discharge:
+            rounding_loss_wh = max(0.0, -actual_delta_wh - discharged_wh)
+        else:
+            discharged_wh = max(0.0, -actual_delta_wh)
         delivered_wh = discharged_wh * discharge_efficiency
-        grid_wh = max(0.0, load_wh - delivered_wh)
+        grid_wh = 0.0 if isolated_discharge else max(0.0, load_wh - delivered_wh)
         high_soc_discharge_weight = _high_soc_weight(
             energy_wh,
             energy_wh - discharged_wh,
@@ -328,6 +357,7 @@ def _slot_transition(
         interval_cost,
         optimization_cost,
         reason,
+        rounding_loss_wh,
     )
     return next_state, detail, discharged_wh + charged_wh
 
@@ -428,6 +458,7 @@ def optimize(
     current_action: Action = Action.GRID,
     committed_slot: PlannedSlot | None = None,
     terminal_price_floor_dkk_per_kwh: float = 0.0,
+    current_discharge_enabled: bool = True,
 ) -> Plan:
     """Plan future intervals from observed SOC and an optional held current slot.
 
@@ -483,7 +514,12 @@ def optimize(
     # anchored at the higher observed SOC, the DP clamp on every transition
     # would drag the first block down to target with zero battery throughput --
     # a phantom discharge that disagrees with the inverter's real power.
-    initial_step = round(settings.capacity_wh * soc / 100 / step_wh)
+    observed_steps = settings.capacity_wh * soc / 100 / step_wh
+    initial_step = (
+        floor(observed_steps + 1e-9)
+        if settings.control_capabilities.topology is DeliveryTopology.MAINS_ISOLATED
+        else round(observed_steps)
+    )
     initial_step = max(0, initial_step)
     maximum_step = int(
         settings.capacity_wh * settings.target_soc / 100 // step_wh
@@ -525,12 +561,15 @@ def optimize(
             ),
         ):
             node = previous_layer[state]
-            actions = _allowed_actions()
+            actions = tuple(
+                action for action in _allowed_actions()
+                if current_discharge_enabled or slot_index != 0 or action is not Action.BATTERY
+            )
             continuing_action = state.action
             if slot_index == 0 and committed_slot is not None:
                 continuing_action = committed_slot.action
             locked_continuation = False
-            if holding_interval:
+            if holding_interval and continuing_action in actions:
                 # The electricity price is constant for the whole source slot.
                 # Keep the committed (or observed) action until that tariff
                 # boundary instead of allowing every minute-level refresh to
@@ -676,7 +715,7 @@ def optimize(
     previous_energy = initial.energy_step * step_wh
     for slot, (next_state, node) in zip(valid, path, strict=True):
         assert node.detail is not None
-        grid_wh, charged_wh, discharged_wh, cost, _optimization_cost, reason = (
+        grid_wh, charged_wh, discharged_wh, cost, _optimization_cost, reason, rounding_loss_wh = (
             node.detail
         )
         next_energy = next_state.energy_step * step_wh
@@ -705,6 +744,7 @@ def optimize(
                 price_source=slot.source,
                 price_uncertainty_dkk_per_kwh=slot.uncertainty_dkk_per_kwh,
                 charge_target_soc=charge_target,
+                planning_rounding_loss_wh=rounding_loss_wh,
             )
         )
         previous_energy = next_energy

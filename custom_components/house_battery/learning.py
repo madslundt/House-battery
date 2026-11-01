@@ -88,6 +88,7 @@ class LoadLearner:
     time_zone: tzinfo = field(default=UTC, repr=False, compare=False)
     bucket_timezone: str | None = None
     recent_at: str | None = None
+    baseline_context: dict[str, str | float | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.bucket_timezone is None:
@@ -103,6 +104,7 @@ class LoadLearner:
             self.error_observations = 0
             self.recent_w.clear()
             self.recent_at = None
+            self.baseline_context.clear()
             self.bucket_timezone = name
         self.time_zone = time_zone
 
@@ -193,6 +195,92 @@ class LoadLearner:
         self.recent_at = when.isoformat()
         self.observations += 1
 
+    def predict_wh(
+        self, start: datetime, end: datetime, fallback_w: float | None = None,
+        now: datetime | None = None,
+    ) -> float | None:
+        """Integrate the local quarter-hour profile over actual elapsed time."""
+        if start.tzinfo is None or end.tzinfo is None or (now is not None and now.tzinfo is None):
+            raise ValueError("Load forecast timestamps must be timezone-aware")
+        cursor, end = start.astimezone(UTC), end.astimezone(UTC)
+        if end <= cursor:
+            raise ValueError("Load forecast needs start < end")
+        issued = now.astimezone(UTC) if now is not None else None
+        energy = 0.0
+        while cursor < end:
+            local = cursor.astimezone(self.time_zone)
+            seconds = (15 - local.minute % 15) * 60 - local.second - local.microsecond / 1e6
+            right = min(end, cursor + timedelta(seconds=seconds))
+            watts = self.predict_w(cursor, fallback_w, now=issued)
+            if watts is None:
+                return None
+            energy += watts * (right - cursor).total_seconds() / 3600
+            cursor = right
+        return energy
+
+    def baseline_fallback(
+        self, now: datetime, watts: float | None, schedules: list[dict[str, Any]],
+    ) -> float | None:
+        """Hold observed pre-event background; never subtract a promised load."""
+        active = [(start, end) for start, end in _scheduled_windows(schedules) if start <= now < end]
+        context = self.baseline_context
+        if not active:
+            if watts is not None and isfinite(watts) and watts >= 0:
+                context.update(last_w=watts, last_at=now.isoformat())
+                return watts
+            return None
+        start, end = min(s for s, _ in active), max(e for _, e in active)
+        old_end = _aware_timestamp(context.get("end"))
+        if old_end is None or start > old_end:
+            before = _aware_timestamp(context.get("last_at"))
+            held = context.get("last_w")
+            if before is None or not timedelta(0) < start - before <= RECENT_LOAD_MAX_AGE:
+                before = _aware_timestamp(self.recent_at)
+                held = sum(self.recent_w) / len(self.recent_w) if self.recent_w else None
+                if before is None or not timedelta(0) < start - before <= RECENT_LOAD_MAX_AGE:
+                    held, before = None, None
+            context.update(start=start.isoformat(), end=end.isoformat(),
+                           hold_w=held, hold_at=before.isoformat() if before else None)
+        else:
+            context["end"] = max(end, old_end).isoformat()
+        # Existing recent samples may already contain the declared appliance.
+        self.recent_w.clear()
+        self.recent_at = None
+        held_at = _aware_timestamp(context.get("hold_at"))
+        held_w = context.get("hold_w")
+        if (held_at is not None and timedelta(0) <= now - held_at <= timedelta(hours=24)
+                and isinstance(held_w, (int, float)) and isfinite(held_w) and held_w >= 0):
+            return held_w
+        return None
+
+    def baseline_observation_allowed(
+        self, start: datetime, end: datetime, schedules: list[dict[str, Any]],
+    ) -> bool:
+        """Exclude every training bucket touched by a declared increment."""
+        windows = _scheduled_windows(schedules)
+        held_start = _aware_timestamp(self.baseline_context.get("start"))
+        held_end = _aware_timestamp(self.baseline_context.get("end"))
+        if held_start is not None and held_end is not None:
+            windows.append((held_start, held_end))
+        return not any(left < end and right > start for left, right in windows)
+
+    def baseline_status(self, now: datetime, schedules: list[dict[str, Any]]) -> str:
+        """Explain baseline evidence without changing the model or hold state."""
+        active = any(start <= now < end for start, end in _scheduled_windows(schedules))
+        context = self.baseline_context
+        stamp = _aware_timestamp(context.get("hold_at" if active else "last_at"))
+        watts = context.get("hold_w" if active else "last_w")
+        limit = timedelta(hours=24) if active else RECENT_LOAD_MAX_AGE
+        if (stamp is not None and timedelta(0) <= now - stamp <= limit
+                and isinstance(watts, (int, float)) and isfinite(watts) and watts >= 0):
+            return "baseline_available"
+        bucket = self.buckets.get(self.key(now))
+        if bucket is not None and bucket.count >= MIN_HISTORY_WEIGHT_COUNT:
+            return "profile_only" if active else "baseline_available"
+        if active:
+            return "scheduled_baseline_stale" if stamp is not None else "scheduled_baseline_unavailable"
+        return "baseline_unavailable"
+
     @property
     def confidence(self) -> float:
         covered = sum(
@@ -219,6 +307,7 @@ class LoadLearner:
             "error_observations": self.error_observations,
             "bucket_timezone": self.bucket_timezone,
             "recent_at": self.recent_at,
+            "baseline_context": dict(self.baseline_context),
         }
 
     @classmethod
@@ -241,6 +330,14 @@ class LoadLearner:
         learner.error_observations = int(data.get("error_observations", 0))
         learner.bucket_timezone = str(data.get("bucket_timezone", "UTC"))
         learner.recent_at = data.get("recent_at")
+        context = data.get("baseline_context", {})
+        if isinstance(context, dict):
+            learner.baseline_context = {
+                key: value for key, value in context.items()
+                if key in {"last_w", "last_at", "start", "end", "hold_w", "hold_at"}
+                and (value is None or isinstance(value, str)
+                     or isinstance(value, (int, float)) and isfinite(value))
+            }
         return learner
 
 
@@ -254,6 +351,25 @@ def _timestamp_after(value: str | None, cutoff: datetime) -> bool:
         return timestamp.tzinfo is not None and timestamp >= cutoff
     except (TypeError, ValueError):
         return False
+
+
+def _aware_timestamp(value: Any) -> datetime | None:
+    try:
+        result = datetime.fromisoformat(value)
+        return result.astimezone(UTC) if result.tzinfo is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _scheduled_windows(schedules: list[dict[str, Any]]) -> list[tuple[datetime, datetime]]:
+    result = []
+    for item in schedules:
+        if not isinstance(item, dict):
+            continue
+        start, end = _aware_timestamp(item.get("start")), _aware_timestamp(item.get("end"))
+        if start is not None and end is not None and start < end:
+            result.append((start, end))
+    return result
 
 
 @dataclass(slots=True)

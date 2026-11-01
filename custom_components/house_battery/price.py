@@ -140,3 +140,41 @@ def is_forecast_data(attributes: dict[str, Any]) -> bool:
         "on",
         "1",
     }
+
+
+def diagnose_price_sources(sources: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Describe explicit unit contradictions and duplicate conflicts, without conversion.
+
+    Entity metadata cannot establish which taxes/network components its interval
+    rows include. The supplied all-in DKK/kWh contract remains the source owner's
+    responsibility; absent metadata is unverified rather than an error.
+    """
+    reports: dict[str, dict[str, Any]] = {}
+    intervals: dict[tuple[datetime, datetime], list[tuple[str, float]]] = {}
+    for source, attributes in sources.items():
+        unit = str(attributes.get("unit_of_measurement", "")).strip()
+        currency = str(attributes.get("currency", "")).strip().upper()
+        normalized = unit.casefold().replace(" ", "")
+        if normalized == "dkk/kwh" or normalized == "kr/kwh" and currency == "DKK":
+            status = "compatible"
+        elif normalized in {"", "kr/kwh"} and currency in {"", "DKK"}:
+            status = "unverified"
+        else:
+            status = "incompatible"
+        if currency and currency != "DKK":
+            status = "incompatible"
+        reports[source] = {
+            "reported_unit": unit or None, "reported_currency": currency or None,
+            "unit_status": status, "required_basis": "all_in_marginal_import_dkk_per_kwh",
+            "component_completeness": "supplied_by_source_not_inferred",
+        }
+        for slot in normalize_price_rows(extract_rows(attributes)):
+            intervals.setdefault((slot.start, slot.end), []).append((source, slot.price))
+    conflicts = [
+        {"start": start.isoformat(), "end": end.isoformat(),
+         "sources": [{"entity_id": source, "price": price} for source, price in prices]}
+        for (start, end), prices in intervals.items()
+        if max(price for _, price in prices) - min(price for _, price in prices) > 1e-9
+    ]
+    return {"sources": reports, "conflicting_intervals": conflicts,
+            "conflict_count": len(conflicts)}

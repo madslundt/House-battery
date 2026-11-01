@@ -22,6 +22,8 @@ from .dailyplan import DailyPlan
 from .efficiency import MatchedSocEfficiency
 from .forecast import ForecastAccuracy
 from .learning import BatteryLearner, LoadLearner
+from .load_forecast_evidence import LoadForecastEvidence
+from .replay import ReplayHistory
 from .sizing import SizingHistory
 
 
@@ -32,6 +34,8 @@ class RuntimeState:
     settings: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SETTINGS))
     load_learner: LoadLearner = field(default_factory=LoadLearner)
     load_learner_source: str | None = None
+    load_forecast_evidence: LoadForecastEvidence = field(default_factory=LoadForecastEvidence)
+    replay_history: ReplayHistory = field(default_factory=ReplayHistory)
     battery_learner: BatteryLearner = field(default_factory=BatteryLearner)
     measured_efficiency: MatchedSocEfficiency = field(default_factory=MatchedSocEfficiency)
     ledger: EnergyLedger = field(default_factory=EnergyLedger)
@@ -80,6 +84,8 @@ class RuntimeState:
         if now.tzinfo is None:
             raise ValueError("Runtime retention requires an aware timestamp")
         self.load_learner.prune(now)
+        self.load_forecast_evidence.prune(now)
+        self.replay_history.prune(now)
         self.ledger.prune(now)
         try:
             local_now = now.astimezone(
@@ -147,6 +153,8 @@ class RuntimeState:
             "settings": self.settings,
             "load_learner": self.load_learner.as_dict(),
             "load_learner_source": self.load_learner_source,
+            "load_forecast_evidence": self.load_forecast_evidence.as_dict(),
+            "replay_history": self.replay_history.as_storage_dict(),
             "battery_learner": self.battery_learner.as_dict(),
             "measured_efficiency": self.measured_efficiency.as_dict(),
             "ledger": self.ledger.as_dict(),
@@ -190,6 +198,8 @@ class RuntimeState:
             "settings": self.settings,
             "status": status,
             "load_model": self.load_learner.as_dict(),
+            "load_forecast_evidence": self.load_forecast_evidence.as_dict(),
+            "replay": self.replay_history.export(),
             "battery_model": self.battery_learner.as_dict(),
             "efficiency_model": self.measured_efficiency.as_dict(),
             "ledger": self.ledger.as_dict(),
@@ -236,6 +246,8 @@ class RuntimeState:
         state = cls(
             settings=settings,
             load_learner=LoadLearner.from_dict(data.get("load_learner", {})),
+            load_forecast_evidence=LoadForecastEvidence.from_dict(data.get("load_forecast_evidence")),
+            replay_history=ReplayHistory.from_dict(data.get("replay_history")),
             load_learner_source=(
                 data.get("load_learner_source")
                 if isinstance(data.get("load_learner_source"), str)

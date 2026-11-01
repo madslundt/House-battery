@@ -30,6 +30,7 @@ class Trace:
             self.now, soc=soc, grid_power_w=grid_w + charge_w,
             load_power_w=load_w, activity=activity, healthy=healthy,
             reported_charge_power_w=reported_charge_w,
+            delivery_topology="mains_isolated",
         )
 
     def idle(self, soc: float, minutes: int = 15, unrelated_w: float = 50) -> None:
@@ -208,6 +209,37 @@ def test_completed_baseline_audit_survives_restart_unchanged() -> None:
     restored = MatchedSocEfficiency.from_dict(json.loads(json.dumps(saved)))
     assert restored.as_dict() == saved
     assert restored.summary(trace.now)["accepted_windows"][0]["charge_events"]
+
+
+def test_matched_cycle_retains_duration_power_and_topology_for_loss_analysis():
+    trace = Trace()
+    trace.cycle()
+    window = trace.model.summary(trace.now)["accepted_windows"][0]
+    context = window["measurement_context"]
+    assert context["delivery_topology"] == "mains_isolated"
+    assert context["charge_seconds"] == 3600
+    assert context["discharge_seconds"] == 10800
+    assert context["charge_mean_load_w"] == 250
+    assert context["discharge_mean_load_w"] == 250
+    assert context["charge_mean_input_w"] == pytest.approx(1000)
+    assert context["discharge_load_min_w"] == context["discharge_load_max_w"] == 250
+    assert (window["soc_min"], window["soc_max"]) == (20, 80)
+    restored = MatchedSocEfficiency.from_dict(json.loads(json.dumps(trace.model.as_dict())))
+    assert restored.accepted_windows[0]["measurement_context"] == context
+
+
+@pytest.mark.parametrize("bad_context", [
+    {"delivery_topology": []},
+    {"delivery_topology": "mains_isolated", "charge_seconds": float("nan")},
+])
+def test_invalid_optional_loss_metadata_does_not_destroy_qualified_cycle(bad_context):
+    trace = Trace()
+    trace.cycle()
+    saved = trace.model.as_dict()
+    saved["accepted_windows"][0]["measurement_context"] = bad_context
+    restored = MatchedSocEfficiency.from_dict(saved)
+    assert len(restored.accepted_windows) == 1
+    assert "measurement_context" not in restored.accepted_windows[0]
 
 
 def test_unsettled_idle_soc_cannot_establish_a_charge_baseline() -> None:

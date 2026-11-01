@@ -10,6 +10,30 @@ and the effective minimum required profit. With adaptive planning off, this
 is the configured manual profit margin. Mode switching cost is fixed internally;
 there is no user-configurable mode lock or daily transition budget.
 
+Load energy is integrated over the learned quarter-hour profile inside each
+price interval, including partial intervals and daylight-saving changes. A
+declared additional load is added to a separate background estimate. While a
+declaration is active, its measured total is excluded from background learning;
+the last credible pre-event background is held for at most 24 hours. If neither
+that background nor a qualified profile exists, planning waits rather than
+counting an appliance twice. `load_forecast_status` explains this condition on
+**Optimizer state**.
+
+Direct-local planning and control share the 50 W discharge margin and native
+integer-watt command rules. With a configured mains-input isolation plug,
+Battery mode must serve the entire predicted load within the configured output
+bound and available SOC; the plan never assumes grid support while isolated.
+Fresh measured load can cancel the current discharge while later intervals
+remain eligible. Conservative SOC discretization is reported separately as
+`planning_rounding_loss_wh`, not as delivered energy or a measured battery loss.
+
+Charging retains its existing combined-input planning convention. Whether the
+FBP1200 custom charging setpoint has exactly that physical meaning still needs
+independent input/output measurements; `control_capabilities` reports the
+unverified semantics. Standby drain, separate leg efficiencies and taper curves
+are not inferred from a single round-trip ratio. Accepted efficiency windows
+now retain topology, durations and load/power ranges to support that analysis.
+
 If observed SOC is below **Arbitrage reserve SOC**, restoring the reserve is
 required even when that purchase cannot pay for itself through arbitrage. The
 planner chooses the cheapest feasible recovery within the contiguous known-price
@@ -205,6 +229,28 @@ limits. Inspect **Operation plan** and its block explanations rather than
 assuming a price pattern mandates battery use.
 
 ## Evaluate degradation, ROI, and later tuning
+
+**Load forecast mean absolute error** now scores predictions saved before their
+target interval against measured total demand with at least 90% coverage. It
+remains unavailable until such evidence exists. **Optimizer state** exposes
+`issued_load_forecast_accuracy`, with separate 0–2, 2–6, 6–12, 12–24 and 24–72
+hour lead bands, sample counts, coverage, signed bias (actual minus predicted)
+and residual quantiles. The first prediction per target/band is retained;
+minute replanning cannot replace a poor prediction with hindsight. The earlier
+online smoothing metric remains separately available as
+`load_model_smoothing_error_w`; old smoothing scores are not migrated into issued
+forecast accuracy. Uncertainty evidence does not automatically change dispatch.
+
+Actual financial values require a covering validated known-price interval.
+When it is missing, measured energy remains recorded but is unpriced: a numeric
+price-entity state or a forecast is not substituted. The supplied current price
+already includes VAT, tariffs and spot energy. Source diagnostics report
+explicit unit contradictions and conflicting duplicate intervals without adding
+fees or assuming absent metadata is wrong.
+
+For offline policy comparison, export new evidence and use the bounded rolling
+replay described in [the evaluation guide](llm-evaluation.md#offline-policy-replay).
+Capacity sizing remains a separate hindsight assessment.
 
 Review at least two representative tariff weeks. **Battery charge/discharge
 total** and **Equivalent full cycles** show throughput; rising throughput

@@ -22,6 +22,7 @@ from homeassistant.util import dt as dt_util
 from .accounting import calendar_period_bounds
 from .actuator import LocalControlAdapter, soc_control_problems
 from .adaptive import adaptive_policy, plan_economics
+from .capabilities import ControlCapabilities
 from .const import (
     CONF_ACCOUNTING_LOAD_POWER,
     CONF_COMMISSIONED,
@@ -93,6 +94,12 @@ from .models import (
     normalize_grid_flow,
 )
 from .planner import future_price_slots, optimize
+from .planning_evidence import (
+    capture_evidence,
+    evidence_scope,
+    observe_actual_evidence,
+    record_plan_evidence,
+)
 from .policy import (
     OpportunisticPlanDecision,
     action_from_operating_mode,
@@ -101,7 +108,12 @@ from .policy import (
     relative_storage_value,
     select_opportunistic_plan,
 )
-from .price import extract_rows, is_forecast_data, normalize_price_rows
+from .price import (
+    diagnose_price_sources,
+    extract_rows,
+    is_forecast_data,
+    normalize_price_rows,
+)
 from .runtime import RuntimeState, RuntimeStore
 from .sizing import assess_sizing, sizing_prerequisites
 
@@ -623,16 +635,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             if slot.end <= now:
                 continue
             remaining_start = max(slot.start, now)
-            load_w = self.runtime.load_learner.predict_w(
-                remaining_start,
-                current_load,
-                now=now,
-            )
-            if load_w is None:
+            load = self._forecast_load_wh(remaining_start, slot.end, now, current_load)
+            if load is None:
                 # Unknown load is not a zero-watt forecast.  Without a live
                 # reading or sufficient learned profile, withhold the plan.
                 return []
-            scheduled_wh = self._scheduled_load_wh(remaining_start, slot.end)
+            baseline_wh, scheduled_wh = load
             # Known prices keep their full value. Forecast slots retain the
             # configured uncertainty so charging is priced conservatively high
             # and discharging conservatively low.
@@ -641,10 +649,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     remaining_start,
                     slot.end,
                     slot.price,
-                    expected_load_wh=(
-                        load_w * (slot.end - remaining_start).total_seconds() / 3600
-                        + scheduled_wh
-                    ),
+                    expected_load_wh=baseline_wh + scheduled_wh,
                     source=slot.source,
                     uncertainty_dkk_per_kwh=slot.uncertainty_dkk_per_kwh,
                     tariff_start=slot.tariff_start or slot.start,
@@ -652,23 +657,35 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return result
 
+    def _forecast_load_wh(
+        self, start: datetime, end: datetime, now: datetime, current_load: float | None,
+    ) -> tuple[float, float] | None:
+        """Return independent baseline and declared incremental energy."""
+        learner = self.runtime.load_learner
+        fallback = learner.baseline_fallback(now, current_load, self.runtime.scheduled_loads)
+        baseline = learner.predict_wh(start, end, fallback, now=now)
+        if baseline is None:
+            return None
+        return baseline, self._scheduled_load_wh(start, end)
+
     def _scheduled_load_wh(self, start: datetime, end: datetime) -> float:
         total = 0.0
-        keep: list[dict[str, Any]] = []
-        now = datetime.now(UTC)
+        start, end = start.astimezone(UTC), end.astimezone(UTC)
         for item in self.runtime.scheduled_loads:
             try:
                 item_start = datetime.fromisoformat(item["start"])
                 item_end = datetime.fromisoformat(item["end"])
-                if item_end > now:
-                    keep.append(item)
+                watts = float(item["additional_w"])
+                if (item_start.tzinfo is None or item_end.tzinfo is None
+                        or not math.isfinite(watts) or not 0 < watts <= 20000):
+                    continue
+                item_start, item_end = item_start.astimezone(UTC), item_end.astimezone(UTC)
                 overlap = max(
                     0.0, (min(end, item_end) - max(start, item_start)).total_seconds()
                 )
-                total += float(item["additional_w"]) * overlap / 3600
+                total += watts * overlap / 3600
             except (KeyError, TypeError, ValueError):
                 continue
-        self.runtime.scheduled_loads = keep
         return total
 
     def _settings(self) -> PlannerSettings:
@@ -695,6 +712,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 HIGH_SOC_DISCHARGE_DISCOUNT_DKK_PER_KWH
             ),
             partial_charge_targets=self._partial_charge_targets(),
+            control_capabilities=(
+                ControlCapabilities.direct_local(
+                    mains_isolated=bool(self.config.get(CONF_GRID_ISOLATION_SWITCH))
+                ) if self.is_direct_local else ControlCapabilities()
+            ),
         )
         decision = adaptive_policy(
             settings,
@@ -879,6 +901,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         current_action: Action,
         committed_slot: PlannedSlot | None = None,
         opportunistic_enabled: bool | None = None,
+        current_discharge_enabled: bool = True,
     ) -> OpportunisticPlanDecision:
         """Compare the normal plan with an opt-in higher-target candidate."""
         enabled = (
@@ -900,6 +923,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             current_action=current_action,
             committed_slot=committed_slot,
             terminal_price_floor_dkk_per_kwh=storage_value,
+            current_discharge_enabled=current_discharge_enabled,
         )
         opportunistic_settings = replace(
             settings,
@@ -924,6 +948,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             current_action=current_action,
             committed_slot=committed_slot,
             terminal_price_floor_dkk_per_kwh=storage_value,
+            current_discharge_enabled=current_discharge_enabled,
         )
         decision = select_opportunistic_plan(
             normal_plan,
@@ -965,17 +990,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         return Action(action_value) if action_value else None
 
     def _current_price(self, slots: list[PriceSlot], now: datetime) -> float | None:
+        """Settle actual energy only against a validated, dated known tariff."""
         for slot in slots:
-            if slot.start <= now < slot.end and math.isfinite(slot.price):
+            if (
+                slot.source == "known"
+                and slot.start.tzinfo is not None and slot.end.tzinfo is not None
+                and slot.start <= now < slot.end
+                and not isinstance(slot.price, bool)
+                and math.isfinite(slot.price) and -20 <= slot.price <= 100
+            ):
                 return slot.price
-        for entity_id in self.config.get(CONF_PRICE_ENTITIES, []):
-            state = self.hass.states.get(entity_id)
-            try:
-                value = float(state.state) if state else None
-                if value is not None and math.isfinite(value):
-                    return value
-            except (TypeError, ValueError):
-                continue
         return None
 
     async def _force_safe_if_needed(self, now: datetime) -> str:
@@ -1213,6 +1237,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         current_price_slot = next((
             slot for slot in slots if slot.start <= now < slot.end and slot.source == "known"
         ), None)
+        planning_evidence_scope = evidence_scope(
+            self.config, direct=self.is_direct_local, time_zone=self.hass.config.time_zone,
+        )
+        planning_evidence_changed, planning_evidence_error = capture_evidence(
+            lambda: observe_actual_evidence(
+                self.runtime, now, scope=planning_evidence_scope,
+                load_w=self._load_power() if not problems and not local_problem else None,
+                price=current_price_slot.price if current_price_slot else None,
+            )
+        )
         sizing_should_save = self.runtime.sizing_history.observe(
             now,
             load_w=self._load_power()
@@ -1252,6 +1286,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     and self._efficiency_healthy(measurement_now)
                 ),
                 capacity_kwh=self.runtime.settings["capacity_kwh"],
+                delivery_topology=(
+                    "mains_isolated" if self.is_direct_local
+                    and self.config.get(CONF_GRID_ISOLATION_SWITCH) else "grid_parallel"
+                ),
             )
         round_trip_summary = self._efficiency_summary(measurement_now)
         planning_efficiency, planning_efficiency_source = self._planning_efficiency(measurement_now)
@@ -1388,6 +1426,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ),
                     )
                 revision = self._planning_revision
+                current_discharge_allowed = settings.control_capabilities.discharge_load_feasible(
+                    settings.discharge_power_w, self._load_power()
+                )
                 storage_decision = await self.hass.async_add_executor_job(
                     partial(
                         self._optimize_with_storage_policy,
@@ -1397,6 +1438,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         settings=settings,
                         current_action=current_action,
                         committed_slot=committed_slot,
+                        current_discharge_enabled=current_discharge_allowed,
                         opportunistic_enabled=(
                             self.runtime.opportunistic_charging_enabled
                         ),
@@ -1459,6 +1501,20 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 opportunistic_incremental_savings = (
                     storage_decision.incremental_savings_dkk
                 )
+                captured, capture_error = capture_evidence(
+                    lambda: record_plan_evidence(
+                        self.runtime, now, slots=slots, settings=effective_settings,
+                        soc=soc, current_action=current_action, scope=planning_evidence_scope,
+                        committed_slot=committed_slot,
+                        terminal_price_floor_dkk_per_kwh=self.plan.terminal_price_dkk_per_kwh,
+                        current_discharge_enabled=current_discharge_allowed,
+                        forecast_load=lambda start, end: self._forecast_load_wh(
+                            start, end, now, self._load_power()
+                        ),
+                    ),
+                )
+                planning_evidence_changed = captured or planning_evidence_changed
+                planning_evidence_error = capture_error or planning_evidence_error
                 if self._override_action() is not None:
                     opportunistic_reason = (
                         f"Manual override uses configured target {settings.target_soc:g}%"
@@ -1517,6 +1573,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # and publish the fresh non-discharge tail from now.
                     discharge_enabled=(
                         effective_settings.discharge_enabled and not reserve_reached
+                        and effective_settings.control_capabilities.discharge_load_feasible(
+                            effective_settings.discharge_power_w, self._load_power()
+                        )
                     ),
                 )
                 published_slot = self.runtime.daily_plan.slot_at(now)
@@ -1659,6 +1718,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             or efficiency_should_save
             or self._adaptation_dirty
             or sizing_should_save
+            or planning_evidence_changed
         ):
             # RuntimeStore writes atomically, so persisting the whole runtime
             # publishes the reconciled daily plan without risk of a partial
@@ -1677,6 +1737,19 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
         capacity_kwh = runtime_settings.capacity_wh / 1000
         nominal_capacity_kwh = self.runtime.settings["capacity_kwh"]
+        load_forecast_evidence = self.runtime.load_forecast_evidence.summary(now)
+        known_source_metadata = {}
+        forecast_source_metadata = {}
+        for entity_id in self.config.get(CONF_PRICE_ENTITIES, []):
+            source_state = self.hass.states.get(entity_id)
+            if source_state is not None:
+                target = (forecast_source_metadata if is_forecast_data(dict(source_state.attributes))
+                          else known_source_metadata)
+                target[entity_id] = dict(source_state.attributes)
+        for entity_id in self._forecast_entities():
+            source_state = self.hass.states.get(entity_id)
+            if source_state is not None:
+                forecast_source_metadata[entity_id] = dict(source_state.attributes)
         equivalent_cycles = (
             self.runtime.ledger.total_discharge_kwh / capacity_kwh
             if capacity_kwh
@@ -1793,6 +1866,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else "load/grid balance"
             ),
             "direct_local": self.is_direct_local,
+            "control_capabilities": runtime_settings.control_capabilities.as_dict(),
             "power_source": self._classify_power_source(flow),
             "export_detected": export_detected,
             "export_safety_fault": export_safety_fault,
@@ -1920,7 +1994,19 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "planning_efficiency_pct": planning_efficiency * 100,
             "planning_efficiency_source": planning_efficiency_source,
             "load_learning_confidence_pct": self.runtime.load_learner.confidence * 100,
-            "load_forecast_error_w": self.runtime.load_learner.mean_absolute_error_w,
+            "load_forecast_error_w": load_forecast_evidence["mae_w"],
+            "load_model_smoothing_error_w": self.runtime.load_learner.mean_absolute_error_w,
+            "load_forecast_status": self.runtime.load_learner.baseline_status(
+                now, self.runtime.scheduled_loads
+            ),
+            "issued_load_forecast_accuracy": load_forecast_evidence,
+            "policy_replay_evidence": self.runtime.replay_history.summary(),
+            "planning_evidence_error": planning_evidence_error,
+            "price_input_diagnostics": {
+                "known": diagnose_price_sources(known_source_metadata),
+                "forecast": diagnose_price_sources(forecast_source_metadata),
+                "basis": "supplied_all_in_DKK_per_kWh",
+            },
             "learning_observations": self.runtime.load_learner.observations,
             "price_forecast_enabled": self.runtime.forecast_enabled,
             "price_forecast_source": self._forecast_source,

@@ -119,6 +119,7 @@ def _prorate_head(
         grid_import_wh=slot.grid_import_wh * fraction,
         battery_charge_wh=slot.battery_charge_wh * fraction,
         battery_discharge_wh=slot.battery_discharge_wh * fraction,
+        planning_rounding_loss_wh=slot.planning_rounding_loss_wh * fraction,
         interval_cost_dkk=slot.interval_cost_dkk * fraction,
         baseline_cost_dkk=slot.baseline_cost_dkk * fraction,
         soc_start=slot.soc_start,
@@ -144,6 +145,7 @@ def _merge_slots(a: PlannedSlot, b: PlannedSlot) -> PlannedSlot:
         grid_import_wh=a.grid_import_wh + b.grid_import_wh,
         battery_charge_wh=a.battery_charge_wh + b.battery_charge_wh,
         battery_discharge_wh=a.battery_discharge_wh + b.battery_discharge_wh,
+        planning_rounding_loss_wh=a.planning_rounding_loss_wh + b.planning_rounding_loss_wh,
         soc_start=a.soc_start,
         soc_end=b.soc_end,
         interval_cost_dkk=a.interval_cost_dkk + b.interval_cost_dkk,
@@ -278,6 +280,7 @@ def _reopt_current_interval(
                     grid_import_wh=slot.grid_import_wh * fraction,
                     battery_charge_wh=slot.battery_charge_wh * fraction,
                     battery_discharge_wh=slot.battery_discharge_wh * fraction,
+                    planning_rounding_loss_wh=slot.planning_rounding_loss_wh * fraction,
                     interval_cost_dkk=slot.interval_cost_dkk * fraction,
                     baseline_cost_dkk=slot.baseline_cost_dkk * fraction,
                 )
@@ -450,6 +453,7 @@ def merge_adjacent_blocks(slots: tuple[PlannedSlot, ...]) -> list[PlannedSlot]:
                 grid_import_wh=previous.grid_import_wh + slot.grid_import_wh,
                 battery_charge_wh=previous.battery_charge_wh + slot.battery_charge_wh,
                 battery_discharge_wh=previous.battery_discharge_wh + slot.battery_discharge_wh,
+                planning_rounding_loss_wh=previous.planning_rounding_loss_wh + slot.planning_rounding_loss_wh,
                 soc_start=previous.soc_start,
                 soc_end=slot.soc_end,
                 interval_cost_dkk=previous.interval_cost_dkk + slot.interval_cost_dkk,
@@ -612,6 +616,7 @@ class DailyPlan:
                         battery_discharge_wh=float(
                             raw.get("battery_discharge_wh", 0.0)
                         ),
+                        planning_rounding_loss_wh=float(raw.get("planning_rounding_loss_wh", 0.0)),
                         soc_start=float(raw.get("soc_start", 0.0)),
                         soc_end=float(raw.get("soc_end", 0.0)),
                         interval_cost_dkk=float(raw.get("interval_cost_dkk", 0.0)),

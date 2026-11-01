@@ -35,6 +35,25 @@ from house_battery.sensor import daily_plan_blocks
 PLUS2 = timezone(timedelta(hours=2))
 
 
+def test_rounding_reserve_survives_storage_clipping_and_block_merging():
+    start = datetime(2026, 11, 1, tzinfo=UTC)
+    end = start + timedelta(hours=1)
+    first = replace(slot(start, end, Action.BATTERY), planning_rounding_loss_wh=4)
+    existing = DailyPlan(date="2026-11-01", slots=(first,))
+    restored = DailyPlan.from_dict(existing.as_dict())
+    assert restored.slots[0].planning_rounding_loss_wh == 4
+    cutoff = start + timedelta(minutes=30)
+    tail = replace(slot(cutoff, end, Action.BATTERY), planning_rounding_loss_wh=1)
+    reconciled = reconcile_daily_plan(
+        restored, (tail,), cutoff=cutoff, day_start=start, horizon_end=end,
+    )
+    assert sum(s.planning_rounding_loss_wh for s in reconciled.slots) == 3
+    second = replace(slot(end, end + timedelta(hours=1), Action.BATTERY), planning_rounding_loss_wh=2)
+    blocks = merge_adjacent_blocks((*reconciled.slots, second))
+    assert len(blocks) == 1
+    assert blocks[0].planning_rounding_loss_wh == 5
+
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #

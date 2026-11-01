@@ -82,6 +82,7 @@ class MatchedSocEfficiency:
         self, now: datetime, *, soc: float | None, grid_power_w: float | None,
         load_power_w: float | None, activity: str, healthy: bool = True,
         capacity_kwh: float = 1.958, reported_charge_power_w: float | None = None,
+        delivery_topology: str = "unspecified",
     ) -> bool:
         """Observe a fresh simultaneous sample; return whether a window closed.
 
@@ -90,6 +91,11 @@ class MatchedSocEfficiency:
         A restart or missing sample discards the in-flight cycle entirely.
         """
         self.prune(now)
+        if delivery_topology not in ("unspecified", "grid_parallel", "mains_isolated"):
+            self._invalidate("Unknown delivery topology")
+            return False
+        if self._cycle and self._cycle["delivery_topology"] != delivery_topology:
+            self._invalidate("Delivery topology changed during measurement")
         values = [_number(v) for v in (soc, grid_power_w, load_power_w, capacity_kwh)]
         s, grid, load, capacity = values
         if (
@@ -161,6 +167,10 @@ class MatchedSocEfficiency:
                 "start": now.isoformat(), "start_ts": point["t"], "soc_start": s,
                 "soc_min": s, "soc_max": s, "charge_wh": 0.0,
                 "discharge_wh": 0.0, "charge_events": [],
+                "delivery_topology": delivery_topology,
+                "activity_seconds": {a: 0.0 for a in ("charging", "discharging", "idle")},
+                "activity_load_wh": {a: 0.0 for a in ("charging", "discharging", "idle")},
+                "discharge_load_min_w": None, "discharge_load_max_w": None,
             }
         return closed
 
@@ -191,6 +201,13 @@ class MatchedSocEfficiency:
         assert self._cycle is not None
         for sample in (previous, point):
             half_hours = elapsed / 7200
+            activity = sample["activity"]
+            self._cycle["activity_seconds"][activity] += elapsed / 2
+            self._cycle["activity_load_wh"][activity] += sample["load"] * half_hours
+            if activity == "discharging":
+                for key, choose in (("discharge_load_min_w", min), ("discharge_load_max_w", max)):
+                    old = self._cycle[key]
+                    self._cycle[key] = sample["load"] if old is None else choose(old, sample["load"])
             if sample["activity"] == "charging" and self._charge is not None:
                 self._charge["wh"] += (sample["grid"] - sample["load"]) * half_hours
                 self._charge["seconds"] += elapsed / 2
@@ -258,6 +275,7 @@ class MatchedSocEfficiency:
             "charge_kwh": cycle["charge_wh"] / 1000,
             "discharge_kwh": cycle["discharge_wh"] / 1000,
             "efficiency": efficiency, "charge_events": cycle["charge_events"],
+            "measurement_context": _measurement_context(cycle),
             "quality": "matched_soc_grid_baseline",
         })
         self.accepted_windows = self.accepted_windows[-_MAX_WINDOWS:]
@@ -330,9 +348,47 @@ class MatchedSocEfficiency:
                 "efficiency": discharge / charge,
                 "charge_events": _restore_events(window.get("charge_events")),
                 "quality": "matched_soc_grid_baseline",
+                **_restore_measurement_context(window.get("measurement_context")),
             })
             previous_end = end
         return model
+
+
+def _measurement_context(cycle: dict[str, Any]) -> dict[str, Any]:
+    """Describe the measured regime without fitting new loss parameters."""
+    seconds = cycle["activity_seconds"]
+    return {
+        "delivery_topology": cycle["delivery_topology"],
+        "charge_seconds": seconds["charging"],
+        "discharge_seconds": seconds["discharging"],
+        "idle_seconds": seconds["idle"],
+        "charge_mean_load_w": round(cycle["activity_load_wh"]["charging"] * 3600 / seconds["charging"], 6),
+        "discharge_mean_load_w": round(cycle["discharge_wh"] * 3600 / seconds["discharging"], 6),
+        "charge_mean_input_w": round(cycle["charge_wh"] * 3600 / seconds["charging"], 6),
+        "discharge_load_min_w": cycle["discharge_load_min_w"],
+        "discharge_load_max_w": cycle["discharge_load_max_w"],
+    }
+
+
+def _restore_measurement_context(value: Any) -> dict[str, Any]:
+    """Old windows remain valid; malformed optional metadata is discarded."""
+    if not isinstance(value, dict) or value.get("delivery_topology") not in (
+        "unspecified", "grid_parallel", "mains_isolated",
+    ):
+        return {}
+    keys = (
+        "charge_seconds", "discharge_seconds", "idle_seconds", "charge_mean_load_w",
+        "discharge_mean_load_w", "charge_mean_input_w", "discharge_load_min_w",
+        "discharge_load_max_w",
+    )
+    fields = {key: _number(value.get(key)) for key in keys}
+    if any(v is None or v < 0 for v in fields.values()):
+        return {}
+    if fields["charge_seconds"] <= 0 or fields["discharge_seconds"] <= 0:
+        return {}
+    if not fields["discharge_load_min_w"] - 1e-6 <= fields["discharge_mean_load_w"] <= fields["discharge_load_max_w"] + 1e-6:
+        return {}
+    return {"measurement_context": {"delivery_topology": value["delivery_topology"], **fields}}
 
 
 def _restore_events(value: Any) -> list[dict[str, float]]:
