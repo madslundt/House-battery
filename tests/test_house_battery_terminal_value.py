@@ -1,9 +1,9 @@
 """Uncertain continuation must not manufacture profitable battery movement."""
 
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from math import sqrt
-import sys
 from pathlib import Path
 
 import pytest

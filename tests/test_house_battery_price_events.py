@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from test_house_battery_cutoff_gate import coordinator
+sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 import house_battery.coordinator as coordinator_module
 from house_battery.models import PriceSlot
+from test_house_battery_cutoff_gate import coordinator
 
 
 async def setup(monkeypatch):

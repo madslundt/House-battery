@@ -1,10 +1,10 @@
 """Price-model activation requires honest issued skill, not a calendar sample count."""
 
 import sys
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable
 from zoneinfo import ZoneInfo
 
 import pytest

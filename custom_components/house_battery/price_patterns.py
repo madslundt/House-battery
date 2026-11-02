@@ -140,7 +140,7 @@ class PricePatternLearner:
                 left = end
         # Commit in chronological order: retrospective imports must never score
         # a model trained on a later week against an earlier actual price.
-        for key in sorted(list(self.pending)):
+        for key in sorted(self.pending):
             start = datetime.fromisoformat(key)
             if start + _HOUR > now:
                 continue

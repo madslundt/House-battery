@@ -77,8 +77,8 @@ from .forecast import (
     extend_known_horizon,
     forecast_adaptation,
 )
-from .forecast_plan import build_forecast_plan
 from .forecast_calibration import calibrate_forecast
+from .forecast_plan import build_forecast_plan
 from .health import fresh_numeric_value, get_health_problems
 from .learning import LoadLearner
 from .local_tcp import (

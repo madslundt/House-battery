@@ -1,11 +1,15 @@
 """A learned forecast must support a battery opportunity beyond terminal value."""
 
 import asyncio
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
-from test_house_battery_cutoff_gate import coordinator
+sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
+
 from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.policy import has_forecast_backed_movement
+from test_house_battery_cutoff_gate import coordinator
 
 NOW = datetime(2026, 11, 2, tzinfo=UTC)
 HOUR = timedelta(hours=1)
@@ -27,8 +31,8 @@ def test_terminal_only_changes_preserve_the_trusted_price_plan():
     async def scenario():
         coord, _, _, _ = await coordinator()
         known, tail = _inputs(peak=False)
-        arguments = dict(now=NOW, soc=20, settings=SETTINGS, current_action=Action.GRID,
-                         opportunistic_enabled=False)
+        arguments = {"now": NOW, "soc": 20, "settings": SETTINGS, "current_action": Action.GRID,
+                     "opportunistic_enabled": False}
         baseline = coord._optimize_with_storage_policy(known, **arguments)
         candidate = coord._optimize_with_storage_policy(known + tail, **arguments)
         result = coord._optimize_with_storage_policy(

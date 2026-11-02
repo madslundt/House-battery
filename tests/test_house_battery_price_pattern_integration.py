@@ -11,7 +11,11 @@ from homeassistant.core import HomeAssistant
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.const import CONF_LOAD_POWER, CONF_PRICE_ENTITIES, CONF_PRICE_FORECAST_ENTITIES
+from house_battery.const import (
+    CONF_LOAD_POWER,
+    CONF_PRICE_ENTITIES,
+    CONF_PRICE_FORECAST_ENTITIES,
+)
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.models import PriceSlot
 from house_battery.runtime import RuntimeState

@@ -2,6 +2,7 @@
 
 import sys
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -69,7 +70,7 @@ def test_forecast_extends_after_external_prefix_with_uncertainty_and_cap() -> No
     assert result[2].start == external.end
     assert result[2].end == external.end.replace(minute=0) + timedelta(hours=1)
     assert result[-1].end == NOW + timedelta(hours=72)
-    assert all(a.end == b.start for a, b in zip(result, result[1:]))
+    assert all(a.end == b.start for a, b in pairwise(result))
     assert all(slot.source == "forecast" and slot.uncertainty_dkk_per_kwh >= .6
                for slot in result[2:])
     for slot in result[2:]:

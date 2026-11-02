@@ -2,6 +2,7 @@
 
 import sys
 from datetime import UTC, datetime, time, timedelta
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,7 @@ def test_official_data_replay_preserves_actual_dst_day_duration(month, day, quar
     start = datetime(2026, month, day, tzinfo=replay.ZONE)
     result = replay.load_prices(_payload(start, start + timedelta(days=1)))
     assert len(result) == quarters
-    assert all(b.start - a.start == replay.QUARTER for a, b in zip(result, result[1:]))
+    assert all(b.start - a.start == replay.QUARTER for a, b in pairwise(result))
 
 
 def test_official_data_replay_rejects_gaps_duplicates_and_partial_days():

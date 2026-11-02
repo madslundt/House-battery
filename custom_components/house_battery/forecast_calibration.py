@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from math import isfinite
 from statistics import mean, median
 from typing import Any
@@ -90,7 +91,7 @@ def _hours(accuracy: ForecastAccuracy, now: datetime) -> dict[str, list[_Residua
     for (band, hour), parts in pieces.items():
         boundaries = sorted({value for a, b, *_ in parts for value in (a, b)})
         weighted, seconds, conflicting = 0.0, 0.0, False
-        for left, right in zip(boundaries, boundaries[1:]):
+        for left, right in pairwise(boundaries):
             covering = [part for part in parts if part[0] <= left and part[1] >= right]
             if not covering:
                 continue
