@@ -101,7 +101,7 @@ their own duration. The optimizer uses only a contiguous future horizon and
 never invents missing price data.
 
 The optional external forecast list uses exactly this format. It is disabled by
-default through **Use external price forecast**. Sources may overlap: each
+default through **Use price forecasts**. Sources may overlap: each
 source retains its first prediction for an interval and is compared later to
 the same known actual price. When enabled, the first configured usable source
 that provides a contiguous extension is used for planning; forecasts are never
@@ -122,7 +122,23 @@ age limit. The per-source status exposes `used`, `disabled`,
 `no_contiguous_extension`; only `used` contributes forecast intervals to a
 plan.
 
-Set **External price forecast uncertainty** (DKK/kWh) to a conservative
+The same switch also permits learned weekday/hour price patterns after the
+known and selected external forecast horizon. No external forecast entity is
+required for this fallback. History is collected while the switch is off;
+four independent matching dates, sufficient coverage, recent actual prices
+and genuinely issued forecast skill are required before it can contribute.
+The optimizer also requires battery movement in the learned period; otherwise
+the extension stays in shadow. Read `price_patterns` on **Optimizer
+state** for readiness and use. The configured uncertainty is a floor; learned
+prices have an additional statistical allowance of at least 0.25 DKK/kWh.
+See [learned price patterns](optimization.md#learned-price-patterns).
+
+**Adaptive planning** additionally permits qualified source-specific residual
+correction of external forecasts. It remains neutral without independent dated
+evidence. Calibration preserves the original uncertainty interval, leaves known
+prices untouched and reports its validation state on each forecast source.
+
+Set **Price forecast uncertainty** (DKK/kWh) to a conservative
 absolute error allowance. The planner treats a forecast charge price as
 forecast plus that amount and a forecast discharge price as forecast minus it.
 For example, a 0.20 DKK/kWh forecast with a 0.25 allowance is evaluated as

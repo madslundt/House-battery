@@ -961,15 +961,16 @@ def test_earliest_issued_forecast_wins_when_provider_changes_interval_cadence() 
     assert source["effective_uncertainty_dkk_per_kwh"] == 4
 
 
-def test_earlier_unscored_prediction_blocks_later_overlapping_accuracy_evidence() -> None:
+def test_earlier_usable_prediction_blocks_only_its_overlapping_accuracy_evidence() -> None:
     accuracy = _adaptive_accuracy(0)
     first = datetime.fromisoformat(accuracy.error_samples[0]["start"])
     for day in range(3):
         start = first + timedelta(days=day)
         accuracy.record_forecasts([PriceSlot(start, start + timedelta(hours=24), 5)],
                                   now=first - timedelta(days=2))
-    # The better revisions cannot qualify while earlier overlapping
-    # predictions are still awaiting their complete actual-price cover.
+    # Only the first earlier daily prediction starts inside its issue's 72 h
+    # planning window. It blocks eight overlapping hours until complete cover
+    # arrives; out-of-window predictions must not block the other sixteen.
     source = _adapt({"source": accuracy})["sources"]["source"]
-    assert source["covered_hours"] == 0
+    assert source["covered_hours"] == 16
     assert not source["adaptive_ready"]

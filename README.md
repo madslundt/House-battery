@@ -36,7 +36,7 @@ external optimizer.
 - [Configuration reference](docs/configuration.md) — every config-flow field
   and safety rule.
 - [Optimizer and forecast guide](docs/optimization.md) — planning economics,
-  external price forecasts, uncertainty, accuracy scoring, ROI, and tuning.
+  external and learned price forecasts, uncertainty, accuracy scoring, ROI, and tuning.
 - [LLM evaluation guide](docs/llm-evaluation.md) — export the right evidence,
   query long-term history safely, and review plan quality with an LLM.
 - [Entity, control, and action reference](docs/entity-reference.md) — plain
@@ -49,7 +49,8 @@ external optimizer.
 ## What it provides
 
 - A plan across contiguous source price intervals (hourly, quarter-hourly, or
-  another valid cadence), optionally extended with an external forecast.
+  another valid cadence), recalculated on price updates and tariff boundaries,
+  optionally extended with external forecasts and learned weekday/hour patterns.
 - Continuous load learning plus conservative usable-capacity and efficiency
   estimates.
 - Expected and realized savings, throughput, cycles, estimated degradation,

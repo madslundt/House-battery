@@ -26,7 +26,7 @@ def capture_evidence(operation: Callable[[], bool]) -> tuple[bool, str | None]:
 def evidence_scope(config: dict[str, Any], *, direct: bool, time_zone: str) -> str:
     """Version source semantics without archiving device addresses in replay."""
     return sha256(repr((
-        "issued_load_v1", direct, time_zone,
+        "issued_load_v2_terminal_inventory", direct, time_zone,
         config.get("host") if direct else config.get("load_power_entity"),
         config.get("port") if direct else None,
         config.get("grid_isolation_switch_entity"),

@@ -107,8 +107,8 @@ def test_live_known_price_plan_charges_for_evening_and_values_carryover() -> Non
     assert decision.settings.target_soc == 100
 
 
-def test_live_forecast_extension_supports_a_full_charge_when_objective_improves() -> None:
-    """Select the higher target when forecast-adjusted cost supports it."""
+def test_live_forecast_extension_supports_a_full_charge_for_valuable_carryover() -> None:
+    """Higher storage can improve the objective while carrying energy forward."""
     data, known, forecast, _ = _scenario()
     extended = extend_known_horizon(
         known,
@@ -122,7 +122,18 @@ def test_live_forecast_extension_supports_a_full_charge_when_objective_improves(
     assert max(slot.soc_end for slot in normal.slots) == pytest.approx(89.89, abs=0.02)
     assert max(slot.soc_end for slot in full.slots) == pytest.approx(99.85, abs=0.02)
     assert full.realized_savings_dkk - normal.realized_savings_dkk == pytest.approx(
-        0.2860, abs=0.001
+        -0.0809603, abs=0.00001
+    )
+    # The extra 195 Wh remains stored rather than being liquidated because the
+    # horizon ends. Its credit is separate from realized bill savings; the
+    # authorized full-charge policy compares the complete risk-adjusted value.
+    extra_inventory_wh = (
+        full.slots[-1].soc_end - normal.slots[-1].soc_end
+    ) * full_settings.capacity_wh / 100
+    assert extra_inventory_wh == pytest.approx(195)
+    assert full.terminal_value_dkk - normal.terminal_value_dkk == pytest.approx(.2374907, abs=.00001)
+    assert normal.optimization_objective_dkk - full.optimization_objective_dkk == pytest.approx(
+        .156530, abs=.00001,
     )
     assert any(slot.action is Action.BATTERY for slot in normal.slots if slot.price_source == "forecast")
 

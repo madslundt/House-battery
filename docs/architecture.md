@@ -6,7 +6,7 @@
 Direct-local battery telemetry or legacy provider entities + price + load
                          │
                          ▼
-                  coordinator (1 min)
+                  coordinator (1 min + price events/boundaries)
        health gate → forecasting → deterministic planner
                          │
                          ├── shadow-plan entities and evidence ledger
@@ -23,6 +23,25 @@ on exit. The integration does not manage grid wiring or act as a transfer-switch
 safety controller. Legacy entries can use entities from an existing provider.
 
 ## Forecasting
+
+`PricePatternLearner` retains at most 90 days of elapsed, confirmed hourly import
+prices, using duration-weighted coverage and independent local dates. Qualified
+weekday/hour history supports a fixed validated 28-day weekday/weekend/hour
+control profile. Other declared candidates remain in shadow. First-issued
+predictions require comparable skill against a flat baseline at each lead band
+before learned continuation can be proposed. The planner rejects terminal-only
+learned changes without forecast-period battery movement. Four matching dates,
+qualified independent outcomes and recent actual evidence are required.
+Forecasts never train actual-price history. Configured uncertainty, dispersion,
+issued lead-specific errors and authoritative-prefix disagreement limit confidence.
+Source/unit changes isolate incompatible history. Diagnostics expose readiness,
+matched-hour weekend differences and chronological validation error.
+
+`forecast_calibration` validates source-specific residual corrections using
+outcomes scored before each validation prediction was issued. It preserves raw
+provider evidence and the entire original uncertainty interval. Both forecast
+and adaptive opt-ins are required. UTC target identities and real issuance times
+remain separate from the stable tariff-anchored horizon cap.
 
 `LoadLearner` continuously records observed load in 15-minute buckets. Its
 forecast combines a weekday/time profile with a recent-observation blend.
@@ -65,6 +84,12 @@ space:
 ```text
 (stored-energy step, current action)
 ```
+
+Its result is cached between market changes. Price publication listeners and an
+actual tariff-boundary timer request refreshes; scheduled-load boundaries and
+operator changes invalidate the cache too. Minute telemetry polls keep safety
+and accounting live without rerunning the economic dynamic program. Physical
+eligibility changes and fault recovery invalidate the cached plan.
 
 For each slot it considers `grid`, `charge`, and `battery`, constrained by:
 
@@ -218,6 +243,7 @@ gaps or when planning inputs are unavailable:
 | Actual activity | Eight local calendar dates of coalesced blocks. |
 | Decisions / transitions | Seven days / 24 hours, also capped at 500 / 100 entries. |
 | Forecast comparisons | At most 1,000 pending intervals per source; unmatched intervals expire after seven days. Completed scores are capped at 1,000. Removed sources are discarded. |
+| Price patterns | Ninety days of confirmed hourly observations and bounded partial-hour coverage. Pending first-issued comparisons are bounded to the three-day target window; at most 2,200 scored comparisons cover 28 days. Four matching weekday dates qualify history, while independent lead-specific skill gates control. Actual observations expire for control after three days. |
 | Issued load forecasts | Up to 1,600 pending target/lead-band predictions; 5,000 scored records within seven days; daily aggregates within 28 days. Actual scoring requires at least 90% coverage. |
 | Policy replay | Up to 256 issued snapshots and 672 measured quarter-hours within seven days. Count limits may make retained input coverage much shorter. Persistence is losslessly compressed; exports expose the actual retained bounds. |
 | Scheduled loads / daily plan | Expired scheduled loads are removed; only the current local day's plan persists. |

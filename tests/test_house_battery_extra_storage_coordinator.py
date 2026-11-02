@@ -29,6 +29,7 @@ from house_battery.const import (
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.dailyplan import DailyPlan
 from house_battery.models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
+from house_battery.policy import OpportunisticPlanDecision
 from house_battery.price import normalize_price_rows
 from house_battery.runtime import RuntimeState
 
@@ -511,7 +512,7 @@ def test_coordinator_executes_published_action_until_price_boundary(
 
         coordinator.evidence.async_observe = no_observation
         coordinator._optimize_with_storage_policy = lambda *args, **kwargs: (
-            SimpleNamespace(
+            OpportunisticPlanDecision(
                 plan=fresh_plan,
                 settings=coordinator._settings(),
                 active=False,

@@ -7,6 +7,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     CONF_ACCOUNTING_LOAD_POWER,
     CONF_GRID_IMPORT_POWER,
+    CONF_PRICE_ENTITIES,
     CONF_PRICE_FORECAST_ENTITIES,
     CONF_PRICE_FORECAST_ENTITY,
 )
@@ -67,7 +68,7 @@ def enabled_by_default(key: str, config: dict[str, Any], *, direct_local: bool) 
         return bool(config.get(CONF_GRID_IMPORT_POWER))
     if key == "external_price_forecast":
         return bool(
-            config.get(
+            config.get(CONF_PRICE_ENTITIES) or config.get(
                 CONF_PRICE_FORECAST_ENTITIES, config.get(CONF_PRICE_FORECAST_ENTITY)
             )
         )

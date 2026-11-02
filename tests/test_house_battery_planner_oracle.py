@@ -251,20 +251,36 @@ def _oracle(
             ]
 
     discharge_efficiency = sqrt(settings.round_trip_efficiency)
-    end = max(slot.end for slot in slots)
-    tail = [slot for slot in slots if slot.end > end - timedelta(hours=3)]
-    terminal_price = min(slot.discharge_price_dkk_per_kwh for slot in tail or slots)
-    adjusted_prices = [slot.discharge_price_dkk_per_kwh for slot in slots]
-    if max(adjusted_prices) - min(adjusted_prices) > 0.05:
-        terminal_price *= 0.75
-    terminal_net_price = max(
-        0.0,
-        terminal_price - settings.degradation_cost_dkk_per_kwh,
-    )
+    def continuation_reference(prices: list[PriceSlot]) -> float:
+        boundary = max(slot.end for slot in prices) - timedelta(hours=3)
+        conservative = [slot.price - slot.uncertainty_dkk_per_kwh for slot in prices]
+        edge = min(slot.price - slot.uncertainty_dkk_per_kwh
+                   for slot in prices if slot.end > boundary)
+        return max(0.0, edge * (.75 if max(conservative) - min(conservative) > .05 else 1))
+
+    acquisition_quote = inventory_quote = continuation_reference(slots)
+    known = [slot for slot in slots if slot.source == "known"]
+    if known and any(slot.source == "forecast" for slot in slots):
+        boundary = max(slot.end for slot in slots) - timedelta(hours=3)
+        tail = [slot for slot in slots if slot.end > boundary]
+        lower = max(0, min(slot.price - slot.uncertainty_dkk_per_kwh for slot in tail))
+        upper = max(lower, min(slot.price + slot.uncertainty_dkk_per_kwh for slot in tail))
+        acquisition_quote = lower
+        # Nearest plausible value to the confirmed continuation reference.
+        # Explicit uncertainty replaces the extra heuristic discount; it must
+        # neither liquidate existing stock nor finance speculative new stock.
+        inventory_quote = sorted((lower, continuation_reference(known), upper))[1]
+    acquisition_net = max(0, acquisition_quote - settings.degradation_cost_dkk_per_kwh)
+    inventory_net = max(0, inventory_quote - settings.degradation_cost_dkk_per_kwh)
+    initial_inventory_wh = max(0, initial_step - minimum_step) * step_wh
 
     def final_key(path: _OraclePath) -> tuple[float, float, str]:
         stored_wh = max(0, path.energy_step - minimum_step) * step_wh
-        terminal_value = stored_wh * discharge_efficiency / 1000 * terminal_net_price
+        existing_wh = min(stored_wh, initial_inventory_wh)
+        added_wh = stored_wh - existing_wh
+        terminal_value = discharge_efficiency / 1000 * (
+            existing_wh * inventory_net + added_wh * acquisition_net
+        )
         return (
             round(path.objective_cost - terminal_value, 6),
             path.throughput_wh,

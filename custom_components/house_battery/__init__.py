@@ -53,6 +53,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     async def clear_scheduled_loads(call: ServiceCall) -> None:
         coordinator = coordinator_for(call)
         coordinator.runtime.scheduled_loads.clear()
+        coordinator._planning_revision += 1
         await coordinator.store.save(coordinator.runtime)
         await coordinator.async_request_refresh()
 
@@ -138,6 +139,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = Fbp1200Coordinator(hass, entry)
     await coordinator.async_initialize()
     await coordinator.async_config_entry_first_refresh()
+    coordinator.async_start_price_tracking()
     entry.runtime_data = coordinator
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))

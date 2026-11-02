@@ -23,6 +23,7 @@ from .efficiency import MatchedSocEfficiency
 from .forecast import ForecastAccuracy
 from .learning import BatteryLearner, LoadLearner
 from .load_forecast_evidence import LoadForecastEvidence
+from .price_patterns import PricePatternLearner
 from .replay import ReplayHistory
 from .sizing import SizingHistory
 
@@ -67,6 +68,7 @@ class RuntimeState:
     # physical functions can be verified independently of the price plan.
     override_action: str = "auto"
     forecast_accuracies: dict[str, ForecastAccuracy] = field(default_factory=dict)
+    price_patterns: PricePatternLearner = field(default_factory=PricePatternLearner)
     # ISO-8601 timestamp recorded when the schema-v2 power-flow model first
     # loaded this entry. Pre-v2 battery-learning and flow-accounting evidence
     # used the (incorrect) FBP "Discharge" telemetry, so those totals are
@@ -84,6 +86,7 @@ class RuntimeState:
         if now.tzinfo is None:
             raise ValueError("Runtime retention requires an aware timestamp")
         self.load_learner.prune(now)
+        self.price_patterns.prune(now)
         self.load_forecast_evidence.prune(now)
         self.replay_history.prune(now)
         self.ledger.prune(now)
@@ -175,6 +178,7 @@ class RuntimeState:
             "last_action_at": self.last_action_at,
             "transitions": self.transitions[-100:],
             "forecast_enabled": self.forecast_enabled,
+            "price_patterns": self.price_patterns.as_dict(),
             "opportunistic_charging_enabled": self.opportunistic_charging_enabled,
             "adaptive_enabled": self.adaptive_enabled,
             "adaptive_history": self.adaptive_history[-100:],
@@ -208,6 +212,7 @@ class RuntimeState:
             "scheduled_loads": self.scheduled_loads,
             "forecast": {
                 "enabled": self.forecast_enabled,
+                "patterns": self.price_patterns.as_dict(),
                 "accuracies": {
                     source: accuracy.as_dict()
                     for source, accuracy in self.forecast_accuracies.items()
@@ -300,6 +305,7 @@ class RuntimeState:
             ),
             override_action=str(data.get("override_action", "auto") or "auto"),
             forecast_accuracies=accuracies,
+            price_patterns=PricePatternLearner.from_dict(data.get("price_patterns", {})),
             daily_plan=DailyPlan.from_dict(data.get("daily_plan", {})),
             flow_model_started_at=(
                 data.get("flow_model_started_at")

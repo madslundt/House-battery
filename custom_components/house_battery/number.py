@@ -28,7 +28,7 @@ SETTING_NAMES = {
     "minimum_profit_dkk_per_kwh": ("Minimum required profit", "mdi:cash-lock"),
     "cycle_life": ("Cycle-life reference", "mdi:sync"),
     "forecast_uncertainty_dkk_per_kwh": (
-        "External price forecast uncertainty",
+        "Price forecast uncertainty",
         "mdi:chart-bell-curve-cumulative",
     ),
     "sizing_expansion_capacity_kwh": (

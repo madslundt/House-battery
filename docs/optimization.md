@@ -2,9 +2,18 @@
 
 ## What is optimized
 
-Every minute, House Battery validates local telemetry, retains each price
-source's valid interval duration, predicts the connected load, and uses a
-deterministic dynamic-programming plan. The plan respects SOC bounds, capacity,
+House Battery recalculates its economic plan when a tariff interval changes,
+published prices or usable forecasts change, or planning settings and scheduled
+loads change. Quarter-hour feeds therefore normally replan every 15 minutes;
+hourly feeds follow their hourly boundaries, including consecutive equal prices.
+Price-entity events and a boundary timer trigger updates. Ordinary minute polls
+reuse the economic plan. Telemetry, learning, accounting and safety checks still
+run every minute; reserve/ceiling crossings, load infeasibility and recovery from
+a fault can require an immediate replacement plan.
+
+Each new deterministic dynamic-programming plan retains the source's interval
+durations and starts from observed SOC and predicted connected load.
+The plan respects SOC bounds, capacity,
 charge/discharge power, round-trip losses, switching cost, degradation cost,
 and the effective minimum required profit. With adaptive planning off, this
 is the configured manual profit margin. Mode switching cost is fixed internally;
@@ -173,7 +182,7 @@ Confirmed prices remain authoritative even when they extend farther ahead.
 Every appended forecast interval remains labeled `forecast` and carries the
 configured uncertainty; it is never relabeled as a known tariff.
 
-Known prices remain authoritative. When **Use external price forecast** is
+Known prices remain authoritative. When **Use price forecasts** is
 off, forecast data are collected only for accuracy evidence. Overlapping
 sources are each scored independently against the actual known price. When it
 is on, the optimizer normally uses the first configured usable source that provides
@@ -185,7 +194,7 @@ It also rejects an unavailable/unknown entity, malformed row, empty or expired
 horizon, and data older than three hours. These are forecast-only conditions:
 valid known-price planning remains in service.
 
-Set **External price forecast uncertainty** to the likely absolute forecast
+Set **Price forecast uncertainty** to the likely absolute forecast
 error in DKK/kWh. In a forecast interval, the optimizer evaluates charging at
 `forecast + uncertainty` and discharge at `forecast − uncertainty`. This
 makes charging look less cheap and discharge less valuable, so an uncertain
@@ -211,6 +220,70 @@ plan. `used` means valid forecast slots extended the known horizon. `stale`,
 `invalid`, `empty`, `expired`, and `unavailable` mean they were deliberately
 ignored; `no_contiguous_extension` means valid rows did not join the published
 horizon exactly.
+
+## Learned price patterns
+
+The integration also learns its configured **confirmed all-in import prices**
+by local weekday and hour. It does not assume weekends or overnight hours are
+cheap. Completed hours need at least 90% price coverage; repeated polls and
+duplicate rows do not add independent observations. At least four distinct
+matching weekday dates are required before a bucket can predict a price.
+
+Historical coverage alone does not enable control. First-issued hourly
+predictions compete with a flat seven-day baseline at separate 0–24, 24–48 and
+48–72 hour leads. The approved 28-day weekday/weekend/hour median needs at
+least 24 matched hours across three local dates, each with at least six hours,
+and must improve MAE by at least 10% and 0.01 DKK/kWh. Ninety-day weekday,
+shorter-window and recency-weighted alternatives stay in shadow diagnostics;
+the integration does not automatically select whichever recently scored best.
+
+With **Use price forecasts** enabled, a qualified pattern can continue the
+planning horizon after published prices and the selected external forecast end,
+up to the same 72-hour cap. External forecasts take priority. Learned estimates
+never replace either source, repair a known-price gap, or stand in for a missing
+current tariff. With the switch off, history still accumulates but cannot drive
+planning. Existing entity IDs and the switch's stored on/off choice are retained.
+
+The model retains up to 90 days of history, uses the approved 28-day profile
+for control, and requires an actual observation within three days. Its
+uncertainty is at least the configured allowance and 0.25 DKK/kWh, increased
+by historical dispersion, first-issued errors at the matching lead and
+disagreement with the published/forecast prefix. These allowances can make a
+pattern too uncertain to justify charging. Patterns are labeled `forecast` in plan slots;
+`price_patterns` on **Optimizer state** and `learned_pattern` in forecast-source
+diagnostics identify their origin, coverage and validation error.
+
+The planner also checks the proposed learned extension for actual battery
+movement in those forecast intervals. If its only effect is changing the
+value assigned to end-of-horizon inventory, it replans the trusted prefix and
+keeps the learned prices in shadow. `control_status` and `control_reason` explain
+that decision. A credible forecast peak can still justify charging during
+confirmed cheap hours. This guard prevents the demonstrated terminal-only
+regressions; it does not establish household savings from price patterns.
+
+Forecast uncertainty values existing battery inventory and newly acquired
+energy separately. Existing stock retains its confirmed continuation value
+unless the forecast interval supports a credible decline; extra energy gets
+only the cautious lower quote. This avoids liquidation solely because an
+uncertain extension was appended, without using protected stock value to
+finance speculative purchases. Both quotes and the exact carryover credit
+are exposed separately; replay stores the actual caller-supplied floor.
+
+With both **Adaptive planning** and **Use price forecasts** enabled, external
+sources can also receive source-specific bias correction. Dated residuals
+must pass chronological validation, coverage, tail-error and recent-stability
+checks. Corrections are shrunk and capped at 0.75 DKK/kWh. Their uncertainty
+contains the complete original source interval, so a shifted mean cannot
+create a better trading bound by itself. Raw provider predictions remain the
+independent accuracy evidence. Missing or unqualified evidence leaves the
+source unchanged; configured-source priority still uses raw accuracy.
+
+Compatible retained measured price history can warm-start learning. Changing
+price bindings, reported units/currency or local timezone clears the incompatible
+profile. Existing all-in prices are used directly; the integration does not
+download spot prices or add another tariff layer. See the
+[DK2 research and reproducible analysis](research/dk2-price-patterns.md) for the
+observed weekend and seasonal effects and their exceptions.
 
 ## A realistic week
 

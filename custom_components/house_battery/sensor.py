@@ -493,6 +493,12 @@ class FbpSystemStateSensor(Fbp1200Entity, SensorEntity):
             "policy_replay_evidence",
             "planning_evidence_error",
             "price_input_diagnostics",
+            "price_patterns",
+            "economic_plan_reused",
+            "economic_plan_created_at",
+            "next_economic_plan_boundary",
+            "terminal_price_dkk_per_kwh",
+            "terminal_inventory_price_dkk_per_kwh",
             "load_model_smoothing_error_w",
         )
         return {key: self.coordinator.data.get(key) for key in keys}
@@ -1084,10 +1090,11 @@ class FbpPriceForecastAccuracySensor(Fbp1200Entity, SensorEntity):
             "price_forecast_mae_dkk_per_kwh",
             "price_forecast_bias_dkk_per_kwh",
             "price_forecast_within_uncertainty_pct",
+            "price_patterns",
         )
         return {key: self.coordinator.data.get(key) for key in keys} | {
             "meaning": "Each configured source is scored independently. MAE is the average absolute forecast error; bias is forecast minus actual, so positive means over-prediction.",
-            "uncertainty_setting": "External price forecast uncertainty number",
+            "uncertainty_setting": "Price forecast uncertainty number",
         }
 
 

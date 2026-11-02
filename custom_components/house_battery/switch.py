@@ -7,7 +7,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import OPPORTUNISTIC_TARGET_SOC
+from .const import CONF_PRICE_ENTITIES, OPPORTUNISTIC_TARGET_SOC
 from .coordinator import Fbp1200Coordinator
 from .entity import Fbp1200Entity
 
@@ -115,7 +115,7 @@ class FbpAdaptivePlanningSwitch(Fbp1200Entity, SwitchEntity):
 class FbpExternalForecastSwitch(Fbp1200Entity, SwitchEntity):
     """Opt in to using forecast intervals after the known price horizon."""
 
-    _attr_name = "Use external price forecast"
+    _attr_name = "Use price forecasts"
     _attr_icon = "mdi:chart-timeline-variant"
     _attr_entity_category = EntityCategory.CONFIG
 
@@ -124,7 +124,10 @@ class FbpExternalForecastSwitch(Fbp1200Entity, SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return bool(self.coordinator._forecast_entities())
+        return bool(
+            self.coordinator._forecast_entities()
+            or self.coordinator.config.get(CONF_PRICE_ENTITIES)
+        )
 
     @property
     def is_on(self) -> bool:
@@ -139,6 +142,7 @@ class FbpExternalForecastSwitch(Fbp1200Entity, SwitchEntity):
             ),
             "used_slots": self.coordinator.data.get("price_forecast_used_slots", 0),
             "status": self.coordinator.data.get("price_forecast_status"),
+            "learned_patterns": self.coordinator.data.get("price_patterns"),
             "safety": "Known prices always win; only a contiguous extension is used.",
         }
 

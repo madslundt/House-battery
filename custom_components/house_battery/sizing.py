@@ -176,8 +176,8 @@ class SizingHistory:
             }
         return model
 
-    def recent_price_slots(self, now: datetime) -> list[PriceSlot]:
-        """Return confirmed hourly prices from the past seven days.
+    def recent_price_slots(self, now: datetime, *, days: int = 7) -> list[PriceSlot]:
+        """Return confirmed hourly prices within the retained history.
 
         Each completed hour needs at least 90% measured coverage. Unlike a
         sizing assessment, a storage-price reference does not require 28
@@ -185,7 +185,7 @@ class SizingHistory:
         """
         if now.tzinfo is None:
             raise ValueError("Sizing timestamps must be timezone-aware")
-        cutoff = now.timestamp() - 7 * 86400
+        cutoff = now.timestamp() - min(90, max(1, days)) * 86400
         hours = self._hours.copy()
         return [PriceSlot(
             datetime.fromtimestamp(start, UTC),

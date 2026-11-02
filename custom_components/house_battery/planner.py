@@ -89,6 +89,31 @@ def _terminal_price(slots: list[PriceSlot]) -> float:
     return max(0.0, tail_price * haircut)
 
 
+def _terminal_prices(slots: list[PriceSlot]) -> tuple[float, float]:
+    """Return acquisition and existing-inventory continuation prices.
+
+    Known-only plans retain their conservative horizon-edge heuristic. An
+    explicitly uncertain tail already supplies a price interval; adding the
+    heuristic haircut to it would treat uncertainty as a market price fall.
+
+    New energy receives only the lower interval quote. Existing inventory uses
+    the confirmed continuation reference projected into that interval: a noisy
+    extension cannot itself destroy its value, while a credible cheaper future
+    still permits using stored energy at today's higher price. The distinction
+    prevents a protective holding value from financing speculative new charges.
+    """
+    known = [slot for slot in slots if slot.source == "known"]
+    if not known or not any(slot.source == "forecast" for slot in slots):
+        price = _terminal_price(slots)
+        return price, price
+    end = max(slot.end for slot in slots)
+    tail = [slot for slot in slots if slot.end > end - _TERMINAL_PRICE_LOOKBACK]
+    lower = max(0.0, min(slot.discharge_price_dkk_per_kwh for slot in tail))
+    upper = max(lower, min(slot.charge_price_dkk_per_kwh for slot in tail))
+    inventory = max(lower, min(_terminal_price(known), upper))
+    return lower, inventory
+
+
 def _allowed_actions() -> tuple[Action, ...]:
     """All physical actions are candidates at every price interval."""
     return (Action.GRID, Action.BATTERY, Action.CHARGE)
@@ -660,8 +685,12 @@ def optimize(
 
     # An unavailable discharge path cannot redeem stored energy later. Giving
     # it a carryover credit would buy power for an unexecutable arbitrage cycle.
+    acquisition_price, inventory_price = _terminal_prices(valid)
     terminal_price = max(
-        _terminal_price(valid), terminal_price_floor_dkk_per_kwh,
+        acquisition_price, terminal_price_floor_dkk_per_kwh,
+    ) if settings.discharge_enabled else 0.0
+    terminal_inventory_price = max(
+        inventory_price, terminal_price_floor_dkk_per_kwh,
     ) if settings.discharge_enabled else 0.0
     discharge_efficiency = sqrt(settings.round_trip_efficiency)
     # Value leftover energy at its best future discharge opportunity: the
@@ -678,13 +707,22 @@ def optimize(
         terminal_price
         - settings.degradation_cost_dkk_per_kwh,
     )
+    inventory_net_price = max(
+        0.0, terminal_inventory_price - settings.degradation_cost_dkk_per_kwh,
+    )
+    initial_inventory_wh = max(0, initial.energy_step - minimum_step) * step_wh
+
+    def terminal_credit(state: _State) -> float:
+        remaining_wh = max(0, state.energy_step - minimum_step) * step_wh
+        retained_wh = min(initial_inventory_wh, remaining_wh)
+        acquired_wh = max(0.0, remaining_wh - retained_wh)
+        return discharge_efficiency / 1000 * (
+            retained_wh * inventory_net_price + acquired_wh * terminal_net_price
+        )
 
     def final_key(item: tuple[_State, _Node]) -> tuple[float, float, str]:
         state, node = item
-        stored_above_reserve_wh = max(0, state.energy_step - minimum_step) * step_wh
-        terminal_value = (
-            stored_above_reserve_wh * discharge_efficiency / 1000 * terminal_net_price
-        )
+        terminal_value = terminal_credit(state)
         # Absorb floating-point noise from the two accumulation paths (grid-only
         # vs. battery movement) so that a genuine economic *wash* ties on the
         # cost term. The existing tiebreak is "less battery throughput, then
@@ -754,13 +792,7 @@ def optimize(
     # Include the terminal value in reported savings so that the plan's
     # economic benefit is not understated (the optimizer already credits
     # the terminal value internally when selecting the final state).
-    terminal_value = (
-        max(0, final_state.energy_step - minimum_step)
-        * step_wh
-        * discharge_efficiency
-        / 1000
-        * terminal_net_price
-    )
+    terminal_value = terminal_credit(final_state)
     savings = baseline_cost - expected_cost + terminal_value
     throughput = (
         sum(item.battery_charge_wh + item.battery_discharge_wh for item in planned)
@@ -779,4 +811,6 @@ def optimize(
         f"{action.value}: {reason}",
         terminal_value,
         round(_final_node.cost - terminal_value, 6),
+        terminal_price_floor_dkk_per_kwh=terminal_price_floor_dkk_per_kwh,
+        terminal_inventory_price_dkk_per_kwh=terminal_inventory_price,
     )

@@ -102,7 +102,9 @@ def extend_known_horizon(
                 slot.price,
                 slot.expected_load_wh * fraction,
                 source="forecast",
-                uncertainty_dkk_per_kwh=max(0.0, uncertainty_dkk_per_kwh),
+                uncertainty_dkk_per_kwh=max(
+                    0.0, uncertainty_dkk_per_kwh, slot.uncertainty_dkk_per_kwh,
+                ),
             )
         )
         expected_start = end
@@ -173,12 +175,15 @@ class ForecastAccuracy:
             try:
                 start = datetime.fromisoformat(str(forecast["start"]))
                 end = datetime.fromisoformat(str(forecast["end"]))
+                issued = _aware(forecast.get("issued_at"))
                 if (
                     start.tzinfo is not None
                     and end.tzinfo is not None
                     and start < end
                     and now - FORECAST_EVIDENCE_MAX_AGE < end
                     and start <= now + _MAX_FORECAST_HORIZON
+                    and ("issued_at" not in forecast or issued is not None
+                         and timedelta() <= start - issued < _MAX_FORECAST_HORIZON)
                 ):
                     retained[key] = forecast
             except (KeyError, TypeError, ValueError):
@@ -208,6 +213,12 @@ class ForecastAccuracy:
             if slot.start.tzinfo is None or slot.end.tzinfo is None or slot.start >= slot.end or _finite(slot.price) is None:
                 continue
             if now is not None and (now.tzinfo is None or slot.start < now):
+                continue
+            if now is not None and slot.start >= now + _MAX_FORECAST_HORIZON:
+                # Score the first forecast inside the executable planning
+                # horizon. Readding longer-range rows after pruning would
+                # retain a >72 h vintage as it crosses the boundary, excluding
+                # that target from matched lead-band calibration indefinitely.
                 continue
             if _key(slot) in self.scored_intervals:
                 continue

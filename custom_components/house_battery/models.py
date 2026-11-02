@@ -22,7 +22,7 @@ class Action(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class PriceSlot:
-    """A price interval, optionally extended from an external forecast."""
+    """A confirmed price interval or an uncertain external/learned forecast."""
 
     start: datetime
     end: datetime
@@ -305,6 +305,11 @@ class Plan:
     reason: str
     terminal_value_dkk: float = 0.0
     optimization_objective_dkk: float | None = None
+    # The marginal quote for newly added energy and the continuation value of
+    # existing inventory can differ under forecast uncertainty. Preserve the
+    # actual caller-supplied floor separately for faithful offline replay.
+    terminal_price_floor_dkk_per_kwh: float = 0.0
+    terminal_inventory_price_dkk_per_kwh: float | None = None
 
     @property
     def current_action(self) -> Action:
@@ -333,6 +338,11 @@ class Plan:
             "terminal_value_dkk": round(self.terminal_value_dkk, 4),
             "battery_throughput_kwh": round(self.battery_throughput_kwh, 4),
             "terminal_price_dkk_per_kwh": round(self.terminal_price_dkk_per_kwh, 4),
+            "terminal_price_floor_dkk_per_kwh": round(self.terminal_price_floor_dkk_per_kwh, 4),
+            "terminal_inventory_price_dkk_per_kwh": (
+                round(self.terminal_inventory_price_dkk_per_kwh, 4)
+                if self.terminal_inventory_price_dkk_per_kwh is not None else None
+            ),
             "reason": self.reason,
             "slots": [slot.as_dict() for slot in self.slots],
         }

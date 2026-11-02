@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from math import isfinite
 
 from .models import Action, Plan, PlannerSettings, PriceSlot
@@ -109,6 +109,23 @@ class OpportunisticPlanDecision:
     active: bool
     reason: str
     incremental_savings_dkk: float
+    learned_control_status: str = "not_available"
+    learned_control_reason: str | None = None
+
+
+def has_forecast_backed_movement(plan: Plan, tail_start: datetime, minimum_wh: float) -> bool:
+    """Require a learned tail to support energy use, beyond an inventory quote.
+
+    A better price predictor alone does not establish a better battery policy.
+    Reject extensions whose only control effect is changing terminal credits;
+    the optimizer must also find executable movement in the learned intervals
+    after its normal loss, uncertainty, wear and profit checks.
+    """
+    return sum(
+        slot.battery_charge_wh + slot.battery_discharge_wh
+        for slot in plan.slots
+        if slot.price_source == "forecast" and slot.start >= tail_start
+    ) >= minimum_wh
 
 
 def apply_storage_policy(
