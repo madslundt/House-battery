@@ -214,18 +214,20 @@ def test_unverified_native_grid_and_charge_controls_remain_available(mode):
     asyncio.run(scenario())
 
 
-def test_interrupted_telemetry_restores_grid_and_resumes_authorized_discharge():
+def test_interrupted_telemetry_preserves_grid_isolation_and_resumes_discharge():
     async def scenario():
         coord, client, hass, timeline = await coordinator(override="battery")
         client.unavailable = True
         recovering = await coord._async_update_data()
         assert recovering["system_state"] == "RECOVERING"
-        assert hass.states.get("switch.grid_input").state == "on"
+        assert hass.states.get("switch.grid_input").state == "off"
+        assert not timeline
         assert not client.calls
         client.unavailable = False
         resumed = await coord._async_update_data()
         assert resumed["battery_discharge_blocked"] is False
-        assert timeline[-1] == "turn_off"
+        assert hass.states.get("switch.grid_input").state == "off"
+        assert not timeline
         assert client.calls == [("limits", 20, 90), ("mode", "Discharge", 200)]
         assert not coord.runtime.backup_cutoff_verified
 

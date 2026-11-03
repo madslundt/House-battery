@@ -1414,13 +1414,13 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self._local_tcp_unavailable_since is None:
                     self._local_tcp_unavailable_since = now
                 self._consecutive_local_failures += 1
-                if self._consecutive_local_failures >= RECOVERY_RELOAD_AFTER_FAILURES:
-                    self._schedule_recovery_reload(
-                        "repeated local TCP telemetry/control failures"
-                    )
                 elapsed = now - self._local_tcp_unavailable_since
                 if elapsed < LOCAL_TCP_RECOVERY_GRACE:
                     local_tcp_recovery_remaining = LOCAL_TCP_RECOVERY_GRACE - elapsed
+                elif self._consecutive_local_failures >= RECOVERY_RELOAD_AFTER_FAILURES:
+                    self._schedule_recovery_reload(
+                        "repeated local TCP telemetry/control failures"
+                    )
         problems = get_health_problems(self.hass, self.config, now)
         local_tcp_recovering = local_tcp_recovery_remaining is not None
         if local_problem and not local_tcp_recovering:
@@ -1622,6 +1622,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "physical backup-output cutoff is not established by read-back"
             )
             command_result = await self._force_safe_if_needed(now)
+        elif problems:
+            state = "DEGRADED"
+            reason = "; ".join(problems)
+            command_result = await self._force_safe_if_needed(now)
         elif local_tcp_recovering:
             self.plan = None
             state = "RECOVERING"
@@ -1631,13 +1635,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"paused for up to {LOCAL_TCP_RECOVERY_GRACE.seconds // 60} minutes "
                 f"({remaining_seconds} seconds remaining): {local_problem}"
             )
-            command_result = await self._restore_grid_during_pause(
-                "automatic writes paused during local TCP recovery grace period"
-            )
-        elif problems:
-            state = "DEGRADED"
-            reason = "; ".join(problems)
-            command_result = await self._force_safe_if_needed(now)
+            # A brief missing read is not a mode change. In particular, leave
+            # the mains plug as it is so reconnecting can resume the same slot.
+            command_result = "automatic writes paused during local TCP recovery grace period"
         elif soc is not None:
             try:
                 settings = self._settings()

@@ -1120,6 +1120,80 @@ def test_direct_restart_preserves_control_until_fresh_telemetry_validates_it() -
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("interrupt", ["timeout", "fault", "outage", "pending_safe"])
+def test_transient_local_tcp_loss_leaves_controls_untouched(monkeypatch, interrupt) -> None:
+    """Even frequent refreshes must not switch mains or reload during the grace."""
+    import house_battery.coordinator as coordinator_module
+
+    start = datetime(2026, 11, 3, 18, 18, 30, tzinfo=UTC)
+    fixed_now = start
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.astimezone(tz) if tz else fixed_now.replace(tzinfo=None)
+
+    class UnavailableClient:
+        async def async_snapshot(self):
+            raise LocalProtocolError("temporary disconnect")
+
+    async def scenario():
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        coordinator = Fbp1200Coordinator(hass, Entry({
+            "host": "192.168.30.90", "commissioned": True,
+            CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
+            CONF_GRID_ISOLATION_SWITCH: "switch.fbp_grid_input",
+            "fault_entity": "binary_sensor.battery_fault",
+        }))
+        coordinator.local_client = UnavailableClient()
+        coordinator.store = StaticStore(coordinator.runtime)
+        coordinator.runtime.execution_enabled = True
+        coordinator._startup_guard_passed = True
+        hass.states.async_set("binary_sensor.grid_available", "on")
+        hass.states.async_set("binary_sensor.battery_fault", "off")
+        hass.states.async_set("switch.fbp_grid_input", "off")
+        writes = []
+
+        async def command(*args, **kwargs):
+            writes.append("inverter")
+            return True, "safe"
+
+        async def isolation(*args, **kwargs):
+            writes.append("mains")
+            return True
+
+        coordinator.actuator.async_command = command
+        coordinator.actuator.async_set_grid_isolation = isolation
+        nonlocal fixed_now
+        for elapsed in (0, 1, 30, 61, 75, 119):
+            fixed_now = start + timedelta(seconds=elapsed)
+            status = await coordinator._async_update_data()
+            assert status["system_state"] == "RECOVERING"
+            assert status["execution_enabled"]
+            assert not writes, "a transient unknown state changed battery controls"
+            assert not coordinator._recovery_reload_scheduled
+        if interrupt == "fault":
+            hass.states.async_set("binary_sensor.battery_fault", "on")
+        elif interrupt == "outage":
+            hass.states.async_set("binary_sensor.grid_available", "off")
+        elif interrupt == "pending_safe":
+            coordinator.runtime.pending_safe = True
+        else:
+            fixed_now = start + timedelta(seconds=120)
+        status = await coordinator._async_update_data()
+        assert status["system_state"] == (
+            "OUTAGE" if interrupt == "outage" else
+            "RECOVERING" if interrupt == "pending_safe" else "DEGRADED"
+        )
+        assert writes == ["inverter"]
+        assert coordinator._recovery_reload_scheduled == (interrupt == "timeout")
+
+    monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
+    asyncio.run(scenario())
+
+
 def test_transient_local_tcp_loss_pauses_writes_without_disabling_control() -> None:
     """A short local-network loss must not require manual re-authorisation."""
 
@@ -1274,6 +1348,9 @@ def test_charge_plan_resumes_after_disconnect_across_price_boundary(
         resumed = await coordinator._async_update_data()
         assert resumed["system_state"] == "ACTIVE"
         assert resumed["healthy"]
+        assert coordinator._local_tcp_unavailable_since is None
+        assert coordinator._consecutive_local_failures == 0
+        assert not coordinator._recovery_reload_scheduled
         assert resumed["executable_slot"]["action"] == "charge"
         assert resumed["plan"]["slots"][0]["action"] == "charge"
         assert resumed["plan"]["slots"][0]["soc_end"] > 90
@@ -1523,7 +1600,7 @@ def test_unusable_discharge_reports_failed_grid_restore_and_keeps_retrying(
 
 
 @pytest.mark.parametrize(
-    "pause", ["local_tcp_recovering", "startup_waiting", "first_refresh_low_soc"],
+    "pause", ["startup_waiting", "first_refresh_low_soc"],
 )
 @pytest.mark.parametrize("reserve_soc,emergency_soc", [(10, 5), (20, 5), (60, 40)])
 def test_paused_inverter_writes_still_restore_grid_supply(
@@ -1541,8 +1618,6 @@ def test_paused_inverter_writes_still_restore_grid_supply(
 
     class DirectClient:
         async def async_snapshot(self):
-            if pause == "local_tcp_recovering":
-                raise LocalProtocolError("battery no longer reachable")
             return replace(_snapshot(0, 0, 250), soc=10)
 
         async def async_read_controls(self):
@@ -1602,9 +1677,7 @@ def test_paused_inverter_writes_still_restore_grid_supply(
         assert hass.states.get("switch.fbp_grid_input").state == "on", pause
         assert not commands, "inverter writes must remain paused"
         assert status["execution_enabled"]
-        if pause == "local_tcp_recovering":
-            assert status["system_state"] == "RECOVERING"
-        elif pause == "startup_waiting":
+        if pause == "startup_waiting":
             assert status["system_state"] == "BOOTSTRAP"
 
     monkeypatch.setattr(coordinator_module, "datetime", FrozenDatetime)
