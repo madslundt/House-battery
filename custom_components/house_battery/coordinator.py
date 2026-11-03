@@ -156,6 +156,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._price_patterns_changed = False
         self._pattern_used_slots = 0
         self._pattern_tail_start: datetime | None = None
+        self._pattern_supported_intervals: tuple[tuple[datetime, datetime], ...] = ()
         self._pattern_control_status = "not_available"
         self._pattern_control_reason: str | None = None
         self._economic_plan_key: tuple | None = None
@@ -802,6 +803,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         pattern_slots = slots[prefix_length:]
         self._pattern_used_slots = len(pattern_slots)
         self._pattern_tail_start = pattern_slots[0].start if pattern_slots else None
+        self._pattern_supported_intervals = tuple(
+            (slot.start.astimezone(UTC), slot.end.astimezone(UTC)) for slot in pattern_slots
+        )
         if pattern_slots:
             pattern_summary = self.runtime.price_patterns.summary(now)
             self._forecast_used_slot_count += len(pattern_slots)
@@ -1692,6 +1696,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                           if "calibration" in source_data),
                     tuple(sorted(self._forecast_sources.get("learned_pattern", {}).get(
                         "evidence", {}).get("selected_models", {}).items())),
+                    # A profile hour may lose its required independent dates
+                    # while the selected model remains qualified. Coverage is
+                    # an admission boundary; numeric refinements are not.
+                    self._pattern_supported_intervals,
                 )
                 economic_key = planning_key(
                     slots, revision=revision, settings=settings,

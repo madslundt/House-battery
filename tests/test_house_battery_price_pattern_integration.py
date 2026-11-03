@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
+import house_battery.coordinator as coordinator_module
 from house_battery.const import (
     CONF_LOAD_POWER,
     CONF_PRICE_ENTITIES,
@@ -18,7 +19,9 @@ from house_battery.const import (
 )
 from house_battery.coordinator import Fbp1200Coordinator
 from house_battery.models import PriceSlot
+from house_battery.pattern_models import CONTROL_MODEL, LEAD_BANDS, MODEL_NAMES
 from house_battery.runtime import RuntimeState
+from test_house_battery_price_events import setup as setup_price_events
 
 NOW = datetime(2026, 10, 26, 12, 7, tzinfo=UTC)
 ANCHOR = NOW.replace(minute=0)
@@ -264,4 +267,128 @@ def test_only_compatible_sizing_history_can_warm_start_patterns(compatible: bool
         summary = coordinator.runtime.price_patterns.summary(NOW)
         assert summary["history_ready"] is compatible
         assert summary["issued_validation_samples"] == 0
+    asyncio.run(scenario())
+
+
+async def setup_real_price_pattern(monkeypatch, *, sparse_support=False, external_hours=0):
+    coord, _, hass, _, clock, optimizer = await setup_price_events(monkeypatch)
+    now = datetime(2026, 11, 3, 7, tzinfo=UTC)
+    clock[0] = now
+    # This fixed historical clock exercises model retention, independently of
+    # the real wall-clock freshness of the fixture's otherwise healthy inputs.
+    monkeypatch.setattr(coordinator_module, "get_health_problems", lambda *args: [])
+    coord.runtime.forecast_enabled = True
+    coord.runtime.sizing_history.configure("")
+    hass.states.async_set("sensor.prices", "2", {"prices": [
+        {"start": (now + timedelta(minutes=15 * index)).isoformat(),
+         "end": (now + timedelta(minutes=15 * (index + 1))).isoformat(), "price": 2.}
+        for index in range(4)
+    ]})
+    if external_hours:
+        coord.entry.data["price_forecast_entities"] = ["sensor.forecast"]
+        hass.states.async_set("sensor.forecast", "ready", {"prices": [
+            {"start": (now + timedelta(hours=hour)).isoformat(),
+             "end": (now + timedelta(hours=hour + 1)).isoformat(), "price": 2.}
+            for hour in range(1, external_hours + 1)
+        ]})
+    coord._price_slots(now)  # Establish the real learner's configured source.
+    learner = coord.runtime.price_patterns
+    for hours in range(1, 90 * 24 + 1):
+        start = now - timedelta(hours=hours)
+        if (sparse_support and start.hour == now.hour and start.weekday() < 5
+                and start >= now - timedelta(days=28) and start.weekday() != now.weekday()):
+            continue
+        learner.samples[start.isoformat()] = (8. if 18 <= start.hour < 21 else 2., None)
+    # Real paired evidence qualifies the same control model in every lead band.
+    for days in (1, 2, 3):
+        for hour in range(8):
+            start = (now - timedelta(days=days)).replace(hour=hour)
+            for band, lead in zip(LEAD_BANDS, (1, 25, 49), strict=True):
+                learner.evidence.scores.append({
+                    "start": start.isoformat(),
+                    "issued_at": (start - timedelta(hours=lead)).isoformat(),
+                    "lead_band": band,
+                    "errors": {model: .1 if model == CONTROL_MODEL else 1.
+                               for model in MODEL_NAMES},
+                })
+    return coord, clock, optimizer
+
+
+@pytest.mark.parametrize("external_hours", [0, 6])
+def test_withdrawn_pattern_hour_support_replans_while_selected_models_stay_qualified(
+    monkeypatch, external_hours,
+):
+    async def scenario():
+        coord, clock, optimizer = await setup_real_price_pattern(
+            monkeypatch, sparse_support=True, external_hours=external_hours,
+        )
+        initial = await coord._async_update_data()
+        original = coord.plan
+        selected = coord.runtime.price_patterns.summary(clock[0])["selected_models"]
+        calls = optimizer.call_count
+        assert initial["system_state"] == "ACTIVE"
+        assert coord._pattern_control_status == "active"
+        assert coord._pattern_used_slots == 71 - external_hours
+        assert original.slots[-1].end == clock[0] + timedelta(hours=72)
+        assert selected == dict.fromkeys(LEAD_BANDS, CONTROL_MODEL)
+
+        # At 07:00 the weekday 07:00 bucket has four independent Tuesdays.
+        # One minute later its oldest date leaves the 28-day control window.
+        # The first unsupported target is tomorrow at 07:00; model-level
+        # issued skill remains qualified in all three lead bands.
+        clock[0] += timedelta(minutes=1)
+        revised = await coord._async_update_data()
+        supported_end = coord._last_price_slots[-1].end
+        withdrawn = [slot for slot in original.slots if slot.start >= supported_end]
+        assert revised["system_state"] == "ACTIVE"
+        assert coord._pattern_used_slots == 23 - external_hours
+        assert coord.runtime.price_patterns.summary(clock[0])["selected_models"] == selected
+        assert supported_end == datetime(2026, 11, 4, 7, tzinfo=UTC)
+        assert len(withdrawn) == 48
+        assert sum(slot.battery_charge_wh for slot in withdrawn) > 0
+        assert sum(slot.battery_discharge_wh for slot in withdrawn) > 0
+        assert revised["economic_plan_reused"] is False
+        assert revised["economic_plan_last_trigger"] == "model_qualification_changed"
+        assert optimizer.call_count > calls
+        assert coord.plan is not original
+        assert coord.plan.slots[-1].end == supported_end
+
+    asyncio.run(scenario())
+
+
+def test_real_pattern_numeric_refinements_reuse_plan_when_hour_support_is_unchanged(monkeypatch):
+    async def scenario():
+        coord, clock, optimizer = await setup_real_price_pattern(monkeypatch)
+        initial = await coord._async_update_data()
+        original = coord.plan
+        previous_slots = [slot for slot in coord._last_price_slots if slot.source == "forecast"]
+        learner = coord.runtime.price_patterns
+        selected = learner.summary(clock[0])["selected_models"]
+        calls = optimizer.call_count
+        assert initial["system_state"] == "ACTIVE"
+        assert coord._pattern_control_status == "active"
+        assert coord._pattern_used_slots == 71
+
+        for stamp, (price, error) in learner.samples.items():
+            if price == 8.:
+                learner.samples[stamp] = (8.1, error)
+        for row in learner.evidence.scores:
+            row["errors"][CONTROL_MODEL] = .4
+        clock[0] += timedelta(minutes=1)
+
+        refined = await coord._async_update_data()
+        current_slots = [slot for slot in coord._last_price_slots if slot.source == "forecast"]
+        assert refined["system_state"] == "ACTIVE"
+        assert learner.summary(clock[0])["selected_models"] == selected
+        assert [(slot.start, slot.end) for slot in current_slots] == [
+            (slot.start, slot.end) for slot in previous_slots
+        ]
+        assert max(slot.price for slot in previous_slots) == 8.
+        assert max(slot.price for slot in current_slots) == 8.1
+        assert max(slot.uncertainty_dkk_per_kwh for slot in previous_slots) == .25
+        assert max(slot.uncertainty_dkk_per_kwh for slot in current_slots) == .4
+        assert refined["economic_plan_reused"] is True
+        assert coord.plan is original
+        assert optimizer.call_count == calls
+
     asyncio.run(scenario())
