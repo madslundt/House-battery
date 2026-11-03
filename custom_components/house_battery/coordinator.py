@@ -107,7 +107,11 @@ from .planning_evidence import (
     observe_actual_evidence,
     record_plan_evidence,
 )
-from .planning_schedule import earliest_future_boundary, planning_key
+from .planning_schedule import (
+    earliest_future_boundary,
+    planning_change_reason,
+    planning_key,
+)
 from .policy import (
     OpportunisticPlanDecision,
     action_from_operating_mode,
@@ -157,6 +161,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._economic_plan_key: tuple | None = None
         self._economic_decision: OpportunisticPlanDecision | None = None
         self._economic_plan_reused = False
+        self._economic_plan_last_trigger: str | None = None
+        self._economic_market_inputs: tuple[object, ...] | None = None
         self._price_tracking = False
         self._price_timer_cancel: Callable[[], None] | None = None
         self._price_timer_at: datetime | None = None
@@ -504,11 +510,19 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         known_rows: list[Any] = []
         known_units: list[tuple[str, Any, Any]] = []
         forecast_price_entities: list[str] = []
+        market_inputs: list[object] = []
         for entity_id in self.config.get(CONF_PRICE_ENTITIES, []):
             state = self.hass.states.get(entity_id)
             if not state:
+                market_inputs.append((entity_id, "missing"))
                 continue
             attributes = dict(state.attributes)
+            market_inputs.append((
+                entity_id, state.state.lower() in _BAD_STATES,
+                is_forecast_data(attributes),
+                dumps(extract_rows(attributes), sort_keys=True, default=str),
+                attributes.get("unit_of_measurement"), attributes.get("currency"),
+            ))
             if state.state.lower() not in _BAD_STATES:
                 known_units.append((
                     entity_id, attributes.get("unit_of_measurement"), attributes.get("currency"),
@@ -608,6 +622,17 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if forecast_slots:
                     available_forecasts.append((source, forecast_slots))
             source_data[source] = details
+            market_inputs.append((
+                source, details["status"],
+                dumps(extract_rows(dict(forecast_state.attributes)), sort_keys=True, default=str)
+                if forecast_state is not None else None,
+                forecast_state.attributes.get("unit_of_measurement") if forecast_state else None,
+                forecast_state.attributes.get("currency") if forecast_state else None,
+            ))
+        # Raw publications and availability are economic events. Model updates
+        # below are deliberately excluded so learning cannot invalidate a plan
+        # each minute while the provider's prices have stayed unchanged.
+        self._economic_market_inputs = tuple(market_inputs)
 
         before = {
             source: accuracy.as_dict()
@@ -1614,6 +1639,19 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 settings = self._settings()
                 settings = apply_storage_policy(settings)
                 current_action = action if action is not Action.SAFE else Action.GRID
+                native_ceiling = (
+                    _control_number(self._local_controls, "3024")
+                    if self.is_direct_local else self._float(CONF_MAX_SOC_CONTROL)
+                )
+                if (
+                    current_action is Action.CHARGE and native_ceiling is not None
+                    and soc >= native_ceiling and actual_charge_power is not None
+                    and actual_charge_power <= FLOW_UI_ACTIVE_THRESHOLD_W
+                ):
+                    # A latched Charge command can already be physically idle
+                    # at its ceiling. Starting a new charge is then a restart;
+                    # the published current-tariff commitment still applies.
+                    current_action = Action.GRID
                 committed_slot = (
                     self.runtime.daily_plan.slot_at(now)
                     if self._override_action() is None else None
@@ -1639,6 +1677,22 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 current_discharge_allowed = settings.control_capabilities.discharge_load_feasible(
                     settings.discharge_power_w, self._load_power()
                 )
+                # Numerical refinements can wait for the next price event;
+                # qualification withdrawal cannot retain an expired policy or
+                # a learned forecast that no longer passes its admission gate.
+                model_eligibility = (
+                    self._adaptation.get("state"), planning_efficiency_source,
+                    self._forecast_adaptation.get("priority_adaptive_ready", False),
+                    tuple((source, details.get("adaptive_ready", False)) for source, details
+                          in sorted(self._forecast_adaptation.get("sources", {}).items())),
+                    tuple((source, tuple((band, details.get("reason") == "validated_bias_correction")
+                                         for band, details in sorted(
+                                             source_data.get("calibration", {}).get("lead_bands", {}).items())))
+                          for source, source_data in sorted(self._forecast_sources.items())
+                          if "calibration" in source_data),
+                    tuple(sorted(self._forecast_sources.get("learned_pattern", {}).get(
+                        "evidence", {}).get("selected_models", {}).items())),
+                )
                 economic_key = planning_key(
                     slots, revision=revision, settings=settings,
                     forecast_enabled=self.runtime.forecast_enabled,
@@ -1646,6 +1700,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     scheduled_loads=self.runtime.scheduled_loads, soc=soc,
                     current_discharge_enabled=current_discharge_allowed,
                     override_action=self.runtime.override_action,
+                    market_inputs=self._economic_market_inputs,
+                    configured_settings=self.runtime.settings,
+                    model_eligibility=model_eligibility,
                 )
                 if (
                     economic_key == self._economic_plan_key
@@ -1657,6 +1714,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     storage_decision = self._economic_decision
                     self._economic_plan_reused = True
                 else:
+                    plan_trigger = planning_change_reason(self._economic_plan_key, economic_key)
                     storage_decision = await self.hass.async_add_executor_job(
                         partial(
                             self._optimize_with_storage_policy,
@@ -1688,6 +1746,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raise ValueError("Physical inputs changed while planning")
                 self._economic_plan_key = economic_key
                 self._economic_decision = storage_decision
+                if not self._economic_plan_reused:
+                    self._economic_plan_last_trigger = plan_trigger
                 # A meter can remain healthy while changing from import to
                 # export during the worker calculation. Reapply that safety
                 # signal immediately before publishing/commanding its result.
@@ -2262,6 +2322,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "control_reason": self._pattern_control_reason if self._pattern_tail_start else None,
             },
             "economic_plan_reused": self._economic_plan_reused,
+            "economic_plan_last_trigger": self._economic_plan_last_trigger,
             "economic_plan_created_at": self.plan.created_at.isoformat() if self.plan else None,
             "next_economic_plan_boundary": (
                 self._price_timer_at.isoformat() if self._price_timer_at else None

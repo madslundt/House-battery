@@ -495,6 +495,7 @@ class FbpSystemStateSensor(Fbp1200Entity, SensorEntity):
             "price_input_diagnostics",
             "price_patterns",
             "economic_plan_reused",
+            "economic_plan_last_trigger",
             "economic_plan_created_at",
             "next_economic_plan_boundary",
             "terminal_price_dkk_per_kwh",

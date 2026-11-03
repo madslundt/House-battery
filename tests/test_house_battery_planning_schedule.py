@@ -11,7 +11,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from house_battery.models import PlannerSettings, PriceSlot
-from house_battery.planning_schedule import earliest_future_boundary, planning_key
+from house_battery.planning_schedule import (
+    earliest_future_boundary,
+    planning_change_reason,
+    planning_key,
+)
 
 BASE = datetime(2026, 11, 2, 12, tzinfo=UTC)
 
@@ -52,6 +56,32 @@ def test_minute_refresh_ignores_clipped_load_and_normal_soc_drift() -> None:
 
     assert key(original, soc=50) == key(minute_later, soc=49.8)
     assert hash(key(original)) == hash(key(minute_later))
+
+
+def test_raw_inputs_defer_learned_policy_and_forecast_changes_until_tariff() -> None:
+    manual = {"capacity_kwh": 2., "round_trip_efficiency": 85.}
+    inputs = {"market_inputs": (("sensor.prices", "DKK/kWh", 1.),),
+              "configured_settings": manual}
+    original = key(**inputs)
+    derived = prices()
+    derived[-1] = replace(derived[-1], price=2.8, uncertainty_dkk_per_kwh=.9)
+    refined = key(derived, settings=replace(settings(), capacity_wh=1990,
+                                          round_trip_efficiency=.86,
+                                          minimum_profit_dkk_per_kwh=0.), **inputs)
+
+    assert original == refined
+    assert hash(original) == hash(refined)
+    assert original != key(prices()[1:], **inputs)
+    assert planning_change_reason(original, key(prices()[1:], **inputs)) == "tariff_boundary"
+    manual["round_trip_efficiency"] = 86.
+    assert original != key(**inputs)
+
+
+def test_raw_market_basis_change_requires_a_new_plan() -> None:
+    original = key(market_inputs=(("sensor.prices", "DKK/kWh", 1.),))
+    revised = key(market_inputs=(("sensor.prices", "EUR/MWh", 1.),))
+    assert original != revised
+    assert planning_change_reason(original, revised) == "price_or_forecast_update"
 
 
 def test_equal_price_tariff_boundary_still_requires_a_new_plan() -> None:

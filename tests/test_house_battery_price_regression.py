@@ -118,8 +118,8 @@ def test_known_price_regression_uses_load_wear_and_profit_hurdle() -> None:
     expected_actions = [
         ("2026-09-25T16:55:00+02:00", "2026-09-25T17:15:00+02:00", Action.GRID),
         ("2026-09-25T17:15:00+02:00", "2026-09-25T22:45:00+02:00", Action.BATTERY),
-        ("2026-09-25T22:45:00+02:00", "2026-09-26T12:15:00+02:00", Action.GRID),
-        ("2026-09-26T12:15:00+02:00", "2026-09-26T14:45:00+02:00", Action.CHARGE),
+        ("2026-09-25T22:45:00+02:00", "2026-09-26T12:30:00+02:00", Action.GRID),
+        ("2026-09-26T12:30:00+02:00", "2026-09-26T14:45:00+02:00", Action.CHARGE),
         ("2026-09-26T14:45:00+02:00", "2026-09-26T17:15:00+02:00", Action.GRID),
         ("2026-09-26T17:15:00+02:00", "2026-09-27T00:00:00+02:00", Action.BATTERY),
     ]
@@ -135,11 +135,14 @@ def test_known_price_regression_uses_load_wear_and_profit_hurdle() -> None:
     assert plan.baseline_cost_dkk == pytest.approx(6.8816, abs=0.02)
     assert plan.expected_cost_dkk == pytest.approx(5.2765, abs=0.02)
     assert plan.expected_savings_dkk == pytest.approx(2.3507, abs=0.02)
-    assert plan.optimization_objective_dkk < 5.374505  # Full-power-only reference.
+    # Repricing the previous plan's actual starts/stops gives 5.473702 DKK.
+    # The smooth replacement buys the same energy with fewer physical stops.
+    assert plan.optimization_objective_dkk == pytest.approx(5.374505, abs=1e-6)
+    assert plan.optimization_objective_dkk < 5.473702
 
     assert any(
         block.action is Action.CHARGE
-        and block.start == datetime.fromisoformat("2026-09-26T12:15:00+02:00")
+        and block.start == datetime.fromisoformat("2026-09-26T12:30:00+02:00")
         and block.end == datetime.fromisoformat("2026-09-26T14:45:00+02:00")
         for block in blocks
     )

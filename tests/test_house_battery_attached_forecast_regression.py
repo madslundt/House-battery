@@ -89,11 +89,18 @@ def test_known_prices_only_reproduce_the_agreed_two_day_plan() -> None:
         ("2026-09-26T23:07:00+02:00", "2026-09-26T23:15:00+02:00", Action.GRID),
         ("2026-09-26T23:15:00+02:00", "2026-09-27T04:45:00+02:00", Action.BATTERY),
         ("2026-09-27T04:45:00+02:00", "2026-09-27T13:45:00+02:00", Action.GRID),
-        ("2026-09-27T13:45:00+02:00", "2026-09-27T17:15:00+02:00", Action.CHARGE),
-        ("2026-09-27T17:15:00+02:00", "2026-09-28T00:00:00+02:00", Action.BATTERY),
+        ("2026-09-27T13:45:00+02:00", "2026-09-27T16:15:00+02:00", Action.CHARGE),
+        ("2026-09-27T16:15:00+02:00", "2026-09-27T17:30:00+02:00", Action.GRID),
+        ("2026-09-27T17:30:00+02:00", "2026-09-28T00:00:00+02:00", Action.BATTERY),
     ]
-    # The former full-power-only search produced objective 4.024185 DKK.
-    assert plan.optimization_objective_dkk < 4.024185
+    # Revalued with physical starts/stops, the previous fragmented plan costs
+    # 4.554574 DKK. The continuous charge episode reaches the same 90% ceiling.
+    assert plan.optimization_objective_dkk == pytest.approx(4.024185, abs=1e-6)
+    assert plan.optimization_objective_dkk < 4.554574
+    assert all(
+        slot.charge_target_soc == 90
+        for slot in plan.slots if slot.action is Action.CHARGE
+    )
     for slot in plan.slots:
         delivered_wh = slot.battery_discharge_wh * settings.round_trip_efficiency**0.5
         assert delivered_wh <= slot.expected_load_wh + 1e-8

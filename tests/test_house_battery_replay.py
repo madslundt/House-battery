@@ -14,11 +14,41 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 from house_battery.models import Action, PlannerSettings, PriceSlot
 from house_battery.planner import optimize
 from house_battery.replay import ReplayHistory
-from house_battery.replay_model import evaluate_policies
+from house_battery.replay_model import _Case, _execute, evaluate_policies
 
 NOW = datetime(2026, 11, 1, 12, tzinfo=UTC)
 SETTINGS = PlannerSettings(200, 0, 100, 400, 200, 1, 0, .5, 0,
                           energy_step_wh=5, partial_charge_targets=())
+
+
+def test_replay_accounts_for_charge_ceiling_stops_and_restarts():
+    plant = replace(SETTINGS, capacity_wh=2000, charge_power_w=1000,
+                    switching_penalty_dkk=.05)
+    case = _Case(800, 800, plant)
+    for target in (41, 42):
+        _execute(case, Action.CHARGE, load_wh=50, hours=.25, price=2.4,
+                 target_soc=target, plant=plant)
+        assert case.action is Action.GRID
+        # Repeated observations of an already capped Charge command must not
+        # invent another physical restart while the battery remains idle.
+        before = case.metrics["switching_cost_dkk"]
+        _execute(case, Action.CHARGE, load_wh=50, hours=.25, price=2.4,
+                 target_soc=target, plant=plant)
+        assert case.metrics["switching_cost_dkk"] == before
+    assert case.stored_wh == 840
+    assert case.metrics["switching_cost_dkk"] == pytest.approx(.20)
+
+
+def test_replay_full_rate_charging_continues_without_extra_stop_cost():
+    plant = replace(SETTINGS, capacity_wh=2000, charge_power_w=1000,
+                    switching_penalty_dkk=.05)
+    case = _Case(800, 800, plant)
+    for _ in range(3):
+        _execute(case, Action.CHARGE, load_wh=50, hours=.25, price=2.4,
+                 target_soc=90, plant=plant)
+        assert case.action is Action.CHARGE
+    assert case.stored_wh == 1400
+    assert case.metrics["switching_cost_dkk"] == pytest.approx(.05)
 
 
 def slots(prices=(1, 5)):

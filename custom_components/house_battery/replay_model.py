@@ -81,7 +81,14 @@ def _execute(
     case.stored_wh = start + charge * efficiency - discharge / efficiency
     case.metrics["cash_cost_dkk"] += (load_wh + charge - discharge) / 1000 * price
     case.metrics["wear_cost_dkk"] += discharge / 1000 * plant.degradation_cost_dkk_per_kwh
-    case.metrics["switching_cost_dkk"] += (action != case.action) * plant.switching_penalty_dkk
+    physical_action = Action.GRID if action is Action.CHARGE and charge <= 1e-9 else action
+    stopped_early = (
+        action is Action.CHARGE and charge > 1e-9
+        and (requested - charge) * efficiency >= plant.energy_step_wh - 1e-9
+    )
+    case.metrics["switching_cost_dkk"] += (
+        (physical_action != case.action) + int(stopped_early)
+    ) * plant.switching_penalty_dkk
     case.metrics["charge_kwh"] += charge / 1000
     case.metrics["discharge_kwh"] += discharge / 1000
     case.metrics["equivalent_full_cycles"] += (charge * efficiency + discharge / efficiency) / (2 * plant.capacity_wh)
@@ -91,7 +98,7 @@ def _execute(
     case.metrics["reserve_shortfall_wh"] = max(case.metrics["reserve_shortfall_wh"], shortfall)
     case.metrics["reserve_shortfall_hours"] += hours if shortfall > 1e-6 else 0
     case.metrics["corrective_interventions"] += abs(requested - charge - discharge) > 1e-6
-    case.action = action
+    case.action = Action.GRID if stopped_early else physical_action
 
 
 def evaluate_policies(

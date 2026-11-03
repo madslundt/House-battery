@@ -395,10 +395,12 @@ def test_partial_charge_respects_legacy_native_bounds_and_step(native_minimum, e
             "min": native_minimum, "max": 100, "step": 10,
         })
         now = datetime.now(UTC)
+        # A material input price rewards buying only the required native
+        # ceiling; the later peak keeps either supported minimum profitable.
         slots = [PriceSlot(
             now + timedelta(hours=i), now + timedelta(hours=i + 1), price,
             expected_load_wh=load,
-        ) for i, (price, load) in enumerate([(.1, 0), (5, 100), (0, 0)])]
+        ) for i, (price, load) in enumerate([(.5, 0), (10, 100), (0, 0)])]
         decision = coord._optimize_with_storage_policy(
             slots, now=now, soc=20, settings=coord._settings(),
             current_action=Action.GRID,

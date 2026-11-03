@@ -83,14 +83,23 @@ def test_live_known_price_plan_charges_for_evening_and_values_carryover() -> Non
         for block in blocks[-4:]
     ] == [
         (4, 0, 13, 45, Action.GRID),
-        (13, 45, 17, 15, Action.CHARGE),
-        (17, 15, 0, 0, Action.BATTERY),
+        (13, 45, 16, 0, Action.CHARGE),
+        (16, 0, 17, 30, Action.GRID),
+        (17, 30, 0, 0, Action.BATTERY),
     ]
     assert max(slot.soc_end for slot in normal.slots) == pytest.approx(89.89, abs=0.02)
     evening = [slot for slot in normal.slots if slot.action is Action.BATTERY]
-    assert sum(slot.expected_load_wh for slot in evening) == pytest.approx(1003.05)
+    assert sum(slot.expected_load_wh for slot in evening) == pytest.approx(965.90)
     assert sum(slot.battery_charge_wh for slot in normal.slots) == pytest.approx(1365)
-    assert normal.optimization_objective_dkk < 3.256042  # Full-power-only reference.
+    # The old ceiling-stepping plan costs 3.889938 DKK when its physical stops
+    # are priced consistently. The replacement is one full-rate charge episode
+    # with just its final ceiling hit, rather than repeated short top-ups.
+    assert normal.optimization_objective_dkk == pytest.approx(3.259291, abs=1e-6)
+    assert normal.optimization_objective_dkk < 3.889938
+    assert all(
+        slot.charge_target_soc == 90
+        for slot in normal.slots if slot.action is Action.CHARGE
+    )
     for slot in normal.slots:
         delivered_wh = slot.battery_discharge_wh * normal_settings.round_trip_efficiency**0.5
         assert delivered_wh <= slot.expected_load_wh + 1e-8

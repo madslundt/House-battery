@@ -305,9 +305,29 @@ def test_profitable_small_load_uses_a_reachable_partial_native_charge_target():
     assert plan.slots[0].charge_target_soc == 26
     assert plan.slots[0].battery_charge_wh == 120
     assert plan.slots[1].battery_discharge_wh == 110
-    # Includes input losses, wear, the required margin, and all three switches.
-    assert plan.optimization_objective_dkk == pytest.approx(0.397233, abs=1e-6)
+    # Includes input losses, wear, margin and all four physical transitions:
+    # start charging, stop at the ceiling, start discharging, return to grid.
+    assert plan.optimization_objective_dkk == pytest.approx(0.447233, abs=1e-6)
     assert plan.optimization_objective_dkk < 0.5  # Grid-only reference.
+
+
+def test_near_equal_cheap_quarters_do_not_bridge_charging_with_one_percent_bursts():
+    cheap = [2.4, 2.42, 2.41, 2.41, 2.41, 2.42, 2.40, 2.41, 2.42, 2.41, 2.4, 2.41]
+    configured = settings(
+        capacity_wh=2000, reserve_soc=10, charge_power_w=1000,
+        round_trip_efficiency=1, minimum_profit_dkk_per_kwh=.5,
+    )
+    plan = optimize(
+        slots(cheap + [5] * 24 + [2.4] * 12, load_w=200),
+        now=BASE, soc=40, settings=configured,
+    )
+    charges = [slot for slot in plan.slots[:len(cheap)] if slot.action is Action.CHARGE]
+    # A small price advantage cannot justify repeated physical stop/start
+    # cycles merely because every interval still carries the CHARGE label.
+    early_stops = [slot for slot in charges if slot.battery_charge_wh < 195]
+    assert len(early_stops) <= 1
+    assert sum(slot.battery_charge_wh for slot in charges) >= 500
+    assert any(slot.action is Action.BATTERY for slot in plan.slots[len(cheap):])
 
 
 @pytest.mark.parametrize("targets,price,target", [

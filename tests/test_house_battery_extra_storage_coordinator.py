@@ -220,7 +220,20 @@ def test_relative_price_reference_is_shared_by_both_ceiling_plans(monkeypatch, e
     if enabled:
         assert decision.active
         assert max(slot.soc_end for slot in decision.plan.slots[:2]) == 100
-        assert decision.plan.slots[-1].soc_end > 80
+        assert decision.plan.terminal_price_dkk_per_kwh == .75
+        remaining_wh = (
+            decision.plan.slots[-1].soc_end - settings.reserve_soc
+        ) * settings.capacity_wh / 100
+        assert remaining_wh > 0
+        assert decision.plan.terminal_value_dkk == pytest.approx(
+            remaining_wh * settings.round_trip_efficiency**.5
+            * (.75 - settings.degradation_cost_dkk_per_kwh) / 1000,
+        )
+        # Shared continuation value does not mandate an expensive refill. The
+        # old late-ceiling stepping plan revalues to 1.897347 DKK; holding the
+        # 46.25% remaining inventory costs 1.643987 DKK and avoids those stops.
+        assert decision.plan.optimization_objective_dkk == pytest.approx(1.643987, abs=1e-6)
+        assert not any(slot.action is Action.CHARGE for slot in decision.plan.slots[-3:])
         assert "relative storage reference 0.75 DKK/kWh" in decision.reason
     else:
         assert not decision.active

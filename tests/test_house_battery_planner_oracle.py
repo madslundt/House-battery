@@ -23,6 +23,8 @@ _ACTIONS = (Action.GRID, Action.BATTERY, Action.CHARGE)
 @dataclass(frozen=True, slots=True)
 class _OraclePath:
     energy_step: int
+    # Physical activity at the boundary can be idle even though the command
+    # during the preceding interval was CHARGE with an early SOC ceiling.
     action: Action
     objective_cost: float
     throughput_wh: float
@@ -112,6 +114,8 @@ def _oracle_transition(
     efficiency = sqrt(settings.round_trip_efficiency)
     grid_wh = load_wh
     changed = action is not path.action
+    physical_end_action = action
+    stop_cost = 0.0
 
     if action is Action.CHARGE:
         load_power_w = load_wh / slot.hours if slot.hours > 0 else 0.0
@@ -148,6 +152,13 @@ def _oracle_transition(
     if action is Action.CHARGE:
         if delta_wh <= 0:
             return None
+        available_stored_wh = available_input_w * slot.hours * efficiency
+        if available_stored_wh - delta_wh >= step_wh - 1e-9:
+            # A ceiling leaves at least one whole model step of unused input
+            # time. It causes a physical stop; resuming next interval is a new
+            # start even if the published command label remains CHARGE.
+            physical_end_action = Action.GRID
+            stop_cost = settings.switching_penalty_dkk
         throughput_wh = delta_wh
         grid_wh = load_wh + delta_wh / efficiency
         movement_cost = delta_wh / efficiency / 1000 * slot.uncertainty_dkk_per_kwh
@@ -170,12 +181,12 @@ def _oracle_transition(
         throughput_wh = 0.0
         movement_cost = 0.0
 
-    interval_cost = grid_wh / 1000 * slot.price + movement_cost
+    interval_cost = grid_wh / 1000 * slot.price + movement_cost + stop_cost
     if changed:
         interval_cost += settings.switching_penalty_dkk
     return _OraclePath(
         energy_step=new_step,
-        action=action,
+        action=physical_end_action,
         objective_cost=path.objective_cost + interval_cost,
         throughput_wh=path.throughput_wh + throughput_wh,
         actions=path.actions + (action,),
@@ -330,10 +341,18 @@ def _plan_key(
             objective_cost += settings.switching_penalty_dkk
         throughput_wh += slot.battery_charge_wh + slot.battery_discharge_wh
         previous_action = slot.action
+        if slot.action is Action.CHARGE:
+            hours = (slot.end - slot.start).total_seconds() / 3600
+            available_stored_wh = max(
+                0.0, settings.charge_power_w * hours - slot.expected_load_wh,
+            ) * efficiency
+            if available_stored_wh - slot.battery_charge_wh >= settings.energy_step_wh - 1e-9:
+                objective_cost += settings.switching_penalty_dkk
+                previous_action = Action.GRID
     return (
         round(objective_cost - terminal_value_dkk, 6),
         throughput_wh,
-        plan_slots[-1].action.value,
+        previous_action.value,
     )
 
 
@@ -370,6 +389,10 @@ def test_recovery_matches_exhaustive_paths_at_the_known_forecast_boundary(reserv
         ([-0.50, -0.10, 0.20, 3.00], 0.0, {}),
         ([5.0, 5.0, 0.1, 5.0], 0.0, {"reserve_soc": 25.0}),
         ([0.1, 4.0, 0.2, 3.5], 100.0, {"target_soc": 75.0}),
+        ([1.00, 1.02, 1.01, 4.0, 4.0], 0.0, {"charge_power_w": 800.0}),
+        ([1.00, 1.02, 1.01, 4.0, 4.0], 0.0, {
+            "charge_power_w": 800.0, "switching_penalty_dkk": 0.0,
+        }),
         ([1.0, 4.0, 0.0], 0.0, {
             "low_soc_charge_threshold": 60.0,
             "low_soc_charge_premium_dkk_per_kwh": 2.0,
@@ -444,6 +467,69 @@ def test_optimizer_matches_oracle_for_variable_intervals_and_forecasts() -> None
         [slot.action for slot in plan.slots],
         expected_path.actions,
     )
+
+
+@pytest.mark.parametrize("target_soc,charge_power_w,expected_charge_wh,stops", [
+    (31.0, 803.6, 200.0, False),
+    (30.0, 803.6, 195.0, True),
+])
+def test_nonintegral_native_ceiling_distinguishes_stops_from_budget_rounding(
+    target_soc, charge_power_w, expected_charge_wh, stops,
+) -> None:
+    configured = _settings(
+        capacity_wh=1958.0, reserve_soc=0.0, target_soc=target_soc,
+        charge_power_w=charge_power_w, round_trip_efficiency=1.0,
+        energy_step_wh=5.0,
+    )
+    data = _price_slots([-2.0], loads_wh=[0.0])
+    plan = optimize(data, now=BASE, soc=20.0, settings=configured)
+    expected_key, _ = _oracle(data, soc=20.0, settings=configured, current_action=Action.GRID)
+
+    assert plan.slots[0].action is Action.CHARGE
+    assert plan.slots[0].battery_charge_wh == expected_charge_wh
+    # Initial observed energy rounds to 390 Wh. The 31% native ceiling is
+    # 606.98 Wh, so 200.9 Wh of available input cannot reach it; the 30%
+    # ceiling rounds to 585 Wh and genuinely leaves charging time unused.
+    switches = 2 if stops else 1
+    assert plan.expected_cost_dkk == pytest.approx(
+        -2 * expected_charge_wh / 1000 + switches * configured.switching_penalty_dkk,
+    )
+    assert _plan_key(
+        plan.slots, plan.terminal_value_dkk,
+        settings=configured, current_action=Action.GRID,
+    ) == pytest.approx(expected_key)
+
+
+def test_repeated_quarter_replans_keep_the_charging_episode_continuous() -> None:
+    configured = _settings(
+        capacity_wh=2000.0, reserve_soc=10.0, target_soc=90.0,
+        charge_power_w=1000.0, discharge_power_w=800.0,
+        round_trip_efficiency=1.0, degradation_cost_dkk_per_kwh=.35,
+        minimum_profit_dkk_per_kwh=.5, switching_penalty_dkk=.05,
+        energy_step_wh=5.0,
+    )
+    data = _price_slots(
+        [2.40, 2.41, 2.42, 2.41, 2.40, 2.41] + [5.0] * 24 + [2.40] * 12,
+    )
+    soc = 40.0
+    physical_action = Action.GRID
+    charging_wh = []
+    for index in range(6):
+        plan = optimize(
+            data[index:], now=data[index].start, soc=soc,
+            settings=configured, current_action=physical_action,
+        )
+        first = plan.slots[0]
+        charging_wh.append(first.battery_charge_wh)
+        soc = first.soc_end
+        physical_action = first.action
+        # Execute the interval independently of the planner's hidden state.
+        # At 200 W connected load, 1000 W input gives 200 Wh per quarter.
+        if first.action is Action.CHARGE and 200.0 - first.battery_charge_wh >= 5.0:
+            physical_action = Action.GRID
+
+    assert charging_wh == [0.0, 0.0, 0.0, 200.0, 200.0, 200.0]
+    assert soc == 70.0
 
 
 def test_optimizer_matches_exhaustive_oracle_for_seeded_random_cases() -> None:

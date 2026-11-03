@@ -14,6 +14,8 @@ from .models import Action, Plan, PlannedSlot, PlannerSettings, PriceSlot
 
 @dataclass(frozen=True, slots=True)
 class _State:
+    """Stored energy and physical mode at the end of an interval."""
+
     energy_step: int
     action: Action
 
@@ -25,6 +27,7 @@ class _Node:
     previous: _State | None
     detail: tuple[float, float, float, float, float, str, float] | None
     charge_target_soc: float | None = None
+    action: Action | None = None
 
 
 _TERMINAL_PRICE_LOOKBACK = timedelta(hours=3)
@@ -194,6 +197,7 @@ def _slot_transition(
         headroom_wh = max(0.0, maximum_step * settings.energy_step_wh - energy_wh)
         load_power_w = load_wh / slot.hours if slot.hours > 0 else 0.0
         available_charge_input_w = max(0.0, settings.charge_power_w - load_power_w)
+        charge_budget_wh = available_charge_input_w * slot.hours * charge_efficiency
         input_wh = min(
             available_charge_input_w * slot.hours,
             headroom_wh / charge_efficiency,
@@ -372,9 +376,22 @@ def _slot_transition(
             * low_soc_charge_weight
         )
         optimization_cost -= input_wh / 1000 * charge_premium
+    # A native SOC ceiling can stop charging well before this tariff ends.
+    # Account for that physical stop even though the commanded mode remains
+    # CHARGE. Otherwise tiny ceiling increases bridge cheap quarters for free
+    # and avoid the switching penalty by repeatedly starting and stopping.
+    # Ignore less than one energy step of unused budget: that is quantization,
+    # not evidence of a meaningful physical pause.
+    charge_stops_early = (
+        action is Action.CHARGE and actual_delta_wh > 0
+        and headroom_wh <= charge_budget_wh - settings.energy_step_wh + 1e-9
+    )
+    if charge_stops_early:
+        switch_cost += settings.switching_penalty_dkk
+        reason += "; charging stops at the SOC ceiling before the tariff ends"
     interval_cost += switch_cost
     optimization_cost += switch_cost
-    next_state = _State(new_step, action)
+    next_state = _State(new_step, Action.GRID if charge_stops_early else action)
     detail = (
         grid_wh,
         charged_wh,
@@ -456,7 +473,10 @@ def _partial_charge_candidates(
                 window.pop()
             window.append((key, state))
             cursor += 1
-        while window and window[0][1].energy_step < endpoint - budget_steps:
+        # Full-budget endpoints are already emitted by the ordinary CHARGE
+        # transition. Retain only early ceiling hits here, so every queued
+        # predecessor has the same extra physical stop cost and end mode.
+        while window and window[0][1].energy_step <= endpoint - budget_steps:
             window.popleft()
         if not window:
             continue
@@ -470,7 +490,7 @@ def _partial_charge_candidates(
         node = previous_layer[state]
         yield next_state, _Node(
             node.cost + detail[4], node.throughput_wh + throughput,
-            state, detail, float(target_soc),
+            state, detail, float(target_soc), Action.CHARGE,
         )
 
 
@@ -642,6 +662,7 @@ def optimize(
                         and committed_slot.charge_target_soc is not None
                         else settings.target_soc
                     ) if action is Action.CHARGE else None,
+                    action,
                 )
                 existing = layer.get(next_state)
                 candidate_key = (
@@ -649,7 +670,7 @@ def optimize(
                     # lower-throughput path before the final economic tie.
                     round(candidate.cost, 12),
                     candidate.throughput_wh,
-                    action.value,
+                    next_state.action.value,
                 )
                 if existing is None:
                     layer[next_state] = candidate
@@ -768,7 +789,7 @@ def optimize(
             PlannedSlot(
                 start=slot.start,
                 end=slot.end,
-                action=next_state.action,
+                action=node.action if node.action is not None else next_state.action,
                 price=slot.price,
                 expected_load_wh=slot.expected_load_wh,
                 grid_import_wh=grid_wh,
