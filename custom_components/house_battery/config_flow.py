@@ -69,6 +69,14 @@ def _validate_ecoflow_bindings(values: dict[str, Any]) -> None:
         raise ValueError("EcoFlow grid isolation and AC Port need separate switch entities")
 
 
+def _effective_device_type(config: dict[str, Any]) -> str | None:
+    """Recover EcoFlow type for entries with EF BLE control bindings."""
+    device_type = config.get(CONF_DEVICE_TYPE)
+    if device_type is None and config.get(CONF_ECOFLOW_AC_PORT_SWITCH):
+        return DEVICE_ECOFLOW
+    return device_type
+
+
 def _efficiency_meter() -> selector.EntitySelector:
     return selector.EntitySelector(selector.EntitySelectorConfig(
         filter={"domain": "sensor", "unit_of_measurement": "W"}
@@ -393,7 +401,7 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         defaults = {**self._entry.data, **self._entry.options}
-        device_type = defaults.get(CONF_DEVICE_TYPE)
+        device_type = _effective_device_type(defaults)
         if user_input is not None:
             if device_type == DEVICE_ECOFLOW:
                 try:
@@ -436,6 +444,11 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
                 CONF_PRICE_FORECAST_ENTITIES: [],
                 CONF_PRICE_FORECAST_ENTITY: None,
                 **user_input,
+                **(
+                    {CONF_DEVICE_TYPE: DEVICE_ECOFLOW}
+                    if device_type == DEVICE_ECOFLOW
+                    else {}
+                ),
                 **(
                     {CONF_DEVICE_TYPE: DEVICE_ENTITY_CONTROLS}
                     if self._selected_device_type == DEVICE_ENTITY_CONTROLS

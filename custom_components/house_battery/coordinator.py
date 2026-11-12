@@ -36,6 +36,7 @@ from .const import (
     CONF_EFFICIENCY_GRID_POWER,
     CONF_DEVICE_TYPE,
     DEVICE_ECOFLOW,
+    CONF_ECOFLOW_AC_PORT_SWITCH,
     CONF_ECOFLOW_CAPACITY_KWH,
     CONF_ECOFLOW_DISCHARGE_POWER_W,
     CONF_GRID_AVAILABLE,
@@ -242,7 +243,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def config(self) -> dict[str, Any]:
-        return {**self.entry.data, **self.entry.options}
+        config = {**self.entry.data, **self.entry.options}
+        if not config.get(CONF_DEVICE_TYPE) and config.get(CONF_ECOFLOW_AC_PORT_SWITCH):
+            config[CONF_DEVICE_TYPE] = DEVICE_ECOFLOW
+        return config
 
     @property
     def is_direct_local(self) -> bool:

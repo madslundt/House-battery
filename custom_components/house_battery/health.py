@@ -106,13 +106,20 @@ def get_health_problems(
     # the user supplied as an optional cross-check. Grid availability is a
     # binary template that only reports on change, so requiring repeated `on`
     # reports would disable a healthy direct battery after five minutes.
-    freshness_keys = (
-        (CONF_GRID_IMPORT_POWER, CONF_ACCOUNTING_LOAD_POWER)
-        if config.get("host")
-        else _PHYSICAL
+    if config.get("host"):
+        freshness_keys = (CONF_GRID_IMPORT_POWER, CONF_ACCOUNTING_LOAD_POWER)
+    elif config.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW:
+        # EF BLE numeric telemetry must keep reporting, but stable binary and
+        # switch states (grid availability, AC port, operating mode) are
+        # event-driven and do not provide a useful heartbeat.
+        freshness_keys = tuple(key for key in required if key in _NUMERIC)
+    else:
+        freshness_keys = _PHYSICAL
+    freshness_entities = dict.fromkeys(
+        config[key] for key in freshness_keys if config.get(key)
     )
-    for key in freshness_keys:
-        if (entity_id := config.get(key)) and (value := hass.states.get(entity_id)):
+    for entity_id in freshness_entities:
+        if value := hass.states.get(entity_id):
             reported = getattr(value, "last_reported", None) or value.last_updated
             if now - reported.astimezone(UTC) > TELEMETRY_STALE_AFTER:
                 problems.append(f"{entity_id} stale")

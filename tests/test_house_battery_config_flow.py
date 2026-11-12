@@ -128,6 +128,63 @@ def test_ecoflow_migration_persists_type_and_requires_explicit_commissioning() -
     asyncio.run(scenario())
 
 
+def test_ecoflow_options_save_preserves_device_type() -> None:
+    async def scenario() -> None:
+        bindings = {
+            CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+            CONF_SOC: "sensor.battery_level",
+            CONF_LOAD_POWER: "sensor.ac_output",
+            CONF_GRID_AVAILABLE: "binary_sensor.grid",
+            CONF_PRICE_ENTITIES: ["sensor.price"],
+            CONF_BATTERY_CHARGE_POWER: "sensor.ac_input",
+            CONF_BATTERY_DISCHARGE_POWER: "sensor.ac_output",
+            CONF_CHARGE_POWER_CONTROL: "number.charge",
+            CONF_MIN_SOC_CONTROL: "number.minimum",
+            CONF_MAX_SOC_CONTROL: "number.maximum",
+            CONF_ECOFLOW_AC_PORT_SWITCH: "switch.ac_port",
+            CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+            CONF_COMMISSIONED: False,
+        }
+        # Simulate the 1.15.1 save bug, which dropped only the type marker while
+        # leaving the EcoFlow-specific bindings intact.
+        options = {
+            key: value for key, value in bindings.items()
+            if key != CONF_DEVICE_TYPE
+        }
+        flow = Fbp1200OptionsFlow(SimpleNamespace(data={}, options=options))
+
+        def state(entity_id: str):
+            values = {
+                "number.minimum": SimpleNamespace(
+                    state="5", attributes={"unit_of_measurement": "%", "min": 0,
+                                           "max": 100, "step": 1}
+                ),
+                "number.maximum": SimpleNamespace(
+                    state="80", attributes={"unit_of_measurement": "%", "min": 0,
+                                             "max": 100, "step": 1}
+                ),
+                "number.charge": SimpleNamespace(
+                    state="640", attributes={"unit_of_measurement": "W", "min": 100,
+                                              "max": 640, "step": 10}
+                ),
+            }
+            return values.get(entity_id)
+
+        flow.hass = SimpleNamespace(states=SimpleNamespace(get=state))
+        form = await flow.async_step_init()
+        assert form["step_id"] == "init"
+        submitted = {
+            key: value for key, value in bindings.items()
+            if key != CONF_DEVICE_TYPE
+        }
+        result = await flow.async_step_init(form["data_schema"](submitted))
+
+        assert result["type"] == "create_entry"
+        assert result["data"][CONF_DEVICE_TYPE] == DEVICE_ECOFLOW
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("direct_local", [True, False])
 def test_options_can_remove_optional_bindings_selected_during_setup(direct_local: bool) -> None:
     async def scenario() -> None:

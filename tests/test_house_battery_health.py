@@ -57,7 +57,7 @@ def test_direct_entry_accepts_stable_grid_availability_signal() -> None:
     ) == []
 
 
-def test_ecoflow_health_uses_ef_ble_entities_without_mode_selector() -> None:
+def test_ecoflow_health_accepts_stable_binary_and_switch_states() -> None:
     now = datetime(2026, 9, 21, 16, 0, tzinfo=UTC)
     entity_ids = {
         CONF_SOC: "sensor.river_soc",
@@ -70,9 +70,13 @@ def test_ecoflow_health_uses_ef_ble_entities_without_mode_selector() -> None:
     states = States({
         "sensor.river_soc": SimpleNamespace(state="50", last_updated=now),
         "sensor.river_ac_output": SimpleNamespace(state="120", last_updated=now),
-        "binary_sensor.grid_available": SimpleNamespace(state="on", last_updated=now),
+        "binary_sensor.grid_available": SimpleNamespace(
+            state="on", last_updated=now - timedelta(hours=1)
+        ),
         "sensor.river_ac_input": SimpleNamespace(state="0", last_updated=now),
-        "switch.river_ac_port": SimpleNamespace(state="on", last_updated=now),
+        "switch.river_ac_port": SimpleNamespace(
+            state="on", last_updated=now - timedelta(hours=1)
+        ),
     })
 
     assert get_health_problems(
@@ -80,3 +84,32 @@ def test_ecoflow_health_uses_ef_ble_entities_without_mode_selector() -> None:
         {CONF_DEVICE_TYPE: DEVICE_ECOFLOW, **entity_ids},
         now,
     ) == []
+
+
+def test_ecoflow_health_still_rejects_stale_numeric_telemetry() -> None:
+    now = datetime(2026, 9, 21, 16, 0, tzinfo=UTC)
+    entity_ids = {
+        CONF_SOC: "sensor.river_soc",
+        CONF_LOAD_POWER: "sensor.river_ac_output",
+        CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
+        CONF_BATTERY_CHARGE_POWER: "sensor.river_ac_input",
+        CONF_BATTERY_DISCHARGE_POWER: "sensor.river_ac_output",
+        CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+    }
+    states = States({
+        "sensor.river_soc": SimpleNamespace(state="50", last_updated=now),
+        "sensor.river_ac_output": SimpleNamespace(
+            state="120", last_updated=now - timedelta(minutes=10)
+        ),
+        "binary_sensor.grid_available": SimpleNamespace(state="on", last_updated=now),
+        "sensor.river_ac_input": SimpleNamespace(state="0", last_updated=now),
+        "switch.river_ac_port": SimpleNamespace(state="on", last_updated=now),
+    })
+
+    problems = get_health_problems(
+        SimpleNamespace(states=states),
+        {CONF_DEVICE_TYPE: DEVICE_ECOFLOW, **entity_ids},
+        now,
+    )
+
+    assert problems == ["sensor.river_ac_output stale"]
