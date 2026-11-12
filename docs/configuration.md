@@ -27,6 +27,12 @@ is disabled. Enter installed usable capacity in kWh and the rated AC output in
 W during setup. EF BLE does not provide a writable AC output wattage limit, so
 the output rating constrains planning only.
 
+Entries created by earlier versions from generic Home Assistant entities can
+be migrated in **Configure**: choose EcoFlow, then bind its EF BLE AC port,
+charge and discharge limit controls, and the separate grid isolation switch.
+The commissioning check remains off until wiring and control behavior have
+been verified.
+
 ## Household and tariff inputs
 
 | Config-flow field | Expected entity | Notes |

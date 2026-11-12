@@ -7,6 +7,7 @@ NAME = "House Battery"
 CONF_DEVICE_TYPE = "device_type"
 DEVICE_FOSSIBOT = "fossibot"
 DEVICE_ECOFLOW = "ecoflow"
+DEVICE_ENTITY_CONTROLS = "home_assistant_entities"
 PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button", "select"]
 UPDATE_INTERVAL = timedelta(minutes=1)
 # The HA Store *major* version deliberately stays at 1 across the schema-v2

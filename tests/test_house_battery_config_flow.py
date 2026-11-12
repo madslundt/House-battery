@@ -23,6 +23,8 @@ from house_battery.const import (
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
+    CONF_DEVICE_TYPE,
+    DEVICE_ECOFLOW,
     CONF_DISCHARGE_POWER_CONTROL,
     CONF_ECOFLOW_AC_PORT_SWITCH,
     CONF_ECOFLOW_CAPACITY_KWH,
@@ -43,6 +45,87 @@ from house_battery.const import (
     CONF_PRICE_FORECAST_ENTITY,
     CONF_SOC,
 )
+
+
+def test_untyped_entity_based_entry_can_be_switched_to_ecoflow() -> None:
+    async def scenario() -> None:
+        original = {
+            CONF_SOC: "sensor.battery_level",
+            CONF_LOAD_POWER: "sensor.load",
+            CONF_GRID_AVAILABLE: "binary_sensor.grid",
+            CONF_PRICE_ENTITIES: ["sensor.price"],
+            CONF_OPERATING_MODE: None,
+        }
+        flow = Fbp1200OptionsFlow(SimpleNamespace(data=original, options={}))
+
+        device_form = await flow.async_step_init()
+
+        assert device_form["step_id"] == "select_device_type"
+        selected = device_form["data_schema"]({CONF_DEVICE_TYPE: DEVICE_ECOFLOW})
+        ecoflow_form = await flow.async_step_select_device_type(selected)
+
+        assert ecoflow_form["step_id"] == "ecoflow_legacy"
+        schema = ecoflow_form["data_schema"].schema
+        assert CONF_OPERATING_MODE not in schema
+        assert any(key == CONF_ECOFLOW_AC_PORT_SWITCH for key in schema)
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_migration_persists_type_and_requires_explicit_commissioning() -> None:
+    async def scenario() -> None:
+        original = {
+            CONF_SOC: "sensor.battery_level",
+            CONF_LOAD_POWER: "sensor.load",
+            CONF_GRID_AVAILABLE: "binary_sensor.grid",
+            CONF_PRICE_ENTITIES: ["sensor.price"],
+        }
+        flow = Fbp1200OptionsFlow(SimpleNamespace(data=original, options={}))
+        flow.hass = SimpleNamespace(states=SimpleNamespace(get=lambda entity_id: {
+            "number.min": SimpleNamespace(
+                state="5", attributes={"unit_of_measurement": "%", "min": 0,
+                                         "max": 100, "step": 1}
+            ),
+            "number.max": SimpleNamespace(
+                state="80", attributes={"unit_of_measurement": "%", "min": 0,
+                                         "max": 100, "step": 1}
+            ),
+            "number.charge": SimpleNamespace(
+                state="640", attributes={"unit_of_measurement": "W", "min": 100,
+                                          "max": 640, "step": 10}
+            ),
+        }.get(entity_id)))
+
+        type_form = await flow.async_step_init()
+        ecoflow_form = await flow.async_step_select_device_type(
+            type_form["data_schema"]({CONF_DEVICE_TYPE: DEVICE_ECOFLOW})
+        )
+        values = {
+            CONF_SOC: "sensor.battery_level",
+            CONF_LOAD_POWER: "sensor.load",
+            CONF_GRID_AVAILABLE: "binary_sensor.grid",
+            CONF_PRICE_ENTITIES: ["sensor.price"],
+            CONF_BATTERY_CHARGE_POWER: "sensor.ac_input",
+            CONF_BATTERY_DISCHARGE_POWER: "sensor.ac_output",
+            CONF_CHARGE_POWER_CONTROL: "number.charge",
+            CONF_MIN_SOC_CONTROL: "number.min",
+            CONF_MAX_SOC_CONTROL: "number.max",
+            CONF_ECOFLOW_AC_PORT_SWITCH: "switch.ac_port",
+            CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+            CONF_COMMISSIONED: False,
+        }
+
+        result = await flow.async_step_ecoflow_legacy(
+            ecoflow_form["data_schema"](values)
+        )
+
+        assert result["type"] == "create_entry"
+        assert result["data"][CONF_DEVICE_TYPE] == DEVICE_ECOFLOW
+        assert result["data"][CONF_COMMISSIONED] is False
+        assert result["data"][CONF_OPERATING_MODE] is None
+        assert result["data"][CONF_DISCHARGE_POWER_CONTROL] is None
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("direct_local", [True, False])
@@ -81,6 +164,9 @@ def test_options_can_remove_optional_bindings_selected_during_setup(direct_local
             original["host"] = "192.0.2.1"
         flow = Fbp1200OptionsFlow(SimpleNamespace(data=original, options={}))
         form = await flow.async_step_init()
+        if not direct_local:
+            legacy_choice = form["data_schema"]({})
+            form = await flow.async_step_select_device_type(legacy_choice)
         validated = form["data_schema"](submitted)
         result = await flow.async_step_init(validated)
         merged = {**original, **result["data"]}
@@ -152,6 +238,9 @@ def test_options_replace_efficiency_source_without_rebinding_grid_safety(
             })
         flow = Fbp1200OptionsFlow(SimpleNamespace(data=original, options={}))
         form = await flow.async_step_init()
+        if not direct_local:
+            legacy_choice = form["data_schema"]({})
+            form = await flow.async_step_select_device_type(legacy_choice)
         result = await flow.async_step_init(form["data_schema"](submitted))
         merged = {**original, **result["data"]}
 

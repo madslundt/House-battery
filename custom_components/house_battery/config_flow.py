@@ -18,6 +18,7 @@ from .const import (
     CONF_COMMISSIONED,
     CONF_DISCHARGE_POWER_CONTROL,
     CONF_DEVICE_TYPE,
+    DEVICE_ENTITY_CONTROLS,
     DEVICE_ECOFLOW,
     DEVICE_FOSSIBOT,
     CONF_ECOFLOW_AC_PORT_SWITCH,
@@ -219,6 +220,18 @@ def _ecoflow_ratings_schema(defaults: dict[str, Any]) -> vol.Schema:
     })
 
 
+def _legacy_device_type_schema() -> vol.Schema:
+    """Let pre-device-type entity entries opt into the correct adapter."""
+    return vol.Schema({
+        vol.Required(CONF_DEVICE_TYPE, default=DEVICE_ENTITY_CONTROLS): selector.SelectSelector(
+            selector.SelectSelectorConfig(options=[
+                {"value": DEVICE_ENTITY_CONTROLS, "label": "Keep existing entity controls"},
+                {"value": DEVICE_ECOFLOW, "label": "EcoFlow (EF BLE entities)"},
+            ], mode=selector.SelectSelectorMode.DROPDOWN)
+        )
+    })
+
+
 class Fbp1200ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure an optimizer entry with a local battery connection."""
 
@@ -374,13 +387,15 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
         self._entry = entry
+        self._selected_device_type: str | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         defaults = {**self._entry.data, **self._entry.options}
+        device_type = defaults.get(CONF_DEVICE_TYPE)
         if user_input is not None:
-            if self._entry.data.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW:
+            if device_type == DEVICE_ECOFLOW:
                 try:
                     _validate_ecoflow_bindings(user_input)
                     charge_entity = user_input.get(CONF_CHARGE_POWER_CONTROL)
@@ -421,16 +436,86 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
                 CONF_PRICE_FORECAST_ENTITIES: [],
                 CONF_PRICE_FORECAST_ENTITY: None,
                 **user_input,
+                **(
+                    {CONF_DEVICE_TYPE: DEVICE_ENTITY_CONTROLS}
+                    if self._selected_device_type == DEVICE_ENTITY_CONTROLS
+                    else {}
+                ),
             }
             return self.async_create_entry(title="", data=data)
         if self._entry.data.get(CONF_HOST):
             return self.async_show_form(
                 step_id="init", data_schema=_direct_schema(defaults, options=True)
             )
-        if self._entry.data.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW:
+        if device_type == DEVICE_ECOFLOW:
             return self.async_show_form(
                 step_id="init", data_schema=_ecoflow_schema(defaults, options=True)
+            )
+        if not device_type:
+            return self.async_show_form(
+                step_id="select_device_type",
+                data_schema=_legacy_device_type_schema(),
             )
         return self.async_show_form(
             step_id="init", data_schema=_schema(defaults, options=True)
         )
+
+    async def async_step_select_device_type(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Offer an EcoFlow migration path for legacy entity-based entries."""
+        defaults = {**self._entry.data, **self._entry.options}
+        if user_input is None:
+            return self.async_show_form(
+                step_id="select_device_type",
+                data_schema=_legacy_device_type_schema(),
+            )
+        if user_input[CONF_DEVICE_TYPE] == DEVICE_ECOFLOW:
+            return self.async_show_form(
+                step_id="ecoflow_legacy",
+                data_schema=_ecoflow_schema(defaults, options=True),
+            )
+        self._selected_device_type = DEVICE_ENTITY_CONTROLS
+        return self.async_show_form(
+            step_id="init", data_schema=_schema(defaults, options=True)
+        )
+
+    async def async_step_ecoflow_legacy(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Migrate a legacy entity entry to EF BLE control bindings."""
+        defaults = {**self._entry.data, **self._entry.options}
+        if user_input is None:
+            return self.async_show_form(
+                step_id="ecoflow_legacy",
+                data_schema=_ecoflow_schema(defaults, options=True),
+            )
+        try:
+            _validate_ecoflow_bindings(user_input)
+            charge_entity = user_input.get(CONF_CHARGE_POWER_CONTROL)
+            if charge_entity:
+                charge_state = self.hass.states.get(charge_entity)
+                if charge_state is None:
+                    raise ValueError("AC Charging Speed is unavailable")
+                ecoflow_charge_power_limit_w(charge_state)
+            for key in (CONF_MIN_SOC_CONTROL, CONF_MAX_SOC_CONTROL):
+                state = self.hass.states.get(user_input[key])
+                if state is None or str(
+                    state.attributes.get("unit_of_measurement", "")
+                ).strip() != "%":
+                    raise ValueError(f"{key} must be an available percent control")
+                ecoflow_soc_control_range(state)
+        except (KeyError, ValueError):
+            return self.async_show_form(
+                step_id="ecoflow_legacy",
+                data_schema=_ecoflow_schema(defaults, options=True),
+                errors={"base": "invalid_device_control"},
+            )
+        data = {
+            **dict.fromkeys((CONF_OPERATING_MODE, CONF_DISCHARGE_POWER_CONTROL)),
+            CONF_PRICE_FORECAST_ENTITIES: [],
+            CONF_PRICE_FORECAST_ENTITY: None,
+            **user_input,
+            CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+        }
+        return self.async_create_entry(title="", data=data)
