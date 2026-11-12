@@ -156,8 +156,8 @@ absolute emergency SOC ≤ arbitrage reserve SOC
 | **Absolute emergency SOC** | Native emergency floor requested during a confirmed grid outage; normal operation uses the arbitrage reserve. Native read-back does not prove backup-output cutoff. | Raise 10→20% if outage reserve is more valuable than arbitrage. |
 | **Arbitrage reserve SOC** | Planner's no-discharge floor. | Raise 20→35% before a storm; the optimizer keeps more backup but has less energy to sell against peak prices. |
 | **Maximum charge SOC** | Normal charge ceiling. | Lower 90→80% to reduce high-SOC dwell time; it may skip otherwise profitable evening coverage. |
-| **Maximum AC charge power** | Maximum power budget used for charging. | The available range tops out at 1200 W; lower it if the battery or electrical installation needs a conservative cap. |
-| **Maximum discharge power** | Planner and native command power cap. | Lower discharge 800→500 W if the load path or battery behaves better at a lower sustained output. |
+| **Maximum AC charge power** | Maximum power budget used for charging. | FOSSiBOT and legacy entries use the configured range. EcoFlow uses the selected EF BLE AC Charging Speed number's W or kW unit, native minimum, maximum, and step; if no writable control is selected, this setting is unavailable and charging is disabled. |
+| **Maximum discharge power** | Planner power cap; EcoFlow BLE has no native AC output wattage limit control. | The EcoFlow range cannot exceed the rated output entered during setup. |
 | **Fallback round-trip efficiency** | Used before measured efficiency is ready. | Set 80% rather than 85% to make early plans more conservative. |
 | **Battery degradation cost** | Wear cost charged to each discharged kWh. | Raise 0.35→0.60 DKK/kWh if avoiding wear matters more than short-term savings. |
 | **Minimum required profit** | Manual extra margin for discharge, retained when adaptive planning is enabled. | Raise 0.75→1.25 DKK/kWh to reject marginal cycles in manual planning. Qualified active adaptation evaluates net benefit after wear without adding this margin; disabling adaptation restores it. |

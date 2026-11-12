@@ -68,6 +68,7 @@ class PlannerSettings:
     high_soc_discharge_discount_dkk_per_kwh: float = 0.0
     energy_step_wh: float = 5.0
     discharge_enabled: bool = True
+    charge_enabled: bool = True
     # None uses the direct device's integer SOC ceilings. Legacy controls may
     # expose a narrower range/cadence; an empty tuple preserves full-target-only
     # charging when their supported partial ceilings cannot be established.

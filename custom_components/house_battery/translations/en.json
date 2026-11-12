@@ -3,32 +3,10 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect battery locally",
-        "description": "Enter the battery connection details. House Battery checks local telemetry before creating the device; automatic control remains disabled until commissioned in Options.",
+        "title": "Choose battery type",
+        "description": "Choose how House Battery connects to this storage device.",
         "data": {
-          "name": "Name",
-          "host": "Battery IP address",
-          "port": "TCP port",
-          "soc_entity": "Battery state of charge",
-          "load_power_entity": "Connected/house load power",
-          "grid_import_power_entity": "Grid import power",
-          "grid_available_entity": "Grid available / on-grid state",
-          "operating_mode_entity": "Battery Operating Mode",
-          "price_entities": "Known electricity-price entities",
-          "price_forecast_entities": "External price forecast entities (optional, ordered)",
-          "battery_charge_power_entity": "Battery charge power",
-          "battery_discharge_power_entity": "Battery discharge power",
-          "fault_entity": "Battery fault entity (optional)",
-          "online_entity": "Battery online entity (optional)",
-          "charge_power_control_entity": "Charge power control (optional)",
-          "discharge_power_control_entity": "Discharge power control (optional)",
-          "grid_isolation_switch_entity": "Grid input smart plug (optional)",
-          "minimum_soc_control_entity": "Discharge limit control (required before commissioning)",
-          "maximum_soc_control_entity": "Charge limit control (required before commissioning)",
-          "efficiency_grid_power_entity": "Efficiency measurement grid power"
-        },
-        "data_description": {
-          "efficiency_grid_power_entity": "Optional true active power in W. Prefer the Watts Live phase supplying the battery; do not use an inaccurate smart-plug reading. Shared-meter measurements with unstable competing loads are rejected, and planning keeps the fallback until enough reliable matched-SOC periods agree."
+          "device_type": "Battery type"
         }
       },
       "household": {
@@ -46,9 +24,57 @@
         "data_description": {
           "efficiency_grid_power_entity": "Optional true active power in W. Prefer the Watts Live phase supplying the battery; do not use an inaccurate smart-plug reading. Shared-meter measurements with unstable competing loads are rejected, and planning keeps the fallback until enough reliable matched-SOC periods agree."
         }
+      },
+      "fossibot": {
+        "title": "Connect FOSSiBOT locally",
+        "description": "Enter the battery connection details. House Battery checks local telemetry before creating the device; automatic control remains disabled until commissioned in Options.",
+        "data": {
+          "name": "Name",
+          "host": "Battery IP address",
+          "port": "TCP port"
+        }
+      },
+      "ecoflow": {
+        "title": "Connect EcoFlow through EF BLE",
+        "description": "Select writable controls and telemetry created by EcoFlow BLE (Unofficial). The AC Charging Speed range is read from its number entity and bounds the editable maximum AC charge power setting. Enter installed capacity and rated AC output power in kWh and W. A grid isolation switch is required to prevent battery output from being connected to the utility at the same time. Automatic control stays disabled until commissioned in Options.",
+        "data": {
+          "soc_entity": "Battery state of charge",
+          "load_power_entity": "Connected/house load power",
+          "grid_available_entity": "Grid available / on-grid state",
+          "price_entities": "Known electricity-price entities",
+          "price_forecast_entities": "External price forecast entities (optional, ordered)",
+          "grid_import_power_entity": "Whole-house grid import power / CT meter (optional)",
+          "accounting_load_power_entity": "Whole-house load power for savings accounting (optional)",
+          "efficiency_grid_power_entity": "Efficiency measurement grid power (optional)",
+          "grid_isolation_switch_entity": "Grid input isolation switch (required)",
+          "battery_charge_power_entity": "AC Input Power sensor",
+          "battery_discharge_power_entity": "AC Output Power sensor",
+          "charge_power_control_entity": "AC Charging Speed number",
+          "minimum_soc_control_entity": "Battery Discharge Limit number",
+          "maximum_soc_control_entity": "Battery Charge Limit number",
+          "ecoflow_ac_port_switch_entity": "AC Port switch"
+        },
+        "data_description": {
+          "grid_isolation_switch_entity": "Required switch that disconnects the battery output from the household in Battery mode. It is turned on in Grid, Charge, and Safe modes.",
+          "efficiency_grid_power_entity": "Optional true active power in W for efficiency learning.",
+          "charge_power_control_entity": "Optional writable EF BLE number. If unavailable, the maximum AC charge power setting is disabled and automatic charging is unavailable. When available, its unit, minimum, maximum, and step set the editable setting's limits."
+        }
+      },
+      "ecoflow_ratings": {
+        "title": "Battery capacity and output rating",
+        "data": {
+          "name": "Name",
+          "ecoflow_capacity_kwh": "Usable EcoFlow battery capacity",
+          "ecoflow_discharge_power_w": "EcoFlow maximum AC output power"
+        },
+        "data_description": {
+          "ecoflow_capacity_kwh": "Enter installed usable battery capacity in kWh. For a River 3 Plus, use 0.286 kWh per battery module; include any extra battery capacity.",
+          "ecoflow_discharge_power_w": "Enter the device AC output rating in W. EF BLE does not expose an AC output wattage limit control, so this value limits planning only."
+        }
       }
     },
     "error": {
+      "invalid_device_control": "Selected EcoFlow number controls must be available, use the expected unit, and expose valid native limits.",
       "cannot_connect": "Could not read compatible local battery telemetry. Check the IP address and port, then disable AFERIY PS240 (Local) and close the vendor app: this battery permits one local TCP session."
     }
   },
@@ -56,7 +82,7 @@
     "step": {
       "init": {
         "title": "Battery bindings and commissioning",
-        "description": "Commissioned permits the Active control switch to issue local battery commands. With an optional grid input smart plug, Battery mode is commanded first and the plug is then turned off; if it cannot be confirmed off, the integration immediately commands Grid/Idle. When leaving Battery mode, the plug is turned on before the next battery mode is commanded. Verify each mode, SOC limit, and physical power response before enabling it.",
+        "description": "Commissioned permits the Active control switch to issue local battery commands. With an optional grid input smart plug, Battery mode is commanded first and the plug is then turned off; if it cannot be confirmed off, the integration immediately commands Grid/Idle. When leaving Battery mode, the plug is turned on before the next battery mode is commanded. Verify each mode, SOC limit, and physical power response before enabling it. The EcoFlow maximum AC charge power setting follows the AC Charging Speed entity range; capacity and rated AC output remain configurable.",
         "data": {
           "soc_entity": "Battery state of charge",
           "load_power_entity": "Connected/house load power",
@@ -72,14 +98,17 @@
           "online_entity": "Battery online entity (optional)",
           "charge_power_control_entity": "Charge power control (optional)",
           "discharge_power_control_entity": "Discharge power control (optional)",
-          "grid_isolation_switch_entity": "Grid input smart plug (optional; off in Battery mode, on in other modes)",
+          "grid_isolation_switch_entity": "Grid input isolation switch (optional for FOSSiBOT, required for EcoFlow)",
           "minimum_soc_control_entity": "Discharge limit control (required for automatic control)",
           "maximum_soc_control_entity": "Charge limit control (required for automatic control)",
           "commissioned": "I verified local control, read-back, limits, wiring, and legal export settings",
-          "efficiency_grid_power_entity": "Efficiency measurement grid power"
+          "efficiency_grid_power_entity": "Efficiency measurement grid power",
+          "ecoflow_ac_port_switch_entity": "AC Port switch"
         },
         "data_description": {
-          "efficiency_grid_power_entity": "Optional true active power in W. Prefer the Watts Live phase supplying the battery; do not use an inaccurate smart-plug reading. Shared-meter measurements with unstable competing loads are rejected, and planning keeps the fallback until enough reliable matched-SOC periods agree."
+          "efficiency_grid_power_entity": "Optional true active power in W. Prefer the Watts Live phase supplying the battery; do not use an inaccurate smart-plug reading. Shared-meter measurements with unstable competing loads are rejected, and planning keeps the fallback until enough reliable matched-SOC periods agree.",
+          "ecoflow_ac_port_switch_entity": "For EcoFlow BLE devices, AC output is kept enabled for a connected pass-through load. Grid/Charge/Safe modes hold the battery at its current SOC; Battery mode applies the configured reserve.",
+          "grid_isolation_switch_entity": "For EcoFlow, this transfer switch must be configured. It is turned off in Battery mode and on in Grid, Charge, and Safe modes."
         }
       }
     }

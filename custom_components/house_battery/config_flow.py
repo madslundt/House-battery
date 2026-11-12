@@ -17,6 +17,12 @@ from .const import (
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
     CONF_DISCHARGE_POWER_CONTROL,
+    CONF_DEVICE_TYPE,
+    DEVICE_ECOFLOW,
+    DEVICE_FOSSIBOT,
+    CONF_ECOFLOW_AC_PORT_SWITCH,
+    CONF_ECOFLOW_CAPACITY_KWH,
+    CONF_ECOFLOW_DISCHARGE_POWER_W,
     CONF_EFFICIENCY_GRID_POWER,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
@@ -36,10 +42,30 @@ from .const import (
     NAME,
 )
 from .local_tcp import FbpLocalTcpClient, LocalProtocolError
+from .ecoflow_capabilities import (
+    ecoflow_charge_power_limit_w,
+    ecoflow_soc_control_range,
+)
 
 
 def _entity(domain: str | list[str]) -> selector.EntitySelector:
     return selector.EntitySelector(selector.EntitySelectorConfig(domain=domain))
+
+
+def _unit_entity(domain: str, *units: str) -> selector.EntitySelector:
+    """Offer only entities whose values use a unit consumed by the planner."""
+    return selector.EntitySelector(selector.EntitySelectorConfig(
+        domain=domain,
+        filter=[{"domain": domain, "unit_of_measurement": unit} for unit in units],
+    ))
+
+
+def _validate_ecoflow_bindings(values: dict[str, Any]) -> None:
+    """Reject shared entities whose independent EcoFlow controls conflict."""
+    if values.get(CONF_MIN_SOC_CONTROL) == values.get(CONF_MAX_SOC_CONTROL):
+        raise ValueError("EcoFlow charge and discharge limits need separate number entities")
+    if values.get(CONF_GRID_ISOLATION_SWITCH) == values.get(CONF_ECOFLOW_AC_PORT_SWITCH):
+        raise ValueError("EcoFlow grid isolation and AC Port need separate switch entities")
 
 
 def _efficiency_meter() -> selector.EntitySelector:
@@ -143,6 +169,56 @@ def _direct_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Sc
     return vol.Schema(fields)
 
 
+def _ecoflow_schema(defaults: dict[str, Any], *, options: bool = False) -> vol.Schema:
+    """Bind the EF BLE telemetry and controls used by EcoFlow power stations."""
+    defaults = _with_forecast_defaults(defaults)
+    fields: dict[Any, Any] = {
+        _required(CONF_SOC, defaults): _unit_entity("sensor", "%"),
+        _required(CONF_LOAD_POWER, defaults): _unit_entity("sensor", "W"),
+        _required(CONF_GRID_AVAILABLE, defaults): _entity(["sensor", "binary_sensor"]),
+        _required(CONF_PRICE_ENTITIES, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain=["sensor", "binary_sensor"], multiple=True)
+        ),
+        _optional(CONF_PRICE_FORECAST_ENTITIES, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor", multiple=True)
+        ),
+        _optional(CONF_GRID_IMPORT_POWER, defaults): _unit_entity("sensor", "W"),
+        _optional(CONF_EFFICIENCY_GRID_POWER, defaults): _efficiency_meter(),
+        _optional(CONF_ACCOUNTING_LOAD_POWER, defaults): _unit_entity("sensor", "W"),
+        _required(CONF_GRID_ISOLATION_SWITCH, defaults): _entity("switch"),
+        _required(CONF_BATTERY_CHARGE_POWER, defaults): _unit_entity("sensor", "W"),
+        _required(CONF_BATTERY_DISCHARGE_POWER, defaults): _unit_entity("sensor", "W"),
+        _optional(CONF_CHARGE_POWER_CONTROL, defaults): _unit_entity("number", "W", "kW"),
+        _required(CONF_MIN_SOC_CONTROL, defaults): _unit_entity("number", "%"),
+        _required(CONF_MAX_SOC_CONTROL, defaults): _unit_entity("number", "%"),
+        _required(CONF_ECOFLOW_AC_PORT_SWITCH, defaults): _entity("switch"),
+    }
+    if options:
+        fields[vol.Required(
+            CONF_COMMISSIONED, default=defaults.get(CONF_COMMISSIONED, False)
+        )] = bool
+    return vol.Schema(fields)
+
+
+def _ecoflow_ratings_schema(defaults: dict[str, Any]) -> vol.Schema:
+    """Ask only for physical ratings not exposed as writable device limits."""
+    return vol.Schema({
+        vol.Required(CONF_ECOFLOW_CAPACITY_KWH): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.1, max=100.0, step=0.001, unit_of_measurement="kWh",
+                mode=selector.NumberSelectorMode.BOX,
+            )
+        ),
+        vol.Required(CONF_ECOFLOW_DISCHARGE_POWER_W): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=100, max=12000, step=50, unit_of_measurement="W",
+                mode=selector.NumberSelectorMode.BOX,
+            )
+        ),
+        vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, NAME)): str,
+    })
+
+
 class Fbp1200ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure an optimizer entry with a local battery connection."""
 
@@ -162,6 +238,27 @@ class Fbp1200ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         if user_input is not None:
+            if user_input[CONF_DEVICE_TYPE] == DEVICE_ECOFLOW:
+                self._connection = {CONF_DEVICE_TYPE: DEVICE_ECOFLOW}
+                return await self.async_step_ecoflow()
+            self._connection = {CONF_DEVICE_TYPE: DEVICE_FOSSIBOT}
+            return await self.async_step_fossibot()
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema({
+                vol.Required(CONF_DEVICE_TYPE, default=DEVICE_FOSSIBOT): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=[
+                        {"value": DEVICE_FOSSIBOT, "label": "FOSSiBOT (local TCP)"},
+                        {"value": DEVICE_ECOFLOW, "label": "EcoFlow (EF BLE entities)"},
+                    ], mode=selector.SelectSelectorMode.DROPDOWN)
+                )
+            }),
+        )
+
+    async def async_step_fossibot(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if user_input is not None:
             host = user_input[CONF_HOST].strip()
             port = user_input[CONF_PORT]
             errors: dict[str, str] = {}
@@ -173,20 +270,75 @@ class Fbp1200ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
             if errors:
                 return self.async_show_form(
-                    step_id="user",
+                    step_id="fossibot",
                     data_schema=self._connection_schema(user_input),
                     errors=errors,
                 )
             await self.async_set_unique_id(f"{host}:{port}")
             self._abort_if_unique_id_configured()
             self._connection = {
+                CONF_DEVICE_TYPE: DEVICE_FOSSIBOT,
                 CONF_HOST: host,
                 CONF_PORT: port,
                 CONF_NAME: user_input[CONF_NAME].strip() or NAME,
             }
             return await self.async_step_household()
         return self.async_show_form(
-            step_id="user", data_schema=self._connection_schema({})
+            step_id="fossibot", data_schema=self._connection_schema({})
+        )
+
+    async def async_step_ecoflow(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if user_input is not None:
+            try:
+                _validate_ecoflow_bindings(user_input)
+                charge_entity = user_input.get(CONF_CHARGE_POWER_CONTROL)
+                if charge_entity:
+                    charge_state = self.hass.states.get(charge_entity)
+                    if charge_state is None:
+                        raise ValueError("AC Charging Speed is unavailable")
+                    ecoflow_charge_power_limit_w(charge_state)
+                for key in (CONF_MIN_SOC_CONTROL, CONF_MAX_SOC_CONTROL):
+                    state = self.hass.states.get(user_input[key])
+                    if state is None or str(
+                        state.attributes.get("unit_of_measurement", "")
+                    ).strip() != "%":
+                        raise ValueError(f"{key} must be an available percent control")
+                    ecoflow_soc_control_range(state)
+            except ValueError:
+                return self.async_show_form(
+                    step_id="ecoflow",
+                    data_schema=_ecoflow_schema(user_input),
+                    errors={"base": "invalid_device_control"},
+                )
+            self._connection = dict(user_input)
+            return await self.async_step_ecoflow_ratings()
+        return self.async_show_form(
+            step_id="ecoflow",
+            data_schema=_ecoflow_schema({}),
+        )
+
+    async def async_step_ecoflow_ratings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if user_input is not None:
+            soc_entity = self._connection[CONF_SOC]
+            await self.async_set_unique_id(f"ecoflow:{soc_entity}")
+            self._abort_if_unique_id_configured()
+            data = {
+                **self._connection,
+                **{
+                    key: value
+                    for key, value in user_input.items()
+                    if value not in (None, "")
+                },
+                CONF_COMMISSIONED: False,
+            }
+            return self.async_create_entry(title=data[CONF_NAME], data=data)
+        return self.async_show_form(
+            step_id="ecoflow_ratings",
+            data_schema=_ecoflow_ratings_schema({}),
         )
 
     def _connection_schema(self, defaults: dict[str, Any]) -> vol.Schema:
@@ -228,6 +380,28 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         defaults = {**self._entry.data, **self._entry.options}
         if user_input is not None:
+            if self._entry.data.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW:
+                try:
+                    _validate_ecoflow_bindings(user_input)
+                    charge_entity = user_input.get(CONF_CHARGE_POWER_CONTROL)
+                    if charge_entity:
+                        charge_state = self.hass.states.get(charge_entity)
+                        if charge_state is None:
+                            raise ValueError("AC Charging Speed is unavailable")
+                        ecoflow_charge_power_limit_w(charge_state)
+                    for key in (CONF_MIN_SOC_CONTROL, CONF_MAX_SOC_CONTROL):
+                        state = self.hass.states.get(user_input[key])
+                        if state is None or str(
+                            state.attributes.get("unit_of_measurement", "")
+                        ).strip() != "%":
+                            raise ValueError(f"{key} must be an available percent control")
+                        ecoflow_soc_control_range(state)
+                except (KeyError, ValueError):
+                    return self.async_show_form(
+                        step_id="init",
+                        data_schema=_ecoflow_schema(defaults, options=True),
+                        errors={"base": "invalid_device_control"},
+                    )
             optional_keys = (
                 (CONF_GRID_IMPORT_POWER, CONF_ACCOUNTING_LOAD_POWER)
                 if self._entry.data.get(CONF_HOST)
@@ -252,6 +426,10 @@ class Fbp1200OptionsFlow(config_entries.OptionsFlow):
         if self._entry.data.get(CONF_HOST):
             return self.async_show_form(
                 step_id="init", data_schema=_direct_schema(defaults, options=True)
+            )
+        if self._entry.data.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW:
+            return self.async_show_form(
+                step_id="init", data_schema=_ecoflow_schema(defaults, options=True)
             )
         return self.async_show_form(
             step_id="init", data_schema=_schema(defaults, options=True)

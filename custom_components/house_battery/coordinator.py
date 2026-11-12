@@ -31,8 +31,13 @@ from .adaptive import adaptive_policy, plan_economics
 from .capabilities import ControlCapabilities
 from .const import (
     CONF_ACCOUNTING_LOAD_POWER,
+    CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
     CONF_EFFICIENCY_GRID_POWER,
+    CONF_DEVICE_TYPE,
+    DEVICE_ECOFLOW,
+    CONF_ECOFLOW_CAPACITY_KWH,
+    CONF_ECOFLOW_DISCHARGE_POWER_W,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
     CONF_GRID_ISOLATION_SWITCH,
@@ -71,6 +76,7 @@ from .const import (
 )
 from .dailyplan import local_day_bounds, reconcile_daily_plan
 from .evidence import EvidenceCollector
+from .ecoflow_capabilities import ecoflow_charge_power_range_w
 from .forecast import (
     assess_external_forecast,
     detect_extreme_price_movement,
@@ -263,6 +269,51 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.runtime.load_learner.configure_time_zone(
             dt_util.get_time_zone(self.hass.config.time_zone) or UTC
         )
+        if (
+            self.config.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW
+        ):
+            ecoflow_settings_changed = False
+            charge_entity = self.config.get("charge_power_control_entity")
+            charge_state = self.hass.states.get(charge_entity) if charge_entity else None
+            if charge_state is not None:
+                try:
+                    # Seed from EF BLE once; preserve later user choices while
+                    # keeping them inside the current native device range.
+                    power_min, power_max, power_step = ecoflow_charge_power_range_w(charge_state)
+                    charge_power_w = (
+                        power_max
+                        if not self.runtime.ecoflow_setup_settings_applied
+                        else min(max(self.runtime.settings["charge_power_w"], power_min), power_max)
+                    )
+                    charge_power_w = min(
+                        max(
+                            power_min
+                            + round((charge_power_w - power_min) / power_step)
+                            * power_step,
+                            power_min,
+                        ),
+                        power_max,
+                    )
+                    if self.runtime.settings["charge_power_w"] != charge_power_w:
+                        self.runtime.settings["charge_power_w"] = charge_power_w
+                        ecoflow_settings_changed = True
+                except ValueError:
+                    _LOGGER.warning("EcoFlow charge power bounds are unavailable")
+            if not self.runtime.ecoflow_setup_settings_applied:
+                initial_settings = {
+                    "capacity_kwh": self.config.get(CONF_ECOFLOW_CAPACITY_KWH),
+                    "discharge_power_w": self.config.get(CONF_ECOFLOW_DISCHARGE_POWER_W),
+                }
+                if all(isinstance(value, (int, float)) for value in initial_settings.values()):
+                    for key, value in initial_settings.items():
+                        numeric_value = float(value)
+                        if self.runtime.settings[key] != numeric_value:
+                            self.runtime.settings[key] = numeric_value
+                            ecoflow_settings_changed = True
+                    self.runtime.ecoflow_setup_settings_applied = True
+                    ecoflow_settings_changed = True
+            if ecoflow_settings_changed:
+                await self.store.save(self.runtime)
         if self.is_direct_local:
             learner_source = DIRECT_LOAD_SOURCE
             if self.runtime.load_learner_source != learner_source:
@@ -912,6 +963,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             or values["capacity_kwh"] * 1000
         )
         efficiency, _ = self._planning_efficiency()
+        charge_enabled = True
+        if self.config.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW:
+            entity_id = self.config.get(CONF_CHARGE_POWER_CONTROL)
+            state = self.hass.states.get(entity_id) if entity_id else None
+            try:
+                if state is None:
+                    raise ValueError("AC Charging Speed is unavailable")
+                ecoflow_charge_power_range_w(state)
+            except ValueError:
+                charge_enabled = False
         settings = PlannerSettings(
             capacity_wh=capacity,
             reserve_soc=values["reserve_soc"],
@@ -929,6 +990,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 HIGH_SOC_DISCHARGE_DISCOUNT_DKK_PER_KWH
             ),
             partial_charge_targets=self._partial_charge_targets(),
+            charge_enabled=charge_enabled,
             control_capabilities=(
                 ControlCapabilities.direct_local(
                     mains_isolated=bool(self.config.get(CONF_GRID_ISOLATION_SWITCH))
@@ -1210,6 +1272,11 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             return action_from_operating_mode(
                 self._observed_local_mode or self._commanded_local_mode
             )
+        if self.config.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW:
+            try:
+                return Action(self.runtime.last_action)
+            except ValueError:
+                return Action.SAFE
         state = self._state(CONF_OPERATING_MODE)
         return action_from_operating_mode(state.state if state else None)
 
@@ -1887,6 +1954,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 effective_settings.discharge_power_w, self._load_power()
                             )
                         ),
+                        charge_enabled=effective_settings.charge_enabled,
                     )
                     self._daily_plan_dirty = True
                 published_slot = self.runtime.daily_plan.slot_at(now)
@@ -1973,6 +2041,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                             f"Actual SOC {soc:g}% is at or below reserve "
                             f"{effective_settings.reserve_soc:g}%; restoring grid"
                         )
+                    if requested_action is Action.CHARGE and not effective_settings.charge_enabled:
+                        requested_action = Action.GRID
+                        reason = "EcoFlow AC Charging Speed is unavailable; charging disabled"
                     # Direct-local units have no CT/grid-flow signal, so cap a
                     # manual discharge slot below the fresh connected-load
                     # reading. Missing load telemetry fails closed to 0 W.
@@ -2599,6 +2670,22 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_request_refresh()
 
     async def async_set_setting(self, key: str, value: float) -> None:
+        if (
+            key == "charge_power_w"
+            and self.config.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW
+        ):
+            try:
+                entity_id = self.config.get("charge_power_control_entity")
+                state = self.hass.states.get(entity_id) if entity_id else None
+                if state is None:
+                    return
+                minimum, maximum, step = ecoflow_charge_power_range_w(state)
+                if not minimum <= value <= maximum or abs(
+                    (value - minimum) / step - round((value - minimum) / step)
+                ) > 1e-6:
+                    return
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                return
         self._planning_revision += 1
         self._sizing_request_key = None
         self.actuator.invalidate_pending_commands()

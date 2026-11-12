@@ -168,6 +168,7 @@ def _history_locked_at_price_boundaries(
     horizon_end: datetime,
     tz: timezone,
     discharge_enabled: bool,
+    charge_enabled: bool,
 ) -> tuple[list[PlannedSlot], datetime]:
     """Keep the immutable past and freeze the current price interval as one slot.
 
@@ -209,6 +210,11 @@ def _history_locked_at_price_boundaries(
     if straddling.action is Action.BATTERY and not discharge_enabled:
         # A safety lock ends the published discharge immediately. Preserve its
         # past head, then accept the fresh non-discharge plan from the cutoff.
+        if frozen is not None:
+            kept.append(frozen)
+        kept.sort(key=lambda s: s.start)
+        return kept, cutoff
+    if straddling.action is Action.CHARGE and not charge_enabled:
         if frozen is not None:
             kept.append(frozen)
         kept.sort(key=lambda s: s.start)
@@ -377,6 +383,7 @@ def reconcile_daily_plan(
     day_start: datetime,
     horizon_end: datetime,
     discharge_enabled: bool = True,
+    charge_enabled: bool = True,
 ) -> DailyPlan:
     """Rebuild the timeline from ``day_start`` to ``horizon_end`` at ``cutoff``.
 
@@ -408,7 +415,7 @@ def reconcile_daily_plan(
     else:
         history, interval_end = _history_locked_at_price_boundaries(
             existing.slots, future_slots, cutoff, day_start, horizon_end, tz,
-            discharge_enabled,
+            discharge_enabled, charge_enabled,
         )
     future = _future_from_price_boundary(
         future_slots, interval_end, day_start, horizon_end, tz

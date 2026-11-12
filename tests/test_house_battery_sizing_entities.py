@@ -14,8 +14,18 @@ from homeassistant.helpers.entity import EntityCategory
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.const import DEFAULT_SETTINGS, SETTING_LIMITS
-from house_battery.number import FbpSettingNumber
+from house_battery.const import (
+    CONF_DEVICE_TYPE,
+    CONF_CHARGE_POWER_CONTROL,
+    CONF_ECOFLOW_CAPACITY_KWH,
+    CONF_ECOFLOW_DISCHARGE_POWER_W,
+    CONF_MAX_SOC_CONTROL,
+    CONF_MIN_SOC_CONTROL,
+    DEFAULT_SETTINGS,
+    DEVICE_ECOFLOW,
+    SETTING_LIMITS,
+)
+from house_battery.number import FbpSettingNumber, _setting_limits
 from house_battery.number import async_setup_entry as setup_numbers
 from house_battery.sensor import FbpBatterySizingSensor
 from house_battery.sensor import async_setup_entry as setup_sensors
@@ -115,6 +125,51 @@ def test_sizing_numbers_reject_invalid_input(key, value) -> None:
     with pytest.raises(ValueError):
         asyncio.run(number.async_set_native_value(value))
     coordinator.async_set_setting.assert_not_called()
+
+
+def test_ecoflow_setting_ranges_follow_installed_capacity_power_and_soc_controls() -> None:
+    coordinator = _coordinator()
+    coordinator.config = {
+        CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+        CONF_ECOFLOW_CAPACITY_KWH: 1.2,
+        CONF_ECOFLOW_DISCHARGE_POWER_W: 1600,
+        CONF_CHARGE_POWER_CONTROL: "number.charge_speed",
+        CONF_MIN_SOC_CONTROL: "number.min_soc",
+        CONF_MAX_SOC_CONTROL: "number.max_soc",
+    }
+    states = {
+        "number.min_soc": SimpleNamespace(attributes={
+            "unit_of_measurement": "%", "min": 10, "max": 40, "step": 2,
+        }, state="20"),
+        "number.max_soc": SimpleNamespace(attributes={
+            "unit_of_measurement": "%", "min": 20, "max": 90, "step": 5,
+        }, state="90"),
+        "number.charge_speed": SimpleNamespace(attributes={
+            "unit_of_measurement": "W", "min": 100, "max": 640, "step": 10,
+        }, state="640"),
+    }
+    coordinator.hass = SimpleNamespace(
+        states=SimpleNamespace(get=lambda entity_id: states.get(entity_id))
+    )
+
+    assert _setting_limits(coordinator, "capacity_kwh") == (0.1, 1.2, 0.001, "kWh")
+    assert _setting_limits(coordinator, "discharge_power_w") == (100, 1600, 50, "W")
+    assert _setting_limits(coordinator, "charge_power_w") == (100, 640, 10, "W")
+    assert _setting_limits(coordinator, "absolute_min_soc") == (10, 40, 2, "%")
+    assert _setting_limits(coordinator, "reserve_soc") == (10, 40, 2, "%")
+    assert _setting_limits(coordinator, "target_soc") == (20, 90, 5, "%")
+    charge_setting = FbpSettingNumber(coordinator, "charge_power_w")
+    assert charge_setting.native_max_value == 640
+    states["number.charge_speed"].attributes.update({"max": 500, "step": 20})
+    assert charge_setting.native_max_value == 500
+    assert charge_setting.native_step == 20
+
+    states["number.charge_speed"].attributes.update({
+        "unit_of_measurement": "kW", "min": 0.1, "max": 0.64, "step": 0.01,
+    })
+    assert _setting_limits(coordinator, "charge_power_w") == (100, 640, 10, "W")
+    states["number.charge_speed"].attributes["unit_of_measurement"] = "A"
+    assert _setting_limits(coordinator, "charge_power_w") is None
 
 
 @pytest.mark.parametrize("direct_local", [False, True])

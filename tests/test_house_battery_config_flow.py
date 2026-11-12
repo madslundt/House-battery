@@ -14,6 +14,8 @@ from house_battery.config_flow import (
     Fbp1200OptionsFlow,
     _direct_schema,
     _schema,
+    _ecoflow_ratings_schema,
+    _validate_ecoflow_bindings,
 )
 from house_battery.const import (
     CONF_ACCOUNTING_LOAD_POWER,
@@ -22,6 +24,10 @@ from house_battery.const import (
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
     CONF_DISCHARGE_POWER_CONTROL,
+    CONF_ECOFLOW_AC_PORT_SWITCH,
+    CONF_ECOFLOW_CAPACITY_KWH,
+    CONF_ECOFLOW_CHARGE_POWER_W,
+    CONF_ECOFLOW_DISCHARGE_POWER_W,
     CONF_EFFICIENCY_GRID_POWER,
     CONF_FAULT,
     CONF_GRID_AVAILABLE,
@@ -175,3 +181,89 @@ def test_direct_setup_stores_only_explicit_efficiency_source(
         assert not result["data"][CONF_COMMISSIONED]
 
     asyncio.run(scenario())
+
+
+def test_ecoflow_setup_limits_entity_choices_and_uses_device_ratings() -> None:
+    from house_battery.config_flow import _ecoflow_schema
+
+    bindings = {
+        CONF_SOC: "sensor.river_battery_level",
+        CONF_LOAD_POWER: "sensor.river_ac_output_power",
+        CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
+        CONF_PRICE_ENTITIES: ["sensor.price"],
+        CONF_BATTERY_CHARGE_POWER: "sensor.river_input_power",
+        CONF_BATTERY_DISCHARGE_POWER: "sensor.river_output_power",
+        CONF_CHARGE_POWER_CONTROL: "number.river_ac_charging_speed",
+        CONF_MIN_SOC_CONTROL: "number.river_battery_discharge_limit",
+        CONF_MAX_SOC_CONTROL: "number.river_battery_charge_limit",
+        CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+        CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+    }
+    schema = _ecoflow_schema({})
+    assert schema(bindings) == bindings
+    assert CONF_ECOFLOW_CHARGE_POWER_W not in schema.schema
+    assert schema({key: value for key, value in bindings.items() if key != CONF_CHARGE_POWER_CONTROL})
+    charge_key = next(key for key in schema.schema if key == CONF_CHARGE_POWER_CONTROL)
+    assert schema.schema[charge_key].config["filter"] == [
+        {"domain": ["number"], "unit_of_measurement": ["W"]},
+        {"domain": ["number"], "unit_of_measurement": ["kW"]},
+    ]
+
+    ratings = _ecoflow_ratings_schema({})
+    rating_values = {
+        "name": "River 3 Plus",
+        CONF_ECOFLOW_CAPACITY_KWH: 0.286,
+        CONF_ECOFLOW_DISCHARGE_POWER_W: 600,
+    }
+    assert ratings(rating_values) == rating_values
+    capacity_key = next(key for key in ratings.schema if key == CONF_ECOFLOW_CAPACITY_KWH)
+    assert ratings.schema[capacity_key].config["unit_of_measurement"] == "kWh"
+    minimum_key = next(key for key in schema.schema if key == CONF_MIN_SOC_CONTROL)
+    assert schema.schema[minimum_key].config["filter"] == [
+        {"domain": ["number"], "unit_of_measurement": ["%"]},
+    ]
+    incomplete = dict(bindings)
+    incomplete.pop(CONF_GRID_ISOLATION_SWITCH)
+    with pytest.raises(Exception, match="required key not provided"):
+        schema(incomplete)
+
+
+@pytest.mark.parametrize("duplicate", [
+    (CONF_MIN_SOC_CONTROL, CONF_MAX_SOC_CONTROL),
+    (CONF_GRID_ISOLATION_SWITCH, CONF_ECOFLOW_AC_PORT_SWITCH),
+])
+def test_ecoflow_controls_must_use_distinct_entities(duplicate) -> None:
+    bindings = {
+        CONF_MIN_SOC_CONTROL: "number.minimum",
+        CONF_MAX_SOC_CONTROL: "number.maximum",
+        CONF_GRID_ISOLATION_SWITCH: "switch.grid",
+        CONF_ECOFLOW_AC_PORT_SWITCH: "switch.ac_port",
+    }
+    left, right = duplicate
+    bindings[right] = bindings[left]
+
+    with pytest.raises(ValueError, match="separate"):
+        _validate_ecoflow_bindings(bindings)
+
+
+def test_ecoflow_device_bounds_are_normalized_by_unit() -> None:
+    from house_battery.ecoflow_capabilities import (
+        ecoflow_charge_power_limit_w,
+        ecoflow_soc_control_range,
+    )
+
+    def state(unit: str, minimum: float, maximum: float, step: float):
+        return SimpleNamespace(state=str(minimum), attributes={
+            "unit_of_measurement": unit,
+            "min": minimum,
+            "max": maximum,
+            "step": step,
+        })
+
+    assert ecoflow_charge_power_limit_w(state("W", 100, 640, 10)) == 640
+    assert ecoflow_charge_power_limit_w(state("kW", 0.1, 0.64, 0.01)) == 640
+    assert ecoflow_soc_control_range(state("%", 5, 100, 1)) == (5, 100, 1)
+    with pytest.raises(ValueError, match="W or kW"):
+        ecoflow_charge_power_limit_w(state("A", 1, 10, 1))
+    with pytest.raises(ValueError, match="percent"):
+        ecoflow_soc_control_range(state("W", 0, 100, 1))

@@ -2,17 +2,30 @@
 
 ## Prerequisites
 
-Before adding this integration, give the battery a stable local IP address.
-House Battery connects to its local TCP interface directly: enter the IP,
-port (normally `8080`), and device name, then complete the read-only telemetry
-check. It creates battery telemetry and read-only native SOC-limit diagnostics
-itself. The optimizer project is maintained at
+Choose FOSSiBOT for a direct local TCP connection, or EcoFlow for EF BLE
+entities. FOSSiBOT needs a stable local IP address, normally on port `8080`;
+the setup flow checks telemetry before creating the entry. EcoFlow needs the
+[EF BLE integration](https://github.com/rabits/ha-ef-ble) configured first.
+The optimizer project is maintained at
 [github.com/madslundt/House-battery](https://github.com/madslundt/House-battery).
 
 You also need an electricity-price integration that exposes dated **known**
 rows. A current-price-only entity is insufficient because the planner compares
 future intervals. External forecast entities are optional and never replace
 those known rows.
+
+## EcoFlow entity bindings
+
+Use EF BLE's percent Battery Level sensor, W based AC input/output power
+sensors, Battery Discharge Limit and Battery Charge Limit number entities, and
+the AC Port switch. The two SOC limit numbers and the grid-isolation switch and
+AC Port switch must be distinct entities. Select the optional AC Charging Speed
+number when it is writable. Its W or kW native minimum, maximum, and step bound
+the editable **Maximum AC charge power** setting; if it is unavailable or does
+not expose valid native limits, that setting becomes unavailable and charging
+is disabled. Enter installed usable capacity in kWh and the rated AC output in
+W during setup. EF BLE does not provide a writable AC output wattage limit, so
+the output rating constrains planning only.
 
 ## Household and tariff inputs
 
@@ -25,7 +38,7 @@ those known rows.
 | Grid available / on-grid state | `binary_sensor` or `sensor` | Required physical availability signal; see below. |
 | Known electricity-price entities | one or more `sensor` entities | Must contain dated published/known price rows. |
 | External price forecast entities | optional ordered `sensor` list | Same row format; each is scored independently; the first usable source that can safely extend the horizon is used for planning. |
-| Grid input smart plug | optional `switch` | Select the switch controlling power to the FBP1200's grid connection. It is turned off before Battery mode and turned on after Charge, Grid, or Safe mode. |
+| Grid input smart plug | FOSSiBOT: optional `switch`; EcoFlow: required `switch` | It isolates battery output from the household before EcoFlow Battery mode and is restored in Grid, Charge, and Safe modes. |
 
 Fault state and online state are optional.
 Battery SOC, local operating-mode telemetry, and native minimum/maximum SOC

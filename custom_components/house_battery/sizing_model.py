@@ -104,7 +104,10 @@ def _storage_trades(slots: Sequence[PriceSlot], settings: PlannerSettings) -> li
     for index, slot in enumerate(slots):
         before, after = 2 * index, 2 * index + 1
         load = slot.expected_load_wh
-        charge_budget = max(0.0, settings.charge_power_w * slot.hours - load) * efficiency
+        charge_budget = (
+            max(0.0, settings.charge_power_w * slot.hours - load) * efficiency
+            if settings.charge_enabled else 0.0
+        )
         discharge_budget = min(load, settings.discharge_power_w * slot.hours) / efficiency
         charge_edges.append(_edge(graph, source, after,
             charge_budget if index + 1 < size else 0.0, slot.price / (1000 * efficiency)))
@@ -144,7 +147,10 @@ def _repair_time(
     sells: list[list[int]] = [[] for _ in slots]
     charge_coefficients, discharge_coefficients = [], []
     for index, slot in enumerate(slots):
-        charge_budget = max(0.0, settings.charge_power_w * slot.hours - slot.expected_load_wh) * efficiency
+        charge_budget = (
+            max(0.0, settings.charge_power_w * slot.hours - slot.expected_load_wh) * efficiency
+            if settings.charge_enabled else 0.0
+        )
         discharge_budget = min(slot.expected_load_wh, settings.discharge_power_w * slot.hours) / efficiency
         charge_coefficients.append(1 / charge_budget if charge_budget > 0 else 0.0)
         discharge_coefficients.append(1 / discharge_budget if discharge_budget > 0 else 0.0)
@@ -178,7 +184,10 @@ def _segment_result(slots: Sequence[PriceSlot], settings: PlannerSettings) -> di
         wear += output_ac * settings.degradation_cost_dkk_per_kwh / 1000
         stored += charge - discharge
         peak = max(peak, stored)
-        charge_power = max(0.0, settings.charge_power_w - slot.expected_load_wh / slot.hours)
+        charge_power = (
+            max(0.0, settings.charge_power_w - slot.expected_load_wh / slot.hours)
+            if settings.charge_enabled else 0.0
+        )
         output_power = min(slot.expected_load_wh / slot.hours, settings.discharge_power_w)
         charging_hours = charge_ac / charge_power if charge_power > 0 else 0.0
         discharging_hours = output_ac / output_power if output_power > 0 else 0.0

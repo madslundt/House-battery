@@ -19,6 +19,13 @@ from house_battery.const import (
     CONF_BATTERY_CHARGE_POWER,
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_COMMISSIONED,
+    CONF_DEVICE_TYPE,
+    DEVICE_ECOFLOW,
+    CONF_ECOFLOW_AC_PORT_SWITCH,
+    CONF_ECOFLOW_CAPACITY_KWH,
+    CONF_ECOFLOW_CHARGE_POWER_W,
+    CONF_ECOFLOW_DISCHARGE_POWER_W,
+    CONF_CHARGE_POWER_CONTROL,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
     CONF_GRID_ISOLATION_SWITCH,
@@ -331,6 +338,350 @@ def test_command_confirms_limits_then_mode_without_global_task_drain() -> None:
     assert state.last_action == Action.CHARGE.value
     assert any(domain == "select" for domain, _, _ in services.calls)
     assert hass.flushes == 0
+
+
+def test_ecoflow_actions_use_ef_ble_controls_and_clamp_charge_speed() -> None:
+    async def scenario() -> None:
+        states = FakeStates({
+            "sensor.river_soc": SimpleNamespace(state="50", attributes={}),
+            "number.river_min_soc": SimpleNamespace(
+                state="5", attributes={"min": 0, "max": 100, "step": 1,
+                                        "unit_of_measurement": "%"}
+            ),
+            "number.river_max_soc": SimpleNamespace(
+                state="70", attributes={"min": 0, "max": 100, "step": 1,
+                                         "unit_of_measurement": "%"}
+            ),
+            "number.river_charge_speed": SimpleNamespace(
+                state="0.64",
+                attributes={
+                    "min": 0.1, "max": 0.64, "step": 0.1,
+                    "unit_of_measurement": "kW",
+                },
+            ),
+            "switch.river_ac_port": SimpleNamespace(state="off", attributes={}),
+            "switch.grid_isolation": SimpleNamespace(state="on", attributes={}),
+        })
+        services = FakeServices(states)
+        hass = FakeHass(states, services)
+        state = runtime()
+        values = {
+            CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+            CONF_SOC: "sensor.river_soc",
+            CONF_MIN_SOC_CONTROL: "number.river_min_soc",
+            CONF_MAX_SOC_CONTROL: "number.river_max_soc",
+            CONF_CHARGE_POWER_CONTROL: "number.river_charge_speed",
+            CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+            CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+        }
+        async def save() -> None:
+            return None
+
+        adapter = LocalControlAdapter(hass, lambda: values, lambda: state, save)
+        success, _ = await adapter.async_command(
+            Action.BATTERY, datetime.now(UTC), target_soc=90
+        )
+        assert success
+        assert states.get("switch.grid_isolation").state == "off"
+        assert states.get("switch.river_ac_port").state == "on"
+        battery_calls = [
+            (domain, service, data.get("entity_id"))
+            for domain, service, data in services.calls
+        ]
+        assert battery_calls.index(("number", "set_value", "number.river_min_soc")) < battery_calls.index(
+            ("switch", "turn_off", "switch.grid_isolation")
+        )
+
+        success, _ = await adapter.async_command(
+            Action.CHARGE, datetime.now(UTC), target_soc=90
+        )
+        assert success
+        assert states.get("switch.grid_isolation").state == "on"
+        assert float(states.get("number.river_min_soc").state) == 50
+        assert float(states.get("number.river_max_soc").state) == 90
+        assert float(states.get("number.river_charge_speed").state) == 0.6
+        assert not any(domain == "select" for domain, _, _ in services.calls)
+
+        success, _ = await adapter.async_command(
+            Action.SAFE, datetime.now(UTC), grid_available=False
+        )
+        assert success
+        assert float(states.get("number.river_min_soc").state) == 10
+        assert float(states.get("number.river_max_soc").state) == 50
+        assert states.get("switch.grid_isolation").state == "off"
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_charge_without_writable_speed_freezes_soc_and_grid() -> None:
+    async def scenario() -> None:
+        states = FakeStates({
+            "sensor.river_soc": SimpleNamespace(state="47.3", attributes={}),
+            "number.river_min_soc": SimpleNamespace(
+                state="10", attributes={"min": 0, "max": 100, "step": 5,
+                                         "unit_of_measurement": "%"}
+            ),
+            "number.river_max_soc": SimpleNamespace(
+                state="90", attributes={"min": 0, "max": 100, "step": 5,
+                                         "unit_of_measurement": "%"}
+            ),
+            "switch.river_ac_port": SimpleNamespace(state="off", attributes={}),
+            "switch.grid_isolation": SimpleNamespace(state="off", attributes={}),
+        })
+        services = FakeServices(states)
+
+        async def save() -> None:
+            return None
+
+        adapter = LocalControlAdapter(
+            FakeHass(states, services),
+            lambda: {
+                CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+                CONF_SOC: "sensor.river_soc",
+                CONF_MIN_SOC_CONTROL: "number.river_min_soc",
+                CONF_MAX_SOC_CONTROL: "number.river_max_soc",
+                CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+                CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+            },
+            runtime,
+            save,
+        )
+
+        success, reason = await adapter.async_command(
+            Action.CHARGE, datetime.now(UTC), target_soc=90
+        )
+
+        assert not success
+        assert "frozen safely" in reason
+        assert float(states.get("number.river_min_soc").state) == 45
+        assert float(states.get("number.river_max_soc").state) == 45
+        assert states.get("switch.grid_isolation").state == "on"
+        assert states.get("switch.river_ac_port").state == "on"
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_charge_control_disappearing_mid_command_freezes_soc() -> None:
+    async def scenario() -> None:
+        states = FakeStates({
+            "sensor.river_soc": SimpleNamespace(state="50", attributes={}),
+            "number.river_min_soc": SimpleNamespace(
+                state="5", attributes={"min": 0, "max": 100, "step": 1,
+                                        "unit_of_measurement": "%"}
+            ),
+            "number.river_max_soc": SimpleNamespace(
+                state="70", attributes={"min": 0, "max": 100, "step": 1,
+                                         "unit_of_measurement": "%"}
+            ),
+            "number.river_charge_speed": SimpleNamespace(
+                state="640", attributes={"min": 100, "max": 640, "step": 10,
+                                          "unit_of_measurement": "W"}
+            ),
+            "switch.river_ac_port": SimpleNamespace(state="off", attributes={}),
+            "switch.grid_isolation": SimpleNamespace(state="on", attributes={}),
+        })
+
+        class DisappearingChargeControlServices(FakeServices):
+            async def async_call(self, domain, service, data, **kwargs):
+                await super().async_call(domain, service, data, **kwargs)
+                if domain == "number" and data.get("entity_id") == "number.river_max_soc":
+                    self.states.values.pop("number.river_charge_speed", None)
+
+        services = DisappearingChargeControlServices(states)
+        current_runtime = runtime()
+
+        async def save() -> None:
+            return None
+
+        adapter = LocalControlAdapter(
+            FakeHass(states, services),
+            lambda: {
+                CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+                CONF_SOC: "sensor.river_soc",
+                CONF_MIN_SOC_CONTROL: "number.river_min_soc",
+                CONF_MAX_SOC_CONTROL: "number.river_max_soc",
+                CONF_CHARGE_POWER_CONTROL: "number.river_charge_speed",
+                CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+                CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+            },
+            lambda: current_runtime,
+            save,
+        )
+
+        success, reason = await adapter.async_command(
+            Action.CHARGE, datetime.now(UTC), target_soc=90
+        )
+
+        assert not success
+        assert "frozen safely" in reason
+        assert float(states.get("number.river_min_soc").state) == 50
+        assert float(states.get("number.river_max_soc").state) == 50
+        assert states.get("switch.grid_isolation").state == "on"
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_freezes_soc_even_when_isolation_switch_fails(monkeypatch) -> None:
+    async def scenario() -> None:
+        states = FakeStates({
+            "sensor.river_soc": SimpleNamespace(state="47.3", attributes={}),
+            "number.river_min_soc": SimpleNamespace(
+                state="10", attributes={"min": 0, "max": 100, "step": 5,
+                                         "unit_of_measurement": "%"}
+            ),
+            "number.river_max_soc": SimpleNamespace(
+                state="90", attributes={"min": 0, "max": 100, "step": 5,
+                                         "unit_of_measurement": "%"}
+            ),
+            "switch.river_ac_port": SimpleNamespace(state="off", attributes={}),
+            "switch.grid_isolation": SimpleNamespace(state="off", attributes={}),
+        })
+
+        class StaleIsolationServices(FakeServices):
+            async def async_call(self, domain, service, data, **kwargs):
+                if data.get("entity_id") == "switch.grid_isolation":
+                    self.calls.append((domain, service, data))
+                    return
+                await super().async_call(domain, service, data, **kwargs)
+
+        monkeypatch.setattr("house_battery.actuator._GRID_SWITCH_ATTEMPTS", 1)
+        services = StaleIsolationServices(states)
+
+        async def save() -> None:
+            return None
+
+        adapter = LocalControlAdapter(
+            FakeHass(states, services),
+            lambda: {
+                CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+                CONF_SOC: "sensor.river_soc",
+                CONF_MIN_SOC_CONTROL: "number.river_min_soc",
+                CONF_MAX_SOC_CONTROL: "number.river_max_soc",
+                CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+                CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+            },
+            runtime,
+            save,
+        )
+
+        success, reason = await adapter.async_command(
+            Action.CHARGE, datetime.now(UTC), target_soc=90
+        )
+
+        assert not success
+        assert "SOC limits frozen" in reason
+        assert float(states.get("number.river_min_soc").state) == 45
+        assert float(states.get("number.river_max_soc").state) == 45
+        assert states.get("switch.grid_isolation").state == "off"
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_outage_below_reserve_keeps_native_soc_limits_ordered() -> None:
+    async def scenario() -> None:
+        states = FakeStates({
+            "sensor.river_soc": SimpleNamespace(state="7.3", attributes={}),
+            "number.river_min_soc": SimpleNamespace(
+                state="5", attributes={"min": 0, "max": 100, "step": 5,
+                                        "unit_of_measurement": "%"}
+            ),
+            "number.river_max_soc": SimpleNamespace(
+                state="90", attributes={"min": 0, "max": 100, "step": 5,
+                                         "unit_of_measurement": "%"}
+            ),
+            "switch.river_ac_port": SimpleNamespace(state="off", attributes={}),
+            "switch.grid_isolation": SimpleNamespace(state="off", attributes={}),
+        })
+        services = FakeServices(states)
+        current_runtime = runtime()
+        current_runtime.settings["absolute_min_soc"] = 10
+
+        async def save() -> None:
+            return None
+
+        adapter = LocalControlAdapter(
+            FakeHass(states, services),
+            lambda: {
+                CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+                CONF_SOC: "sensor.river_soc",
+                CONF_MIN_SOC_CONTROL: "number.river_min_soc",
+                CONF_MAX_SOC_CONTROL: "number.river_max_soc",
+                CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+                CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+            },
+            lambda: current_runtime,
+            save,
+        )
+
+        success, _ = await adapter.async_command(
+            Action.SAFE, datetime.now(UTC), grid_available=False
+        )
+
+        assert success
+        assert float(states.get("number.river_min_soc").state) == 10
+        assert float(states.get("number.river_max_soc").state) == 10
+        assert float(states.get("number.river_min_soc").state) <= float(
+            states.get("number.river_max_soc").state
+        )
+        assert states.get("switch.grid_isolation").state == "off"
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_settings_seed_once_and_track_last_commanded_action() -> None:
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        hass.states.async_set(
+            "number.river_charge_speed", "640", {
+                "min": 100, "max": 640, "step": 10,
+                "unit_of_measurement": "W",
+            }
+        )
+        entry = Entry({
+            CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+            CONF_CHARGE_POWER_CONTROL: "number.river_charge_speed",
+            CONF_ECOFLOW_CAPACITY_KWH: 0.286,
+            CONF_ECOFLOW_CHARGE_POWER_W: 9999,
+            CONF_ECOFLOW_DISCHARGE_POWER_W: 600,
+        })
+        coordinator = Fbp1200Coordinator(hass, entry)
+        state = runtime()
+        coordinator.store = StaticStore(state)
+
+        await coordinator.async_initialize()
+        assert coordinator.runtime.settings["capacity_kwh"] == 0.286
+        assert coordinator.runtime.settings["charge_power_w"] == 640
+        assert coordinator.runtime.settings["discharge_power_w"] == 600
+        assert coordinator.runtime.ecoflow_setup_settings_applied
+
+        coordinator.runtime.settings["capacity_kwh"] = 0.3
+        await coordinator.async_initialize()
+        assert coordinator.runtime.settings["capacity_kwh"] == 0.3
+        coordinator.runtime.last_action = "battery"
+        assert coordinator._observed_action() is Action.BATTERY
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_charge_power_setting_is_ignored_without_writable_device_range() -> None:
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        entry = Entry({
+            CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+            CONF_CHARGE_POWER_CONTROL: "number.read_only_or_wrong_unit",
+        })
+        coordinator = Fbp1200Coordinator(HomeAssistant("/tmp"), entry)
+        coordinator.runtime = runtime()
+        original = coordinator.runtime.settings["charge_power_w"]
+
+        await coordinator.async_set_setting("charge_power_w", 500)
+
+        assert coordinator.runtime.settings["charge_power_w"] == original
+
+    asyncio.run(scenario())
 
 
 def test_direct_tcp_command_uses_allowlisted_client_and_updates_commanded_mode() -> None:

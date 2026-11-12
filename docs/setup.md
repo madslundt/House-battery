@@ -26,14 +26,17 @@ Home Assistant 2025.1 or later is required. The local `brand/` icon and logo
 are shown by Home Assistant 2026.3 and later; they do not affect the
 integration's operation on earlier supported versions.
 
-House Battery connects to the battery itself. In the first setup screen, enter
-the battery's local IP address, TCP port (normally `8080`), and a display name.
-The flow performs a read-only telemetry handshake before it creates the entry.
-It then creates battery SOC and power telemetry, read-only native SOC-limit
-diagnostics, and House Battery control entities under the new device. No
-separate battery-provider integration is needed.
+Choose the device type in the first setup screen. For FOSSiBOT, use the direct
+local connection described below. For EcoFlow, install and configure the
+[EF BLE integration](https://github.com/rabits/ha-ef-ble) first, then select its
+telemetry, SOC controls, AC Port switch, and optional writable AC Charging
+Speed number. The EcoFlow setup asks for installed capacity and rated AC output
+power. Its charge-power setting follows the selected number's unit and native
+bounds; if no writable charging control is available, the setting is disabled
+and automatic charging is unavailable. A grid-isolation switch is required for
+EcoFlow control.
 
-## Connect the battery locally
+## Connect a FOSSiBOT directly
 
 1. Give the battery a DHCP reservation/static IP.
 2. Add **House Battery**, enter its IP address, TCP port, and name, then let
@@ -43,6 +46,19 @@ separate battery-provider integration is needed.
 4. During commissioning, verify the local adapter's mode readback and physical
    power response for each intended action. Use **Operation mode** to select
    `auto`, `charge`, `battery`, or `grid` after automatic control is enabled.
+
+## Connect EcoFlow through EF BLE
+
+1. Install EF BLE and pair the EcoFlow power station with Home Assistant.
+2. Confirm the battery level, AC input/output power, AC Port switch, and SOC
+   limit controls are available with the units shown in their entity details.
+3. Add **House Battery**, choose **EcoFlow (EF BLE entities)**, and bind the
+   matching entities. The AC Charging Speed control is optional; if selected,
+   it must be writable and expose valid `W` or `kW` limits. The two SOC limit
+   controls must be separate percent number entities.
+4. Enter installed usable capacity in kWh and rated AC output power in W. Set
+   up a separate grid-isolation switch and verify its physical behavior before
+   commissioning.
 
 ## Bind the required entities
 

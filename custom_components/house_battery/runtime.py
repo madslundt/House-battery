@@ -33,6 +33,7 @@ class RuntimeState:
     """All state that must survive a Home Assistant restart."""
 
     settings: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SETTINGS))
+    ecoflow_setup_settings_applied: bool = False
     load_learner: LoadLearner = field(default_factory=LoadLearner)
     load_learner_source: str | None = None
     load_forecast_evidence: LoadForecastEvidence = field(default_factory=LoadForecastEvidence)
@@ -154,6 +155,7 @@ class RuntimeState:
         return {
             "schema_version": 3,
             "settings": self.settings,
+            "ecoflow_setup_settings_applied": self.ecoflow_setup_settings_applied,
             "load_learner": self.load_learner.as_dict(),
             "load_learner_source": self.load_learner_source,
             "load_forecast_evidence": self.load_forecast_evidence.as_dict(),
@@ -250,6 +252,9 @@ class RuntimeState:
             accuracies["legacy"] = ForecastAccuracy.from_dict(legacy_accuracy)
         state = cls(
             settings=settings,
+            ecoflow_setup_settings_applied=(
+                data.get("ecoflow_setup_settings_applied") is True
+            ),
             load_learner=LoadLearner.from_dict(data.get("load_learner", {})),
             load_forecast_evidence=LoadForecastEvidence.from_dict(data.get("load_forecast_evidence")),
             replay_history=ReplayHistory.from_dict(data.get("replay_history")),

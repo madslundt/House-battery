@@ -371,6 +371,27 @@ def test_history_before_the_cutoff_is_never_rewritten() -> None:
     assert result.slots[2].end == datetime(2026, 9, 20, 14, 0, tzinfo=UTC)
 
 
+def test_missing_charge_control_releases_held_charge_at_replan_cutoff() -> None:
+    existing = DailyPlan(
+        date="2026-09-20",
+        slots=(slot(datetime(2026, 9, 20, 12, 0, tzinfo=UTC),
+                    datetime(2026, 9, 20, 14, 0, tzinfo=UTC), Action.CHARGE),),
+    )
+    cutoff = datetime(2026, 9, 20, 13, 5, tzinfo=UTC)
+    day_start, day_end = local_day_bounds(cutoff)
+    future = (slot(cutoff, datetime(2026, 9, 20, 15, 0, tzinfo=UTC), Action.GRID),)
+
+    result = reconcile_daily_plan(
+        existing, future, cutoff=cutoff, day_start=day_start,
+        horizon_end=day_end, charge_enabled=False,
+    )
+
+    assert result.slots[0].action is Action.CHARGE
+    assert result.slots[0].end == cutoff
+    assert result.slots[1].action is Action.GRID
+    assert result.slots[1].start == cutoff
+
+
 # --------------------------------------------------------------------------- #
 # #6 — Merge identical adjacent intervals
 # --------------------------------------------------------------------------- #

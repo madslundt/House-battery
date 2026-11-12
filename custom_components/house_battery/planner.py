@@ -171,6 +171,8 @@ def _slot_transition(
     *,
     allow_substep_continuation: bool = False,
 ) -> tuple[_State, tuple[float, float, float, float, float, str, float], float] | None:
+    if action is Action.CHARGE and not settings.charge_enabled:
+        return None
     if action is Action.BATTERY and not settings.discharge_enabled:
         return None
     energy_wh = state.energy_step * settings.energy_step_wh
@@ -419,7 +421,11 @@ def _partial_charge_candidates(
     input budget can reach it. A monotonic queue finds their minimum in linear
     time rather than trying every target from every energy/action state.
     """
-    if not predecessors or settings.partial_charge_targets == ():
+    if (
+        not predecessors
+        or not settings.charge_enabled
+        or settings.partial_charge_targets == ()
+    ):
         return
     step_wh = settings.energy_step_wh
     efficiency = sqrt(settings.round_trip_efficiency)
@@ -608,6 +614,10 @@ def optimize(
             node = previous_layer[state]
             actions = tuple(
                 action for action in _allowed_actions()
+                if settings.charge_enabled or action is not Action.CHARGE
+            )
+            actions = tuple(
+                action for action in actions
                 if current_discharge_enabled or slot_index != 0 or action is not Action.BATTERY
             )
             continuing_action = state.action

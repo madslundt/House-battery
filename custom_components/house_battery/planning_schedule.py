@@ -70,6 +70,7 @@ def planning_key(
     policy = settings if configured_settings is None else (
         tuple(sorted(configured_settings.items())), settings.control_capabilities,
         settings.partial_charge_targets, settings.discharge_enabled,
+        settings.charge_enabled,
     )
     schedules = tuple(sorted(
         dumps(item, sort_keys=True, separators=(",", ":"), default=str)

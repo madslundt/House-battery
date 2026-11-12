@@ -131,6 +131,14 @@ def test_disabled_discharge_still_allows_profitable_negative_price_charging() ->
     assert all(slot.action is not Action.BATTERY for slot in plan.slots)
 
 
+def test_disabled_charge_never_plans_a_charge_action() -> None:
+    plan = optimize(
+        slots([-1.0] * 8 + [4.0] * 8), now=BASE, soc=20,
+        settings=settings(charge_enabled=False),
+    )
+    assert all(slot.action is not Action.CHARGE for slot in plan.slots)
+
+
 def slots(prices: list[float], load_w: float = 500) -> list[PriceSlot]:
     return [
         PriceSlot(

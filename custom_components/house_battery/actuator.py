@@ -28,6 +28,8 @@ from .const import (
     MODE_SAFE,
 )
 from .models import Action
+from .control_errors import CommandSuperseded
+from .ecoflow_control import EcoFlowControlAdapter
 from .runtime import RuntimeState
 
 _LOGGER = logging.getLogger(__name__)
@@ -59,10 +61,6 @@ _STATE_CONFIRM_POLL_SECONDS = 0.1
 # fixed safety margin.
 DISCHARGE_EXPORT_SAFETY_MARGIN_W = ControlCapabilities.direct_local().discharge_margin_w
 _DIRECT_SETPOINT_CEILING_W = DIRECT_SETPOINT_CEILING_W
-
-
-class _CommandSuperseded(Exception):
-    """A safety request revoked an older control transaction."""
 
 
 def discharge_setpoint_below_load(requested_w: float, load_w: float | None) -> float:
@@ -141,6 +139,7 @@ class LocalControlAdapter:
         self._direct_mode_changed = direct_mode_changed
         self._command_lock = asyncio.Lock()
         self._command_generation = 0
+        self._ecoflow_control = EcoFlowControlAdapter(self)
 
     def invalidate_pending_commands(self) -> None:
         """Synchronously revoke economic commands before any safety await."""
@@ -153,7 +152,7 @@ class LocalControlAdapter:
 
     def _check_command_current(self, generation: int | None) -> None:
         if generation is not None and generation != self._command_generation:
-            raise _CommandSuperseded
+            raise CommandSuperseded
 
     async def _async_call_and_confirm_state(
         self, domain: str, service: str, data: dict[str, Any],
@@ -327,7 +326,7 @@ class LocalControlAdapter:
                     max_soc=maximum,
                 )
             self._check_command_current(generation)
-        except _CommandSuperseded:
+        except CommandSuperseded:
             raise
         except Exception as exc:
             _LOGGER.exception("Local TCP mode command failed")
@@ -429,6 +428,23 @@ class LocalControlAdapter:
                 f"SOC limit read-back did not confirm {entity_id}={value:g}"
             )
 
+    async def _set_switch(self, entity_id: str, enabled: bool) -> None:
+        """Set a native switch and require its state to read back."""
+        desired = "on" if enabled else "off"
+        current = self._hass.states.get(entity_id)
+        if current is None:
+            raise ValueError(f"{entity_id} is unavailable")
+        if current.state == desired:
+            return
+        confirmed = await self._async_call_and_confirm_state(
+            "switch",
+            "turn_on" if enabled else "turn_off",
+            {"entity_id": entity_id},
+            lambda state: state == desired,
+        )
+        if not confirmed:
+            raise ValueError(f"AC output switch read-back did not confirm {desired}")
+
     def _minimum_soc_for(
         self, action: Action, *, grid_available: bool | None = None
     ) -> float:
@@ -496,7 +512,7 @@ class LocalControlAdapter:
                     action, now, target_soc=target_soc, load_w=load_w,
                     grid_available=grid_available, generation=generation,
                 )
-            except _CommandSuperseded:
+            except CommandSuperseded:
                 return False, "command superseded by a safety request"
 
     async def _async_command_locked(
@@ -504,6 +520,11 @@ class LocalControlAdapter:
         load_w: float | None, grid_available: bool | None,
         generation: int | None,
     ) -> tuple[bool, str]:
+        ecoflow_result = await self._ecoflow_control.async_command(
+            action, now, target_soc, grid_available, generation
+        )
+        if ecoflow_result is not None:
+            return ecoflow_result
         direct_result = await self._async_direct_command(
             action, now, target_soc, load_w, grid_available, generation
         )
@@ -517,7 +538,7 @@ class LocalControlAdapter:
             await self._apply_limits(
                 action, target_soc, grid_available=grid_available, generation=generation
             )
-        except _CommandSuperseded:
+        except CommandSuperseded:
             raise
         except Exception as exc:  # The safety command must remain available.
             if action is not Action.SAFE:
@@ -540,7 +561,7 @@ class LocalControlAdapter:
                 lambda state: state == mode,
             )
             self._check_command_current(generation)
-        except _CommandSuperseded:
+        except CommandSuperseded:
             raise
         except Exception as exc:  # Home Assistant service failures vary by adapter
             _LOGGER.exception("Battery command failed")

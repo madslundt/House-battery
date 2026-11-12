@@ -9,7 +9,17 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
-from house_battery.const import CONF_GRID_AVAILABLE, CONF_GRID_IMPORT_POWER
+from house_battery.const import (
+    CONF_BATTERY_CHARGE_POWER,
+    CONF_BATTERY_DISCHARGE_POWER,
+    CONF_DEVICE_TYPE,
+    CONF_ECOFLOW_AC_PORT_SWITCH,
+    CONF_GRID_AVAILABLE,
+    CONF_GRID_IMPORT_POWER,
+    CONF_LOAD_POWER,
+    CONF_SOC,
+    DEVICE_ECOFLOW,
+)
 from house_battery.health import get_health_problems
 
 
@@ -43,5 +53,30 @@ def test_direct_entry_accepts_stable_grid_availability_signal() -> None:
             CONF_GRID_IMPORT_POWER: "sensor.grid_import",
             CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
         },
+        now,
+    ) == []
+
+
+def test_ecoflow_health_uses_ef_ble_entities_without_mode_selector() -> None:
+    now = datetime(2026, 9, 21, 16, 0, tzinfo=UTC)
+    entity_ids = {
+        CONF_SOC: "sensor.river_soc",
+        CONF_LOAD_POWER: "sensor.river_ac_output",
+        CONF_GRID_AVAILABLE: "binary_sensor.grid_available",
+        CONF_BATTERY_CHARGE_POWER: "sensor.river_ac_input",
+        CONF_BATTERY_DISCHARGE_POWER: "sensor.river_ac_output",
+        CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+    }
+    states = States({
+        "sensor.river_soc": SimpleNamespace(state="50", last_updated=now),
+        "sensor.river_ac_output": SimpleNamespace(state="120", last_updated=now),
+        "binary_sensor.grid_available": SimpleNamespace(state="on", last_updated=now),
+        "sensor.river_ac_input": SimpleNamespace(state="0", last_updated=now),
+        "switch.river_ac_port": SimpleNamespace(state="on", last_updated=now),
+    })
+
+    assert get_health_problems(
+        SimpleNamespace(states=states),
+        {CONF_DEVICE_TYPE: DEVICE_ECOFLOW, **entity_ids},
         now,
     ) == []

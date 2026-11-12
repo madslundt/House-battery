@@ -4,6 +4,9 @@ from datetime import timedelta
 
 DOMAIN = "house_battery"
 NAME = "House Battery"
+CONF_DEVICE_TYPE = "device_type"
+DEVICE_FOSSIBOT = "fossibot"
+DEVICE_ECOFLOW = "ecoflow"
 PLATFORMS = ["sensor", "binary_sensor", "number", "switch", "button", "select"]
 UPDATE_INTERVAL = timedelta(minutes=1)
 # The HA Store *major* version deliberately stays at 1 across the schema-v2
@@ -40,6 +43,12 @@ CONF_DISCHARGE_POWER_CONTROL = "discharge_power_control_entity"
 CONF_MIN_SOC_CONTROL = "minimum_soc_control_entity"
 CONF_MAX_SOC_CONTROL = "maximum_soc_control_entity"
 CONF_GRID_ISOLATION_SWITCH = "grid_isolation_switch_entity"
+CONF_ECOFLOW_AC_PORT_SWITCH = "ecoflow_ac_port_switch_entity"
+CONF_ECOFLOW_CAPACITY_KWH = "ecoflow_capacity_kwh"
+# Retained only so pre-change config entries deserialize; EF BLE now supplies
+# the AC charge range and the old manually entered value is ignored.
+CONF_ECOFLOW_CHARGE_POWER_W = "ecoflow_charge_power_w"
+CONF_ECOFLOW_DISCHARGE_POWER_W = "ecoflow_discharge_power_w"
 CONF_PRICE_ENTITIES = "price_entities"
 # `CONF_PRICE_FORECAST_ENTITY` remains readable for entries created before
 # forecast comparisons supported more than one source.
@@ -123,7 +132,7 @@ DEFAULT_SETTINGS: dict[str, float] = {
 }
 
 SETTING_LIMITS: dict[str, tuple[float, float, float, str | None]] = {
-    "capacity_kwh": (0.5, 20.0, 0.001, "kWh"),
+    "capacity_kwh": (0.1, 20.0, 0.001, "kWh"),
     "absolute_min_soc": (0.0, 50.0, 1.0, "%"),
     "reserve_soc": (5.0, 80.0, 1.0, "%"),
     "target_soc": (20.0, 100.0, 1.0, "%"),
