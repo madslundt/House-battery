@@ -612,7 +612,7 @@ class FbpModeSensor(Fbp1200Entity, SensorEntity):
             "charge_power_w": self.coordinator.data.get("battery_charge_power_w"),
             "output_power_w": self.coordinator.data.get("battery_output_power_w"),
             "active_power_threshold_w": 10,
-            "note": "Direct-local activity uses the inverter's reported charge/output power because this path has no CT meter. Legacy HA-entity activity is inferred from measured load and grid power. Configured mode is shown separately.",
+            "note": "EcoFlow activity uses net EF BLE input/output power, so unrelated whole-house grid import cannot look like battery charging. Direct-local activity uses inverter telemetry; legacy HA-entity activity is inferred from measured load and grid power. Configured mode is shown separately.",
         }
 
 

@@ -106,6 +106,18 @@ class EcoFlowControlAdapter:
             if not math.isfinite(soc) or not 0 <= soc <= 100:
                 raise ValueError("EcoFlow SOC is invalid")
 
+            grid_limits: tuple[float, float] | None = None
+            if action is Action.GRID or (
+                action is Action.SAFE and grid_available is not False
+            ):
+                try:
+                    grid_limits = self._grid_hold_limits(soc)
+                except ValueError as exc:
+                    # Check the unit's native SOC ranges before reconnecting
+                    # grid. Otherwise an unsupported hold request can connect
+                    # mains while the previous limits still permit charging.
+                    return False, f"EcoFlow cannot hold SOC in Grid mode: {exc}"
+
             if not battery_transfer:
                 isolation_confirmed = await control.async_set_grid_isolation(True)
                 if not isolation_confirmed and action is not Action.SAFE:
@@ -152,9 +164,16 @@ class EcoFlowControlAdapter:
                     if minimum > maximum:
                         minimum = maximum = self._common_freeze_limit(soc)
             else:
-                # Freeze at the highest SOC value both native controls accept
-                # without allowing the charge ceiling to exceed current SOC.
-                minimum = maximum = self._common_freeze_limit(soc)
+                # Use a shared threshold when the controls overlap. Some
+                # EcoFlow units instead expose a charge ceiling no lower than
+                # 50% and a discharge floor no higher than 30%; in that case
+                # keep those native limits and require SOC to be at/above the
+                # charge ceiling before connecting grid.
+                minimum, maximum = (
+                    grid_limits
+                    if grid_limits is not None
+                    else self._grid_hold_limits(soc)
+                )
 
             await control._set_number(CONF_MIN_SOC_CONTROL, minimum, required=True)
             control._check_command_current(generation)
@@ -294,6 +313,53 @@ class EcoFlowControlAdapter:
                 return candidate
             index += 1 if round_up else -1
         raise ValueError("EcoFlow SOC controls have incompatible native steps")
+
+    def _grid_hold_limits(self, soc: float) -> tuple[float, float]:
+        """Return safe native limits for grid pass-through without SOC transfer.
+
+        Equal limits are preferred when the EF BLE controls share an allowed
+        SOC value. Some models have disjoint ranges, such as a minimum 50%
+        charge ceiling and a maximum 30% discharge floor. Those can hold on
+        grid only once live SOC is already at/above the charge ceiling; below
+        it, connecting AC would charge the battery, so fail before switching.
+        """
+        try:
+            limit = self._common_freeze_limit(soc)
+        except ValueError:
+            control = self._control
+            config = control._config()
+            discharge_state = control._hass.states.get(
+                config.get(CONF_MIN_SOC_CONTROL)
+            )
+            charge_state = control._hass.states.get(
+                config.get(CONF_MAX_SOC_CONTROL)
+            )
+            if discharge_state is None or charge_state is None:
+                raise ValueError("EcoFlow SOC controls are unavailable")
+            discharge_low, discharge_high, _ = ecoflow_soc_control_range(
+                discharge_state
+            )
+            charge_low, charge_high, _ = ecoflow_soc_control_range(charge_state)
+            if discharge_high > charge_low:
+                raise ValueError(
+                    "EcoFlow SOC controls have no safe grid pass-through band"
+                )
+            if soc + 1e-9 < charge_low:
+                raise ValueError(
+                    "minimum charge ceiling is "
+                    f"{charge_low:g}% but live SOC is {soc:g}%; "
+                    "grid connection would charge the battery"
+                )
+            minimum = self._soc_limit(
+                CONF_MIN_SOC_CONTROL, discharge_high, round_up=False
+            )
+            maximum = self._soc_limit(
+                CONF_MAX_SOC_CONTROL, charge_low, round_up=True
+            )
+            if not discharge_low <= minimum <= maximum <= charge_high:
+                raise ValueError("EcoFlow SOC controls have no safe grid pass-through band")
+            return minimum, maximum
+        return limit, limit
 
     async def _freeze_after_charge_control_loss(
         self,

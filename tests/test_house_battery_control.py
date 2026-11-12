@@ -403,12 +403,148 @@ def test_ecoflow_actions_use_ef_ble_controls_and_clamp_charge_speed() -> None:
         assert not any(domain == "select" for domain, _, _ in services.calls)
 
         success, _ = await adapter.async_command(
+            Action.GRID, datetime.now(UTC)
+        )
+        assert success
+        assert states.get("switch.grid_isolation").state == "on"
+        assert states.get("switch.river_ac_port").state == "on"
+        assert float(states.get("number.river_min_soc").state) == 50
+        assert float(states.get("number.river_max_soc").state) == 50
+
+        success, _ = await adapter.async_command(
             Action.SAFE, datetime.now(UTC), grid_available=False
         )
         assert success
         assert float(states.get("number.river_min_soc").state) == 10
         assert float(states.get("number.river_max_soc").state) == 50
         assert states.get("switch.grid_isolation").state == "off"
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_measured_battery_flow_uses_device_input_and_output() -> None:
+    async def scenario() -> None:
+        from homeassistant.core import HomeAssistant
+
+        hass = HomeAssistant("/tmp")
+        hass.states.async_set("sensor.river_ac_input", "0", {
+            "unit_of_measurement": "W",
+        })
+        hass.states.async_set("sensor.river_ac_output", "103.6", {
+            "unit_of_measurement": "W",
+        })
+        hass.states.async_set("sensor.river_soc", "40", {
+            "unit_of_measurement": "%",
+        })
+        hass.states.async_set("sensor.house_load", "98.7", {
+            "unit_of_measurement": "W",
+        })
+        hass.states.async_set("sensor.house_grid_import", "504", {
+            "unit_of_measurement": "W",
+        })
+        coordinator = Fbp1200Coordinator(hass, Entry({
+            CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+            CONF_SOC: "sensor.river_soc",
+            CONF_LOAD_POWER: "sensor.house_load",
+            CONF_GRID_IMPORT_POWER: "sensor.house_grid_import",
+            CONF_BATTERY_CHARGE_POWER: "sensor.river_ac_input",
+            CONF_BATTERY_DISCHARGE_POWER: "sensor.river_ac_output",
+        }))
+
+        flow = coordinator._power_flow()
+        assert flow is not None
+        assert flow.battery_charge_power_w == pytest.approx(405.3)
+        assert coordinator._measured_battery_power(flow) == pytest.approx((0, 103.6))
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_grid_hold_below_charge_floor_rejects_before_switching() -> None:
+    async def scenario() -> None:
+        states = FakeStates({
+            "sensor.river_soc": SimpleNamespace(state="41", attributes={}),
+            "number.river_min_soc": SimpleNamespace(
+                state="10", attributes={"min": 0, "max": 30, "step": 1,
+                                         "unit_of_measurement": "%"}
+            ),
+            "number.river_max_soc": SimpleNamespace(
+                state="50", attributes={"min": 50, "max": 100, "step": 1,
+                                         "unit_of_measurement": "%"}
+            ),
+            "switch.river_ac_port": SimpleNamespace(state="off", attributes={}),
+            "switch.grid_isolation": SimpleNamespace(state="off", attributes={}),
+        })
+        services = FakeServices(states)
+
+        async def save() -> None:
+            return None
+
+        adapter = LocalControlAdapter(
+            FakeHass(states, services),
+            lambda: {
+                CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+                CONF_SOC: "sensor.river_soc",
+                CONF_MIN_SOC_CONTROL: "number.river_min_soc",
+                CONF_MAX_SOC_CONTROL: "number.river_max_soc",
+                CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+                CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+            },
+            runtime,
+            save,
+        )
+
+        success, reason = await adapter.async_command(Action.GRID, datetime.now(UTC))
+
+        assert not success
+        assert "grid connection would charge the battery" in reason
+        assert services.calls == []
+        assert states.get("switch.grid_isolation").state == "off"
+        assert states.get("switch.river_ac_port").state == "off"
+
+    asyncio.run(scenario())
+
+
+def test_ecoflow_grid_hold_uses_disjoint_native_limits_at_charge_floor() -> None:
+    async def scenario() -> None:
+        states = FakeStates({
+            "sensor.river_soc": SimpleNamespace(state="50", attributes={}),
+            "number.river_min_soc": SimpleNamespace(
+                state="10", attributes={"min": 0, "max": 30, "step": 1,
+                                         "unit_of_measurement": "%"}
+            ),
+            "number.river_max_soc": SimpleNamespace(
+                state="70", attributes={"min": 50, "max": 100, "step": 1,
+                                         "unit_of_measurement": "%"}
+            ),
+            "switch.river_ac_port": SimpleNamespace(state="off", attributes={}),
+            "switch.grid_isolation": SimpleNamespace(state="off", attributes={}),
+        })
+        services = FakeServices(states)
+
+        async def save() -> None:
+            return None
+
+        adapter = LocalControlAdapter(
+            FakeHass(states, services),
+            lambda: {
+                CONF_DEVICE_TYPE: DEVICE_ECOFLOW,
+                CONF_SOC: "sensor.river_soc",
+                CONF_MIN_SOC_CONTROL: "number.river_min_soc",
+                CONF_MAX_SOC_CONTROL: "number.river_max_soc",
+                CONF_ECOFLOW_AC_PORT_SWITCH: "switch.river_ac_port",
+                CONF_GRID_ISOLATION_SWITCH: "switch.grid_isolation",
+            },
+            runtime,
+            save,
+        )
+
+        success, _ = await adapter.async_command(Action.GRID, datetime.now(UTC))
+
+        assert success
+        assert float(states.get("number.river_min_soc").state) == 30
+        assert float(states.get("number.river_max_soc").state) == 50
+        assert states.get("switch.grid_isolation").state == "on"
+        assert states.get("switch.river_ac_port").state == "on"
 
     asyncio.run(scenario())
 

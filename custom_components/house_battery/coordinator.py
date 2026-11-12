@@ -31,6 +31,8 @@ from .adaptive import adaptive_policy, plan_economics
 from .capabilities import ControlCapabilities
 from .const import (
     CONF_ACCOUNTING_LOAD_POWER,
+    CONF_BATTERY_CHARGE_POWER,
+    CONF_BATTERY_DISCHARGE_POWER,
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
     CONF_EFFICIENCY_GRID_POWER,
@@ -512,6 +514,32 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             timestamp=now,
         )
 
+    def _measured_battery_power(
+        self, flow: PowerFlowSnapshot | None
+    ) -> tuple[float | None, float | None]:
+        """Return measured battery charge and discharge power.
+
+        EcoFlow's configured EF BLE input and output sensors measure power at
+        the device boundary. Their difference is battery transfer; subtracting
+        whole-house grid import from the EcoFlow's AC output incorrectly marks
+        the battery as charging whenever unrelated house loads import power.
+        """
+        if self.config.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW:
+            input_w = self._float(CONF_BATTERY_CHARGE_POWER)
+            output_w = self._float(CONF_BATTERY_DISCHARGE_POWER)
+            if (
+                input_w is None
+                or output_w is None
+                or input_w < 0
+                or output_w < 0
+            ):
+                return None, None
+            net_output_w = output_w - input_w
+            return max(-net_output_w, 0.0), max(net_output_w, 0.0)
+        if flow is None:
+            return None, None
+        return flow.battery_charge_power_w, flow.battery_output_power_w
+
     def _classify_power_source(
         self, flow: PowerFlowSnapshot | None
     ) -> str | None:
@@ -535,6 +563,22 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             if output > threshold:
                 return "battery"
             if load > threshold:
+                return "grid"
+            return "off"
+        if self.config.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW:
+            charge, output = self._measured_battery_power(flow)
+            if charge is None or output is None:
+                return None
+            threshold = FLOW_UI_ACTIVE_THRESHOLD_W
+            if charge > threshold:
+                return "charging"
+            if output > threshold:
+                return "battery"
+            load = self._load_power()
+            grid_import = flow.grid_import_w if flow else None
+            if (load is not None and load > threshold) or (
+                grid_import is not None and grid_import > threshold
+            ):
                 return "grid"
             return "off"
         return flow.classify_power_source() if flow else None
@@ -1521,19 +1565,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self.is_direct_local and self._local_snapshot is not None
             else None
         )
-        actual_charge_power = (
-            local_power[0]
+        actual_charge_power, actual_discharge_power = (
+            local_power
             if local_power is not None
-            else self.power_flow.battery_charge_power_w
-            if self.power_flow is not None
-            else None
-        )
-        actual_discharge_power = (
-            local_power[1]
-            if local_power is not None
-            else self.power_flow.battery_output_power_w
-            if self.power_flow is not None
-            else None
+            else self._measured_battery_power(self.power_flow)
         )
         local_now = dt_util.as_local(now)
         sizing_source = self._sizing_source()
@@ -2175,22 +2210,15 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             else None
         )
         load_power = flow.load_w if flow else self._load_power()
-        battery_charge_power = (
-            actual_charge_power
-            if local_snapshot is not None
-            else flow.battery_charge_power_w if flow else None
-        )
-        battery_output_power = (
-            actual_discharge_power
-            if local_snapshot is not None
-            else flow.battery_output_power_w if flow else None
-        )
+        battery_charge_power = actual_charge_power
+        battery_output_power = actual_discharge_power
         battery_power = (
             actual_discharge_power - actual_charge_power
-            if local_snapshot is not None
-            and actual_discharge_power is not None
+            if actual_discharge_power is not None
             and actual_charge_power is not None
-            else flow.battery_net_power_w if flow else None
+            else flow.battery_net_power_w
+            if flow and self.config.get(CONF_DEVICE_TYPE) != DEVICE_ECOFLOW
+            else None
         )
         grid_power = (
             flow.grid_power_w
@@ -2248,6 +2276,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_power_source": (
                 "device telemetry"
                 if local_snapshot is not None
+                else "EcoFlow input/output balance"
+                if self.config.get(CONF_DEVICE_TYPE) == DEVICE_ECOFLOW
                 else "unavailable"
                 if self.is_direct_local
                 else "load/grid balance"

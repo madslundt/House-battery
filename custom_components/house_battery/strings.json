@@ -141,7 +141,7 @@
         },
         "data_description": {
           "efficiency_grid_power_entity": "Optional true active power in W. Prefer the Watts Live phase supplying the battery; do not use an inaccurate smart-plug reading. Shared-meter measurements with unstable competing loads are rejected, and planning keeps the fallback until enough reliable matched-SOC periods agree.",
-          "ecoflow_ac_port_switch_entity": "For EcoFlow BLE devices, AC output is kept enabled for a connected pass-through load. Grid/Charge/Safe modes hold the battery at its current SOC; Battery mode applies the configured reserve.",
+          "ecoflow_ac_port_switch_entity": "For EcoFlow BLE devices, AC output stays enabled during Grid, Charge, and Safe modes for pass-through. Grid mode holds SOC only when the device's native charge and discharge limits permit it; if grid connection would force charging, the command is rejected before switching. Battery mode applies the configured reserve.",
           "grid_isolation_switch_entity": "For EcoFlow, this transfer switch must be configured. It is turned off in Battery mode and on in Grid, Charge, and Safe modes."
         }
       }
