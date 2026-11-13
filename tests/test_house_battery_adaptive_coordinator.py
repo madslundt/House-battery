@@ -184,9 +184,14 @@ def test_forecast_tuning_reaches_real_planner_slots_without_replacing_known_pric
                     samples.append({
                         "start": start.isoformat(), "end": end.isoformat(),
                         "scored_at": end.isoformat(), "error_dkk_per_kwh": error,
-                        "issued_at": (start - timedelta(days=1)).isoformat(),
+                        "issued_at": (start - timedelta(hours=12)).isoformat(),
                     })
-            coord.runtime.forecast_accuracies[source] = ForecastAccuracy(error_samples=samples)
+            coord.runtime.forecast_accuracies[source] = ForecastAccuracy(
+                error_samples=samples,
+                lead_error_samples={
+                    "0_24h": [{**sample, "error_dkk_per_kwh": .45} for sample in samples],
+                },
+            )
 
         slots = coord._price_slots(now)
         assert slots[0].source == "known"
@@ -196,7 +201,7 @@ def test_forecast_tuning_reaches_real_planner_slots_without_replacing_known_pric
         expected_source = "sensor.forecast_b" if enabled else "sensor.forecast_a"
         assert coord._forecast_planning_source == expected_source
         assert coord._forecast_sources[expected_source]["used_slots"] == len(forecasts)
-        expected_uncertainty = .6 if enabled else coord.runtime.settings["forecast_uncertainty_dkk_per_kwh"]
+        expected_uncertainty = .45 if enabled else coord.runtime.settings["forecast_uncertainty_dkk_per_kwh"]
         assert forecasts[0].uncertainty_dkk_per_kwh == pytest.approx(expected_uncertainty)
         for accuracy in coord.runtime.forecast_accuracies.values():
             assert all(datetime.fromisoformat(v["start"]) >= known_end for v in accuracy.outstanding.values())

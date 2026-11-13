@@ -4,9 +4,11 @@ import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
@@ -230,6 +232,56 @@ def test_price_entity_flagged_forecast_is_not_treated_as_known() -> None:
         assert coordinator._forecast_slot_count == len(forecast)
 
     asyncio.run(scenario())
+
+
+def test_stromligning_tomorrow_repairs_mislabeled_forecast_but_preserves_missing_hour():
+    async def scenario() -> None:
+        now = datetime(2026, 11, 13, 23, tzinfo=UTC)
+        hour = timedelta(hours=1)
+        quarter = timedelta(minutes=15)
+        hass = HomeAssistant("/tmp")
+        tomorrow = "binary_sensor.stromligning_tomorrow_available_vat"
+        hass.data[er.DATA_REGISTRY] = SimpleNamespace(
+            async_get=lambda entity_id: SimpleNamespace(platform="stromligning") if entity_id == tomorrow else None,
+        )
+        coordinator = Fbp1200Coordinator(hass, _Entry({
+            CONF_PRICE_ENTITIES: ["sensor.prices", tomorrow],
+            CONF_LOAD_POWER: "sensor.load",
+        }))
+        coordinator.runtime.forecast_enabled = True
+        hass.states.async_set("sensor.load", "110")
+        hass.states.async_set("sensor.prices", "1", {
+            "prices": _stromligning_prices(now, intervals=4, cadence=quarter, default_price=1),
+        })
+        forecast = _stromligning_prices(now + hour, intervals=5, cadence=hour, default_price=2)
+        forecast.pop(2)
+        for row in forecast:
+            row["end"] = (datetime.fromisoformat(row["start"]) + quarter).isoformat()
+        hass.states.async_set(tomorrow, "on", {"forecast_data": True, "prices": forecast})
+
+        slots = coordinator._price_slots(now)
+
+        assert [slot.hours for slot in slots if slot.source == "known"] == [.25] * 4
+        assert [slot.hours for slot in slots if slot.source == "forecast"] == [1, 1]
+        assert slots[-1].end == now + 3 * hour
+        assert coordinator._forecast_planning_source == tomorrow
+
+    asyncio.run(scenario())
+
+
+def test_stromligning_repair_preserves_gap_before_quarter_hour_data() -> None:
+    now = datetime(2026, 11, 13, tzinfo=UTC)
+    quarter = timedelta(minutes=15)
+    starts = [now + timedelta(minutes=minute) for minute in (0, 60, 75, 90, 105)]
+    rows = [
+        {"start": start, "end": start + quarter, "price": 2}
+        for start in starts
+    ]
+    assessment = assess_external_forecast(
+        rows, now=now, reported_at=now, maximum_age=timedelta(hours=3),
+        source_platform="stromligning",
+    )
+    assert all(slot.hours == .25 for slot in assessment.slots)
 
 
 def test_coordinator_passes_current_and_historical_load_into_price_slots() -> None:
@@ -761,6 +813,50 @@ def _adapt(accuracies: dict[str, ForecastAccuracy], *, enabled: bool = True,
         list(accuracies), accuracies, now=now,
         configured_uncertainty=floor, enabled=enabled,
     )
+
+
+def test_forecast_allowance_learns_nearer_vintages_without_rewriting_first_score() -> None:
+    accuracy = ForecastAccuracy()
+    for days_ago in (3, 2, 1):
+        base = _ADAPT_NOW - timedelta(days=days_ago)
+        actual = [PriceSlot(base + timedelta(hours=i), base + timedelta(hours=i + 1), 2)
+                  for i in range(8)]
+        for lead, price in ((60, .4), (40.9, 2.25), (39, 3)):
+            accuracy.record_forecasts(
+                [PriceSlot(slot.start, slot.end, price) for slot in actual],
+                now=base - timedelta(hours=lead),
+            )
+        accuracy = ForecastAccuracy.from_dict(accuracy.as_dict())
+        quarters = [
+            PriceSlot(slot.start + timedelta(minutes=i), slot.start + timedelta(minutes=i + 15), 2)
+            for slot in actual for i in range(0, 60, 15)
+        ]
+        assert accuracy.score_actual_prices(
+            quarters, uncertainty_dkk_per_kwh=.2, now=base + timedelta(hours=8),
+        ) == 8
+
+    accuracy = ForecastAccuracy.from_dict(accuracy.as_dict())
+    assert accuracy.samples == 24
+    assert accuracy.mean_absolute_error_dkk_per_kwh == 1.6
+    source = _adapt({"source": accuracy}, floor=.2)["sources"]["source"]
+    assert source["effective_uncertainty_dkk_per_kwh"] == pytest.approx(1.6)
+    assert source["lead_bands"]["24_48h"]["covered_hours"] == 24
+    assert source["lead_bands"]["24_48h"]["effective_uncertainty_dkk_per_kwh"] == .25
+    assert source["lead_bands"]["48_72h"]["effective_uncertainty_dkk_per_kwh"] == pytest.approx(1.6)
+    assert source["lead_bands"]["0_24h"]["effective_uncertainty_dkk_per_kwh"] == pytest.approx(1.6)
+
+
+def test_unchanged_forecast_does_not_become_a_new_vintage_on_poll() -> None:
+    target = _slot(1, 2)
+    accuracy = ForecastAccuracy()
+    published = target.start - timedelta(hours=49)
+    republished = target.start - timedelta(hours=47)
+    accuracy.record_forecasts([target], now=published, publication_time=published)
+    accuracy.record_forecasts([target], now=republished, publication_time=published)
+    assert set(accuracy.lead_outstanding) == {"48_72h"}
+
+    accuracy.record_forecasts([target], now=republished, publication_time=republished)
+    assert set(accuracy.lead_outstanding) == {"24_48h", "48_72h"}
 
 
 def test_forecast_adaptation_raises_uncertainty_and_prefers_common_period_accuracy() -> None:

@@ -126,9 +126,12 @@ measured evidence qualifies, and stale or inconsistent evidence returns planning
 to that fallback.
 
 Adaptive forecast handling can raise the configured uncertainty floor when
-recent errors warrant it. It can compare forecast-source reliability over common
-scored coverage before changing source priority; extra history from one source
-alone is not proof that it is better. Known tariffs remain authoritative and the
+recent errors warrant it. It captures the first forecast revision seen in each
+of the 0–24, 24–48, and 48–72 hour lead bands, using the entity's last update
+time to measure the lead. A band needs 24 complete scored hours
+across at least three days to use its own allowance. While that evidence
+accumulates, the source-wide allowance applies. Automatic source priority
+compares providers over the same scored hours. Known tariffs remain authoritative and the
 forecast switch still controls whether forecast intervals can drive planning.
 SOC reserves, charge ceilings, capacity, power limits and safety gates remain
 under their existing controls.
@@ -175,6 +178,9 @@ attribute format as known prices: `prices`, `raw_today`, `raw_tomorrow`,
 inferred from the source's adjacent start times; only an isolated row defaults
 to one hour. Known prices and forecasts may therefore use different cadences,
 such as hourly known prices and quarter-hour forecasts.
+For registered Strømligning forecast entities, adjacent hourly rows labeled
+with 15-minute ends are repaired to hourly intervals. Missing hours still
+stop the forecast extension. Confirmed tariff intervals keep their published ends.
 
 Forecasts can extend the optimizer's horizon to at most **72 hours from the
 current planning time**. A forecast interval crossing that boundary is clipped.

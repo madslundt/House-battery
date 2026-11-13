@@ -17,6 +17,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
 from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.event import (
     async_track_point_in_utc_time,
@@ -35,12 +36,11 @@ from .const import (
     CONF_BATTERY_DISCHARGE_POWER,
     CONF_CHARGE_POWER_CONTROL,
     CONF_COMMISSIONED,
-    CONF_EFFICIENCY_GRID_POWER,
     CONF_DEVICE_TYPE,
-    DEVICE_ECOFLOW,
     CONF_ECOFLOW_AC_PORT_SWITCH,
     CONF_ECOFLOW_CAPACITY_KWH,
     CONF_ECOFLOW_DISCHARGE_POWER_W,
+    CONF_EFFICIENCY_GRID_POWER,
     CONF_GRID_AVAILABLE,
     CONF_GRID_IMPORT_POWER,
     CONF_GRID_ISOLATION_SWITCH,
@@ -53,6 +53,7 @@ from .const import (
     CONF_SOC,
     DECISION_HISTORY_LIMIT,
     DEFAULT_PORT,
+    DEVICE_ECOFLOW,
     DIRECT_LOAD_SOURCE,
     DOMAIN,
     EXPORT_SAFETY_W,
@@ -78,13 +79,14 @@ from .const import (
     UPDATE_INTERVAL,
 )
 from .dailyplan import local_day_bounds, reconcile_daily_plan
-from .evidence import EvidenceCollector
 from .ecoflow_capabilities import ecoflow_charge_power_range_w
+from .evidence import EvidenceCollector
 from .forecast import (
     assess_external_forecast,
     detect_extreme_price_movement,
     extend_known_horizon,
     forecast_adaptation,
+    forecast_lead_band,
 )
 from .forecast_calibration import calibrate_forecast
 from .forecast_plan import build_forecast_plan
@@ -692,6 +694,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         uncertainty = self.runtime.settings["forecast_uncertainty_dkk_per_kwh"]
         source_data: dict[str, dict[str, Any]] = {}
         available_forecasts: list[tuple[str, list[PriceSlot]]] = []
+        forecast_issue_times: dict[str, datetime] = {}
+        registry = self.hass.data.get(er.DATA_REGISTRY)
         for source in sources:
             forecast_state = self.hass.states.get(source)
             details: dict[str, Any] = {
@@ -710,17 +714,22 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 if reported_at is not None:
                     details["last_updated"] = reported_at.isoformat()
+                entity = registry.async_get(source) if registry is not None else None
+                attributes = dict(forecast_state.attributes)
+                may_repair = "forecast_data" not in attributes or is_forecast_data(attributes)
                 assessment = assess_external_forecast(
-                    extract_rows(dict(forecast_state.attributes)),
+                    extract_rows(attributes),
                     now=now,
                     reported_at=reported_at,
                     maximum_age=FORECAST_MAX_AGE,
+                    source_platform=entity.platform if entity is not None and may_repair else None,
                 )
                 details["status"] = assessment.status
                 forecast_slots = list(assessment.slots)
                 details["available_slots"] = len(forecast_slots)
                 if forecast_slots:
                     available_forecasts.append((source, forecast_slots))
+                    forecast_issue_times[source] = forecast_state.last_updated
             source_data[source] = details
             market_inputs.append((
                 source, details["status"],
@@ -760,6 +769,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 [slot for slot in forecast_slots
                  if known_end is None or slot.start >= known_end],
                 now=now,
+                publication_time=forecast_issue_times[source],
             )
             accuracy.score_actual_prices(
                 known_slots, uncertainty_dkk_per_kwh=uncertainty, now=now,
@@ -781,13 +791,23 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         adaptive_sources = self._forecast_adaptation["sources"]
         planning_forecasts: list[tuple[str, list[PriceSlot]]] = []
         for source, forecast_slots in available_forecasts:
-            effective_uncertainty = adaptive_sources[source]["effective_uncertainty_dkk_per_kwh"]
+            adaptation = adaptive_sources[source]
+            lead_bands = adaptation["lead_bands"]
+            source_data[source]["lead_uncertainty"] = lead_bands
+            fallback = adaptation["effective_uncertainty_dkk_per_kwh"]
+            buffers = {band: details["effective_uncertainty_dkk_per_kwh"]
+                       for band, details in lead_bands.items() if details["adaptive_ready"]}
+            risk_adjusted_slots = [
+                replace(slot, source="forecast", uncertainty_dkk_per_kwh=buffers.get(
+                    forecast_lead_band(slot.start, forecast_issue_times[source]), fallback,
+                ))
+                for slot in forecast_slots
+            ]
             calibrated, calibration = calibrate_forecast(
-                [replace(slot, source="forecast", uncertainty_dkk_per_kwh=effective_uncertainty)
-                 for slot in forecast_slots],
+                risk_adjusted_slots,
                 self.runtime.forecast_accuracy_for(source), now=now,
                 enabled=self.runtime.adaptive_enabled and self.runtime.forecast_enabled,
-                uncertainty_floor=effective_uncertainty,
+                uncertainty_floor=uncertainty,
             )
             planning_forecasts.append((source, calibrated))
             source_data[source]["calibration"] = calibration
@@ -796,9 +816,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 known_slots,
                 forecast_slots,
                 now=horizon_anchor,
-                uncertainty_dkk_per_kwh=adaptive_sources[source][
-                    "effective_uncertainty_dkk_per_kwh"
-                ],
+                uncertainty_dkk_per_kwh=uncertainty,
             )
             for source, forecast_slots in planning_forecasts
         }
@@ -1793,7 +1811,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 model_eligibility = (
                     self._adaptation.get("state"), planning_efficiency_source,
                     self._forecast_adaptation.get("priority_adaptive_ready", False),
-                    tuple((source, details.get("adaptive_ready", False)) for source, details
+                    tuple((source, details.get("adaptive_ready", False),
+                           tuple(band for band, evidence in details.get("lead_bands", {}).items()
+                                 if evidence["adaptive_ready"])) for source, details
                           in sorted(self._forecast_adaptation.get("sources", {}).items())),
                     tuple((source, tuple((band, details.get("reason") == "validated_bias_correction")
                                          for band, details in sorted(
