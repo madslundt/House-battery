@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -426,6 +426,8 @@ async def async_setup_entry(
             FbpBatterySizingSensor(coordinator),
             FbpMeasuredRoundTripEfficiencySensor(coordinator),
             FbpPriceForecastAccuracySensor(coordinator),
+            FbpHistoricalPriceSensor(coordinator, "low"),
+            FbpHistoricalPriceSensor(coordinator, "high"),
             FbpDecisionHistorySensor(coordinator),
             *(
                 [
@@ -1097,6 +1099,34 @@ class FbpPriceForecastAccuracySensor(Fbp1200Entity, SensorEntity):
             "meaning": "Each configured source is scored independently. MAE is the average absolute forecast error; bias is forecast minus actual, so positive means over-prediction.",
             "uncertainty_setting": "Price forecast uncertainty number",
         }
+
+
+class FbpHistoricalPriceSensor(Fbp1200Entity, SensorEntity):
+    """Expose a historical import price threshold in DKK/kWh."""
+
+    _attr_native_unit_of_measurement = "DKK/kWh"
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: Fbp1200Coordinator, bound: Literal["low", "high"]) -> None:
+        super().__init__(coordinator, f"historical_{bound}_price")
+        self._attr_name = f"Historical {bound} electricity price"
+        self._attr_icon = "mdi:chart-line-variant"
+        self._value_key = f"{bound}_dkk_per_kwh"
+        self._percentile = 10 if bound == "low" else 90
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.data.get("historical_prices", {}).get(self._value_key)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        history = self.coordinator.data.get("historical_prices", {})
+        return {"percentile": self._percentile, **{
+            key: history.get(key) for key in (
+                "window_days", "window_start", "window_end", "observed_hours",
+                "minimum_dkk_per_kwh", "maximum_dkk_per_kwh",
+            )
+        }}
 
 
 class FbpDecisionHistorySensor(Fbp1200Entity, SensorEntity):

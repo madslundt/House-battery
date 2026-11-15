@@ -13,6 +13,31 @@ _GRID_AVAILABLE = {"1", "on", "available", "grid", "on_grid", "connected", "true
 _GRID_UNAVAILABLE = {"0", "off", "no_grid", "disconnected", "false"}
 
 
+def historical_storage_value(
+    slots: list[PriceSlot], *, low: float | None, high: float | None, settings: PlannerSettings,
+) -> float:
+    """Value stored energy using confirmed import history when prices are available.
+
+    Use the midpoint of the historical thresholds to avoid assuming the next
+    avoided purchase will be at a peak. Limit the credit to what could be
+    recovered from a purchase at the low threshold after losses and wear.
+    A cheaper forecast can still lower the reference after adding its buffer.
+    """
+    if low is None or high is None or not low < high or settings.round_trip_efficiency <= 0:
+        return 0.0
+    if not slots or slots[0].source != "known":
+        return 0.0
+    forecast_refill = min(
+        (slot.charge_price_dkk_per_kwh for slot in slots if slot.source == "forecast"),
+        default=float("inf"),
+    )
+    # The planner subtracts wear and applies discharge efficiency to this quote.
+    # Including wear here makes the cap equivalent to a low-price grid purchase
+    # after both conversion losses, before any other planner costs or preferences.
+    low_price_break_even = low / settings.round_trip_efficiency + settings.degradation_cost_dkk_per_kwh
+    return max(0.0, min((low + high) / 2, low_price_break_even, forecast_refill))
+
+
 def relative_storage_value(
     slots: Iterable[PriceSlot], *, historical_slots: Iterable[PriceSlot] = (),
 ) -> float:
@@ -20,11 +45,12 @@ def relative_storage_value(
 
     Callers supply the contiguous future planning horizon, starting at now.
     At least 24 hours are required. Its duration-weighted lower price quartile
-    uses forecast prices minus uncertainty. Qualified history spanning at least
-    three UTC dates and 24 hours can cap that reference at its weighted median;
-    it can never raise the value above what upcoming prices justify. A 25%
-    haircut allows for prices beyond the horizon being unknown. Missing or
-    short history leaves the future reference usable during initial learning.
+    uses forecast prices minus uncertainty and takes a 25% haircut. When a
+    forecast follows at least 12 confirmed hours, also value buying early at
+    the confirmed median, capped by the cheapest buffered forecast purchase.
+    This preserves cheap confirmed charging when the forecast makes waiting
+    risky. Qualified recent history caps both references at its weighted median
+    (with the same haircut for the lower quartile).
     """
     future = sorted((slot for slot in slots if (
         slot.start.tzinfo is not None and slot.end.tzinfo is not None
@@ -35,6 +61,8 @@ def relative_storage_value(
     start = future[0].start.astimezone(UTC)
     end = start + timedelta(days=7)
     samples: list[tuple[float, float]] = []
+    confirmed: list[tuple[float, float]] = []
+    cheapest_forecast_purchase = float("inf")
     cursor = start
     for slot in future:
         left, right = max(start, slot.start), min(end, slot.end)
@@ -43,12 +71,19 @@ def relative_storage_value(
         left = max(left, cursor)
         if right <= left:
             continue
-        samples.append((slot.discharge_price_dkk_per_kwh,
-                        (right.astimezone(UTC) - left.astimezone(UTC)).total_seconds()))
+        seconds = (right.astimezone(UTC) - left.astimezone(UTC)).total_seconds()
+        samples.append((slot.discharge_price_dkk_per_kwh, seconds))
+        if slot.source == "known":
+            confirmed.append((slot.price, seconds))
+        elif slot.source == "forecast":
+            cheapest_forecast_purchase = min(cheapest_forecast_purchase, slot.charge_price_dkk_per_kwh)
         cursor = right
     if sum(weight for _, weight in samples) < 24 * 3600:
         return 0.0
     reference = _weighted_price_quantile(samples, .25)
+    confirmed_reference = 0.0
+    if isfinite(cheapest_forecast_purchase) and sum(weight for _, weight in confirmed) >= 12 * 3600:
+        confirmed_reference = min(_weighted_price_quantile(confirmed, .5), cheapest_forecast_purchase)
 
     history_start = start - timedelta(days=7)
     historical: list[tuple[float, float]] = []
@@ -67,8 +102,10 @@ def relative_storage_value(
         historical_days.add(left.astimezone(UTC).date())
         cursor = right
     if len(historical_days) >= 3 and sum(weight for _, weight in historical) >= 24 * 3600:
-        reference = min(reference, _weighted_price_quantile(historical, .5))
-    return max(0.0, reference * .75)
+        historical_median = _weighted_price_quantile(historical, .5)
+        reference = min(reference, historical_median)
+        confirmed_reference = min(confirmed_reference, historical_median)
+    return max(0.0, reference * .75, confirmed_reference)
 
 
 def _weighted_price_quantile(samples: list[tuple[float, float]], quantile: float) -> float:

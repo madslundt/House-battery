@@ -77,6 +77,15 @@ It therefore does not cycle the battery merely because the next interval is a
 little more expensive. The normal economic floor is **Arbitrage reserve SOC**;
 **Absolute emergency SOC** is the lower native limit preserved for an outage.
 
+The planner uses the 28-day historical low and high electricity price sensors
+once at least 24 confirmed hours have been recorded. Their midpoint provides a
+reference for energy carried beyond the horizon. The planner caps that reference
+at what a purchase at the historical low threshold could recover after battery
+losses and wear. A cheaper forecast, including its uncertainty allowance, can
+lower the reference further. This makes buying during a confirmed cheap interval
+worth considering even when the published horizon ends before the energy would
+be used. The normal charge ceiling applies unless opportunistic charging is enabled.
+
 When **Allow opportunistic full charge** is enabled, the coordinator compares
 the normal-target plan with a second plan using a fixed 100% target. The higher
 target is selected when it adds meaningful charging and improves the planner's
@@ -95,12 +104,15 @@ within the previous seven days, their weighted median, with the same haircut,
 caps this additional reference. Each historical hour needs at least 90% coverage;
 incomplete hours and old data are excluded. Higher historical prices never raise
 the reference above what upcoming prices support. During initial learning,
-future prices alone can provide the reference. Both candidate plans use the same
-reference, and the existing terminal estimate remains the fallback for short
-horizons. This can fill the battery to 100% even when only part of that energy
-will be used within the current horizon; full charging still requires sufficient
-time, power and economic benefit. Terminal credit remains separate from planned
-bill savings and measured savings.
+future prices alone can provide the reference. When at least 12 confirmed hours
+remain before the forecast starts, the planner can also use the confirmed-price
+median as a reference for buying early. The cheapest forecast purchase after
+adding uncertainty and the qualified historical median both cap this reference.
+Both candidate plans use the same reference, and the existing terminal estimate
+remains the fallback for short horizons. The battery can fill to 100% even if
+some energy will remain stored beyond the current horizon. Full charging still
+requires sufficient time, power and economic benefit. Terminal credit remains
+separate from planned bill savings and measured savings.
 Manual operating overrides always retain the configured normal charge ceiling.
 
 ## Adaptive planning

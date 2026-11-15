@@ -239,6 +239,77 @@ def test_relative_price_reference_is_shared_by_both_ceiling_plans(monkeypatch, e
         assert not decision.active
 
 
+@pytest.mark.parametrize("forecast_uncertainty,should_store_extra", [(1.8, True), (.2, False)])
+def test_confirmed_cheap_window_hedges_uncertain_refill(forecast_uncertainty, should_store_extra):
+    """A weak forecast should not erase the value of a cheap confirmed refill."""
+    known_prices = [1.4] * 4 + [2.4] * 14 + [3.6] * 4 + [2.4] * 3
+    forecast_prices = [1.3] * 6 + [2.4] * 38 + [1.3] * 4
+    slots = [
+        PriceSlot(
+            NOW + timedelta(hours=i), NOW + timedelta(hours=i + 1), price,
+            expected_load_wh=300 if 18 <= i < 22 else 100,
+            source="known" if i < len(known_prices) else "forecast",
+            uncertainty_dkk_per_kwh=0 if i < len(known_prices) else forecast_uncertainty,
+        )
+        for i, price in enumerate(known_prices + forecast_prices)
+    ]
+    settings = PlannerSettings(
+        capacity_wh=4000, reserve_soc=10, target_soc=90,
+        charge_power_w=1200, discharge_power_w=800,
+        round_trip_efficiency=.8, degradation_cost_dkk_per_kwh=.35,
+        minimum_profit_dkk_per_kwh=.5, switching_penalty_dkk=.05,
+    )
+    coordinator = SimpleNamespace(runtime=RuntimeState(opportunistic_charging_enabled=True))
+
+    decision = Fbp1200Coordinator._optimize_with_storage_policy(
+        coordinator, slots, now=NOW, soc=10, settings=settings, current_action=Action.GRID,
+    )
+
+    assert decision.active is should_store_extra
+    if should_store_extra:
+        assert decision.plan.slots[3].soc_end > 99
+        assert decision.plan.slots[len(known_prices) - 1].soc_end > 50
+        assert not any(slot.battery_charge_wh > 0 for slot in decision.plan.slots[len(known_prices):])
+
+
+@pytest.mark.parametrize("charge_price,forecast_price,expected", [
+    (1.4, None, True),
+    (2.1, None, False),
+    (1.4, 1.1, False),
+])
+def test_history_prices_guide_confirmed_charging_with_normal_ceiling(charge_price, forecast_price, expected):
+    """Use published cheap periods even when no credible forecast peak is available."""
+    runtime = RuntimeState(opportunistic_charging_enabled=False)
+    runtime.price_patterns.observe([
+        PriceSlot(NOW - timedelta(hours=24 - i), NOW - timedelta(hours=23 - i),
+                  2.0 if i < 3 else 4.6)
+        for i in range(24)
+    ], NOW)
+    slots = [
+        PriceSlot(NOW + timedelta(hours=i), NOW + timedelta(hours=i + 1), price,
+                  100, source="known" if i < 6 else "forecast")
+        for i, price in enumerate([charge_price] * 3 + [1.8] * 3
+                                  + ([] if forecast_price is None else [forecast_price] * 3))
+    ]
+    settings = PlannerSettings(
+        capacity_wh=2000, reserve_soc=10, target_soc=90,
+        charge_power_w=1200, discharge_power_w=800,
+        round_trip_efficiency=.8, degradation_cost_dkk_per_kwh=.35,
+        minimum_profit_dkk_per_kwh=.5, switching_penalty_dkk=.05,
+    )
+
+    decision = Fbp1200Coordinator._optimize_with_storage_policy(
+        SimpleNamespace(runtime=runtime), slots, now=NOW, soc=10,
+        settings=settings, current_action=Action.GRID,
+    )
+
+    assert not decision.active
+    if expected:
+        assert max(slot.soc_end for slot in decision.plan.slots[:3]) == 90
+    else:
+        assert not any(slot.battery_charge_wh for slot in decision.plan.slots[:3])
+
+
 @pytest.mark.parametrize("overlap_minute", [0, 30])
 @pytest.mark.parametrize("now_minute", [0, 5])
 def test_overlapping_prices_do_not_credit_rejected_future_intervals(

@@ -18,9 +18,31 @@ from house_battery.models import PlannerSettings, estimate_battery_runtime_hours
 from house_battery.sensor import (
     SENSORS,
     FbpBatteryRuntimeSensor,
+    FbpHistoricalPriceSensor,
     FbpValueSensor,
     daily_plan_blocks,
 )
+
+
+@pytest.mark.parametrize(("bound", "percentile", "value"), [("low", 10, -0.1), ("high", 90, 1.8)])
+def test_historical_price_sensor_exposes_threshold_and_sample_count(bound, percentile, value):
+    coordinator = SimpleNamespace(
+        entry=SimpleNamespace(entry_id="battery"), config={}, device_info={}, data={},
+    )
+    sensor = FbpHistoricalPriceSensor(coordinator, bound)
+    assert sensor.entity_registry_enabled_default
+    assert sensor.native_value is None
+    coordinator.data["historical_prices"] = {
+        "low_dkk_per_kwh": -0.1, "high_dkk_per_kwh": 1.8,
+        "minimum_dkk_per_kwh": -0.3, "maximum_dkk_per_kwh": 2,
+        "window_days": 28, "observed_hours": 24,
+    }
+    assert sensor.native_value == value
+    assert sensor.native_unit_of_measurement == "DKK/kWh"
+    assert sensor.extra_state_attributes["percentile"] == percentile
+    assert sensor.extra_state_attributes["observed_hours"] == 24
+    assert sensor.extra_state_attributes["minimum_dkk_per_kwh"] == -0.3
+    assert sensor.extra_state_attributes["maximum_dkk_per_kwh"] == 2
 
 
 def _runtime_settings(**changes: float) -> PlannerSettings:

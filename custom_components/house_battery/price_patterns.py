@@ -27,6 +27,8 @@ from .pattern_models import (
 )
 
 _RETENTION = timedelta(days=90)
+_PRICE_RANGE_DAYS = 28
+_PRICE_RANGE_MIN_HOURS = 24
 _FRESHNESS = timedelta(days=3)
 _HORIZON = timedelta(days=3)
 _MIN_DATES = 4
@@ -264,6 +266,26 @@ class PricePatternLearner:
                                     uncertainty_dkk_per_kwh=uncertainty))
             cursor = end
         return result
+
+    def historical_price_range(self, now: datetime) -> dict[str, Any]:
+        """Summarize confirmed hourly import prices for dashboard use."""
+        end = _hour(_aware(now))
+        start = end - timedelta(days=_PRICE_RANGE_DAYS)
+        prices = [
+            price for key, (price, _) in self.samples.copy().items()
+            if start <= datetime.fromisoformat(key) < end
+        ]
+        ready = len(prices) >= _PRICE_RANGE_MIN_HOURS
+        return {
+            "window_days": _PRICE_RANGE_DAYS,
+            "window_start": start.isoformat(),
+            "window_end": end.isoformat(),
+            "observed_hours": len(prices),
+            "minimum_dkk_per_kwh": min(prices, default=None),
+            "maximum_dkk_per_kwh": max(prices, default=None),
+            "low_dkk_per_kwh": quantile(prices, .1) if ready else None,
+            "high_dkk_per_kwh": quantile(prices, .9) if ready else None,
+        }
 
     def summary(self, now: datetime) -> dict[str, Any]:
         """Describe readiness, measured uncertainty and matched-hour weekend effect."""

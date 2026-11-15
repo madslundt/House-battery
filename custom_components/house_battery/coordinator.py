@@ -128,6 +128,7 @@ from .policy import (
     action_from_operating_mode,
     apply_storage_policy,
     has_forecast_backed_movement,
+    historical_storage_value,
     parse_grid_available,
     relative_storage_value,
     select_opportunistic_plan,
@@ -1273,13 +1274,19 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.runtime.opportunistic_charging_enabled
             if opportunistic_enabled is None else opportunistic_enabled
         )
-        # Compare both ceilings using the same continuation value. Historical
-        # prices temper the forecast reference; neither changes cash savings.
-        # Only credit intervals accepted by the optimizer's horizon validation.
-        storage_value = relative_storage_value(
-            future_price_slots(slots, now),
+        # Both ceilings use the same carryover value, based only on intervals
+        # that pass the optimizer's horizon validation.
+        valid_slots = future_price_slots(slots, now)
+        history = self.runtime.price_patterns.historical_price_range(now)
+        historical_value = historical_storage_value(
+            valid_slots, low=history["low_dkk_per_kwh"], high=history["high_dkk_per_kwh"],
+            settings=settings,
+        )
+        relative_value = relative_storage_value(
+            valid_slots,
             historical_slots=self.runtime.sizing_history.recent_price_slots(now),
         ) if enabled else 0.0
+        storage_value = max(historical_value, relative_value)
         normal_plan = optimize(
             slots,
             now=now,
@@ -1323,12 +1330,16 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             enabled=True,
         )
         if storage_value > 0:
+            reference_source = (
+                "historical low and high price thresholds"
+                if historical_value > relative_value else
+                "upcoming prices and qualified recent history when available"
+            )
             decision = replace(
                 decision,
                 reason=(
                     f"{decision.reason}; relative storage reference "
-                    f"{storage_value:.2f} DKK/kWh from upcoming prices and "
-                    "qualified recent history when available"
+                    f"{storage_value:.2f} DKK/kWh from {reference_source}"
                 ),
             )
         return decision
@@ -2447,6 +2458,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "forecast": diagnose_price_sources(forecast_source_metadata),
                 "basis": "supplied_all_in_DKK_per_kWh",
             },
+            "historical_prices": self.runtime.price_patterns.historical_price_range(now),
             "price_patterns": self.runtime.price_patterns.summary(now) | {
                 "enabled": self.runtime.forecast_enabled,
                 "available_slots": self._pattern_used_slots,

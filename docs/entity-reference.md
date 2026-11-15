@@ -62,6 +62,7 @@ local TCP or command failures.
 | **Power source** | Where the load is served from right now: `charging` (battery charging), `battery` (battery serving load), `grid` (battery idle while load is present), or `off` (no measured load). Legacy entries use the load/grid balance; direct-local entries use reported battery direction. |
 | **Native minimum/maximum SOC** | Read-only diagnostics for the battery's hardware SOC registers. | House Battery validates and writes limits through its local adapter; these sensors show the latest readback. |
 | **Current electricity price** | Price for the current known price interval. |
+| **Historical low / high electricity price** | 10th and 90th percentiles of confirmed hourly import prices in the last 28 days, in DKK/kWh. The price thresholds appear after 24 observed hours. Attributes show the actual hourly minimum and maximum, window, and number of observed hours. |
 | **Expected plan savings** | Forecast saving across the current planning horizon (known prices plus any enabled, valid extension) versus buying expected load from grid. It is a forecast, not cash earned. |
 | **Planned bill savings** | Optional estimate of electricity-bill savings over the current horizon before modeled wear and switching costs. Excludes terminal credit for energy left in the battery. |
 | **Planned wear cost** | Optional estimated battery-wear cost for the current plan, in DKK. Read alongside planned bill savings. |

@@ -40,6 +40,35 @@ def _trained(*, weekend_expensive: bool = False, days: int = 42) -> PricePattern
     return learner
 
 
+def test_historical_prices_use_recent_confirmed_hours_and_require_coverage() -> None:
+    learner = PricePatternLearner()
+    recent = [
+        PriceSlot(NOW - timedelta(hours=24 - i), NOW - timedelta(hours=23 - i), (i - 3) / 10)
+        for i in range(24)
+    ]
+    old = PriceSlot(NOW - timedelta(days=28, hours=1), NOW - timedelta(days=28), -5)
+    forecast = PriceSlot(recent[0].start, recent[0].end, 50, source="forecast")
+    future = PriceSlot(NOW, NOW + timedelta(hours=1), 99)
+    learner.observe([old, forecast, future, *recent[:-1]], NOW)
+    early = learner.historical_price_range(NOW)
+    assert early["observed_hours"] == 23
+    assert early["low_dkk_per_kwh"] is None
+    assert early["high_dkk_per_kwh"] is None
+
+    learner.observe(recent, NOW)
+    history = learner.historical_price_range(NOW + timedelta(minutes=15))
+    assert history == {
+        "window_days": 28,
+        "window_start": (NOW - timedelta(days=28)).isoformat(),
+        "window_end": NOW.isoformat(),
+        "observed_hours": 24,
+        "minimum_dkk_per_kwh": -.3,
+        "maximum_dkk_per_kwh": 2,
+        "low_dkk_per_kwh": -.1,
+        "high_dkk_per_kwh": 1.8,
+    }
+
+
 def test_learning_requires_four_independent_matching_weekly_dates() -> None:
     learner = _trained(days=20)
     prefix = [PriceSlot(NOW, NOW + timedelta(hours=1), 2)]
