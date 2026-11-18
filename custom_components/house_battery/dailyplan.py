@@ -28,11 +28,13 @@ merged lazily for display via :func:`merge_adjacent_blocks`.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
+from functools import reduce
 from itertools import pairwise
 from math import ceil
-from typing import Any
+from typing import Any, TypedDict
 
 from .models import Action, PlannedSlot
 
@@ -442,40 +444,80 @@ def merge_adjacent_blocks(slots: tuple[PlannedSlot, ...]) -> list[PlannedSlot]:
     economics are lost.  The merged SOC ``start``/``end`` are the endpoints of
     the contiguous SOC curve and stay correct.
     """
+    return [
+        replace(
+            reduce(_merge_slots, group),
+            price_source=group[-1].price_source,
+            price_uncertainty_dkk_per_kwh=group[-1].price_uncertainty_dkk_per_kwh,
+        )
+        for group in _adjacent_slot_groups(slots)
+    ]
+
+
+def _adjacent_slot_groups(slots: tuple[PlannedSlot, ...]) -> Iterator[list[PlannedSlot]]:
     ordered = sorted((slot for slot in slots if slot.start < slot.end), key=lambda s: s.start)
-    blocks: list[PlannedSlot] = []
+    group: list[PlannedSlot] = []
     for slot in ordered:
-        if (
-            blocks
-            and slot.start == blocks[-1].end
-            and blocks[-1].action is slot.action
-        ):
-            previous = blocks[-1]
-            blocks[-1] = PlannedSlot(
-                start=previous.start,
-                end=slot.end,
-                action=previous.action,
-                price=previous.price,
-                expected_load_wh=previous.expected_load_wh + slot.expected_load_wh,
-                grid_import_wh=previous.grid_import_wh + slot.grid_import_wh,
-                battery_charge_wh=previous.battery_charge_wh + slot.battery_charge_wh,
-                battery_discharge_wh=previous.battery_discharge_wh + slot.battery_discharge_wh,
-                planning_rounding_loss_wh=previous.planning_rounding_loss_wh + slot.planning_rounding_loss_wh,
-                soc_start=previous.soc_start,
-                soc_end=slot.soc_end,
-                interval_cost_dkk=previous.interval_cost_dkk + slot.interval_cost_dkk,
-                baseline_cost_dkk=previous.baseline_cost_dkk + slot.baseline_cost_dkk,
-                reason=previous.reason,
-                price_source=slot.price_source,
-                price_uncertainty_dkk_per_kwh=slot.price_uncertainty_dkk_per_kwh,
-                charge_target_soc=max(
-                    previous.charge_target_soc or previous.soc_end,
-                    slot.charge_target_soc or slot.soc_end,
-                ) if previous.action is Action.CHARGE else None,
-            )
-        else:
-            blocks.append(slot)
-    return blocks
+        if group and (group[-1].end != slot.start or group[-1].action is not slot.action):
+            yield group
+            group = []
+        group.append(slot)
+    if group:
+        yield group
+
+
+class _BatteryForecast(TypedDict):
+    charge_kwh: float
+    charge_cost_dkk: float
+    discharge_kwh: float
+    discharge_value_dkk: float
+
+
+def _tariff_totals(
+    portions: Iterable[tuple[PlannedSlot, float]],
+) -> tuple[float, _BatteryForecast]:
+    """Value AC-side energy at each slot's tariff before merging any slots."""
+    grid_cost = charge_kwh = charge_cost = discharge_kwh = discharge_value = 0.0
+    for slot, fraction in portions:
+        grid_kwh = slot.grid_import_wh * fraction / 1000
+        grid_cost += grid_kwh * slot.price
+        load_offset_kwh = slot.expected_load_wh * fraction / 1000 - grid_kwh
+        if slot.action is Action.CHARGE:
+            charged = max(0.0, -load_offset_kwh)
+            charge_kwh += charged
+            charge_cost += charged * slot.price
+        elif slot.action is Action.BATTERY:
+            discharged = max(0.0, load_offset_kwh)
+            discharge_kwh += discharged
+            discharge_value += discharged * slot.price
+    return round(grid_cost, 4), {
+        "charge_kwh": round(charge_kwh, 4),
+        "charge_cost_dkk": round(charge_cost, 4),
+        "discharge_kwh": round(discharge_kwh, 4),
+        "discharge_value_dkk": round(discharge_value, 4),
+    }
+
+
+def _forecast_window(
+    slots: tuple[PlannedSlot, ...], start: datetime, end: datetime,
+) -> _BatteryForecast | None:
+    """Value the covered part of each tariff slot using elapsed UTC time."""
+    start, end = start.astimezone(UTC), end.astimezone(UTC)
+    cursor = start
+    tolerance = timedelta(seconds=1)
+    portions: list[tuple[PlannedSlot, float]] = []
+    for slot in sorted(slots, key=lambda slot: slot.start.astimezone(UTC)):
+        slot_start, slot_end = slot.start.astimezone(UTC), slot.end.astimezone(UTC)
+        overlap_start, overlap_end = max(start, slot_start), min(end, slot_end)
+        if overlap_start >= overlap_end:
+            continue
+        if overlap_start < cursor or overlap_start - cursor >= tolerance:
+            return None
+        portions.append((slot, (overlap_end - overlap_start) / (slot_end - slot_start)))
+        cursor = overlap_end
+    if not portions or end - cursor >= tolerance:
+        return None
+    return _tariff_totals(portions)[1]
 
 
 def _slot_totals(slots: tuple[PlannedSlot, ...]) -> dict[str, float]:
@@ -517,6 +559,7 @@ class DailyPlan:
         *,
         actual_soc: float | None = None,
         actual_soc_at: str | None = None,
+        forecast_from: datetime | None = None,
         terminal_price_dkk_per_kwh: float | None = None,
     ) -> dict[str, Any]:
         """Return the dashboard-ready representation of the daily timeline.
@@ -533,10 +576,23 @@ class DailyPlan:
         reading against the planned curve without ever altering the published
         block data.
         """
-        merged = merge_adjacent_blocks(self.slots)
         totals = _slot_totals(self.slots)
+        battery_forecast: dict[str, _BatteryForecast | None] = {
+            "remaining_today": None,
+            "tomorrow": None,
+        }
+        if forecast_from is not None and self.date == forecast_from.date().isoformat():
+            _, next_midnight = local_day_bounds(forecast_from)
+            battery_forecast = {
+                "remaining_today": _forecast_window(self.slots, forecast_from, next_midnight),
+                "tomorrow": _forecast_window(
+                    self.slots, next_midnight, next_midnight + timedelta(days=1),
+                ),
+            }
         blocks: list[dict[str, Any]] = []
-        for slot in merged:
+        for group in _adjacent_slot_groups(self.slots):
+            slot = reduce(_merge_slots, group)
+            grid_cost, battery_figures = _tariff_totals((item, 1.0) for item in group)
             # A grid (or otherwise idle) block never moves the battery, so its
             # start/end SOC are identical.  Reporting one value instead of a
             # redundant pair keeps the timeline tidy and makes the "no work"
@@ -569,6 +625,11 @@ class DailyPlan:
                     "expected_grid_import_kwh": round(
                         float(slot.grid_import_wh) / 1000, 3
                     ),
+                    "expected_grid_cost_dkk": grid_cost,
+                    "expected_charge_kwh": battery_figures["charge_kwh"],
+                    "expected_charge_cost_dkk": battery_figures["charge_cost_dkk"],
+                    "expected_discharge_kwh": battery_figures["discharge_kwh"],
+                    "expected_discharge_value_dkk": battery_figures["discharge_value_dkk"],
                     "reason": slot.reason,
                 }
             )
@@ -588,6 +649,7 @@ class DailyPlan:
             "actual_soc_at": actual_soc_at,
             "history_available_from": history_available_from,
             "blocks": blocks,
+            "battery_forecast": battery_forecast,
             "horizon_slots": len(self.slots),
             "terminal_price_dkk_per_kwh": (
                 round(float(terminal_price_dkk_per_kwh), 4)

@@ -15,6 +15,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from itertools import pairwise
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -794,6 +795,99 @@ def test_daily_plan_view_dedupes_identical_soc() -> None:
     assert "soc" not in moving
     assert moving["soc_start"] == 57.5
     assert moving["soc_end"] == 71.5
+
+
+def test_daily_plan_view_prices_battery_flows_before_merging_tariffs() -> None:
+    start = datetime(2026, 9, 20, tzinfo=UTC)
+    first_end = start + timedelta(minutes=15)
+    second_end = start + timedelta(minutes=30)
+    end = start + timedelta(minutes=45)
+    daily = DailyPlan(
+        date="2026-09-20",
+        slots=(
+            replace(
+                slot(start, first_end, Action.CHARGE, load=200),
+                price=3, grid_import_wh=700, battery_charge_wh=450,
+            ),
+            replace(
+                slot(first_end, second_end, Action.CHARGE, load=400),
+                price=-1, grid_import_wh=1000, battery_charge_wh=540,
+            ),
+            replace(
+                slot(second_end, end, Action.BATTERY, load=1200),
+                price=4, grid_import_wh=400, battery_discharge_wh=900,
+            ),
+        ),
+    )
+
+    charge, discharge = daily.view_dict()["blocks"]
+    assert charge["expected_grid_import_kwh"] == 1.7
+    assert charge["expected_grid_cost_dkk"] == 1.1
+    assert charge["expected_charge_kwh"] == 1.1
+    assert charge["expected_charge_cost_dkk"] == 0.9
+    assert charge["expected_cost_dkk"] == 2.0
+    assert discharge["expected_discharge_kwh"] == 0.8
+    assert discharge["expected_discharge_value_dkk"] == 3.2
+    assert discharge["expected_savings_dkk"] == 1.0
+
+
+@pytest.mark.parametrize(("date", "tomorrow_hours"), [((3, 28), 23), ((10, 24), 25)])
+def test_battery_forecast_uses_remaining_tariffs_and_local_day_bounds(
+    date: tuple[int, int], tomorrow_hours: int,
+) -> None:
+    tz = ZoneInfo("Europe/Copenhagen")
+    now = datetime(2026, *date, 22, tzinfo=tz)
+    next_midnight = datetime(2026, *date, tzinfo=tz) + timedelta(days=1)
+    tomorrow_start = next_midnight.astimezone(UTC)
+    tomorrow_end = tomorrow_start + timedelta(hours=tomorrow_hours)
+    current_start = now - timedelta(hours=1)
+    current_end = now + timedelta(hours=1)
+    following_day = replace(
+        slot(tomorrow_start, tomorrow_end, Action.BATTERY, load=1000),
+        price=4, grid_import_wh=500,
+    )
+    daily = DailyPlan(
+        date=now.date().isoformat(),
+        slots=(
+            replace(
+                slot(now - timedelta(hours=2), current_start, Action.CHARGE, load=300),
+                price=5, grid_import_wh=1300,
+            ),
+            replace(
+                slot(current_start, current_end, Action.CHARGE, load=300),
+                price=-2, grid_import_wh=1300,
+            ),
+            slot(current_end + timedelta(milliseconds=100), next_midnight, Action.GRID),
+            following_day,
+            replace(
+                following_day, start=tomorrow_end, end=tomorrow_end + timedelta(hours=1),
+                price=10,
+            ),
+        ),
+    )
+
+    forecast = daily.view_dict(forecast_from=now)["battery_forecast"]
+    assert forecast == {
+        "remaining_today": {
+            "charge_kwh": 0.5,
+            "charge_cost_dkk": -1.0,
+            "discharge_kwh": 0.0,
+            "discharge_value_dkk": 0.0,
+        },
+        "tomorrow": {
+            "charge_kwh": 0.0,
+            "charge_cost_dkk": 0.0,
+            "discharge_kwh": 0.5,
+            "discharge_value_dkk": 2.0,
+        },
+    }
+    incomplete = replace(daily, slots=(*daily.slots[:3], replace(
+        following_day, end=tomorrow_end - timedelta(minutes=1),
+    )))
+    assert incomplete.view_dict(forecast_from=now)["battery_forecast"] == {
+        "remaining_today": forecast["remaining_today"],
+        "tomorrow": None,
+    }
 
 
 def test_daily_plan_view_always_covers_the_complete_day() -> None:

@@ -671,6 +671,7 @@ class FbpPlanSensor(Fbp1200Entity, SensorEntity):
         plan = self.coordinator.data.get("daily_plan")
         return {
             "blocks": daily_plan_blocks(self.coordinator.data),
+            "battery_forecast": plan.get("battery_forecast") if plan else None,
             "date": plan.get("date") if plan else None,
             "created_at": plan.get("created_at") if plan else None,
             "actual_soc": plan.get("actual_soc") if plan else None,

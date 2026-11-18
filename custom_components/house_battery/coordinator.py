@@ -2394,6 +2394,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             "daily_plan": self.runtime.daily_plan.view_dict(
                 actual_soc=soc,
                 actual_soc_at=local_now.isoformat(),
+                forecast_from=local_now,
                 terminal_price_dkk_per_kwh=(
                     self.plan.terminal_price_dkk_per_kwh if self.plan else None
                 ),
