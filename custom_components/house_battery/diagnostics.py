@@ -38,7 +38,7 @@ async def async_get_config_entry_diagnostics(
         {
             "integration": {"version": str(integration.version), "title": entry.title},
             "configuration": coordinator.config,
-            "export": coordinator.export_data(),
+            "export": coordinator.export_data(compact_replay=True),
         },
         _REDACT,
     )

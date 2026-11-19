@@ -55,11 +55,12 @@ def record_plan_evidence(
     committed_slot: PlannedSlot | None = None,
     terminal_price_floor_dkk_per_kwh: float = 0.0,
     current_discharge_enabled: bool = True,
+    replay_eligible: bool = True,
 ) -> bool:
     """Keep issued inputs and canonical load predictions, with bounded horizons."""
     if not slots:
         return False
-    changed = runtime.replay_history.record(
+    changed = replay_eligible and runtime.replay_history.record(
         now, slots=slots, settings=settings, soc=soc, current_action=current_action,
         scope=scope, committed_slot=committed_slot,
         terminal_price_floor_dkk_per_kwh=terminal_price_floor_dkk_per_kwh,

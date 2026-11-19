@@ -245,7 +245,7 @@ gaps or when planning inputs are unavailable:
 | Forecast comparisons | At most 1,000 pending intervals per source; unmatched intervals expire after seven days. Completed scores are capped at 1,000. Removed sources are discarded. |
 | Price patterns | Ninety days of confirmed hourly observations and bounded partial-hour coverage. Pending first-issued comparisons are bounded to the three-day target window; at most 2,200 scored comparisons cover 28 days. Four matching weekday dates qualify history, while independent lead-specific skill gates control. Actual observations expire for control after three days. |
 | Issued load forecasts | Up to 1,600 pending target/lead-band predictions; 5,000 scored records within seven days; daily aggregates within 28 days. Actual scoring requires at least 90% coverage. |
-| Policy replay | Up to 256 issued snapshots and 672 measured quarter-hours within seven days. Count limits may make retained input coverage much shorter. Persistence is losslessly compressed; exports expose the actual retained bounds. |
+| Policy replay | Up to 8,192 issued snapshots and 2,784 measured quarter-hours within a rolling 29-day buffer. New snapshots cover the current known tariff until a replacement or interruption. Cached compressed chunks share tariff quotes and retain the load forecast from each issue. Exports show the actual retained bounds. |
 | Scheduled loads / daily plan | Expired scheduled loads are removed; only the current local day's plan persists. |
 
 Explanatory entity attributes remain available live but are excluded from Home

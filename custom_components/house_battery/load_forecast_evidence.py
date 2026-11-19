@@ -154,17 +154,20 @@ class LoadForecastEvidence:
         if self._actual_start is None or self._covered_seconds <= 0:
             return None
         end = self._actual_start + STEP
-        self.observe_actual(self._actual_start, end, self._actual_wh, self._covered_seconds)
-        complete = self._covered_seconds >= 810
+        # Restore datetime's microsecond precision after summing float seconds.
+        # A fully sampled quarter can otherwise compare greater than 900 seconds.
+        covered = round(self._covered_seconds, 6)
+        self.observe_actual(self._actual_start, end, self._actual_wh, covered)
+        complete = covered >= 810
+        fully_priced = self._priced_seconds > 0 and self._priced_seconds >= self._covered_seconds - 1e-6
         return {
             "start": self._actual_start.isoformat(), "end": end.isoformat(),
-            "load_wh": self._actual_wh * 900 / self._covered_seconds if complete else self._actual_wh,
-            "covered_seconds": self._covered_seconds,
+            "load_wh": self._actual_wh * 900 / covered if complete else self._actual_wh,
+            "covered_seconds": covered,
             "price": self._price_seconds / self._priced_seconds
-            if complete and not self._price_varied
-            and self._priced_seconds >= self._covered_seconds - 1e-6 else None,
+            if complete and not self._price_varied and fully_priced else None,
             "price_quality": "mixed_price_interval" if self._price_varied else
-            "known" if self._priced_seconds >= self._covered_seconds - 1e-6 else "unpriced",
+            "known" if fully_priced else "unpriced",
             "quality": "good" if complete else "incomplete",
         }
 

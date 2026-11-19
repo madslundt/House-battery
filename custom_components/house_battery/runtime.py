@@ -195,7 +195,9 @@ class RuntimeState:
             "flow_model_started_at": self.flow_model_started_at,
         }
 
-    def export(self, entry_title: str, status: dict[str, Any]) -> dict[str, Any]:
+    def export(
+        self, entry_title: str, status: dict[str, Any], *, compact_replay: bool = False,
+    ) -> dict[str, Any]:
         """Return a stable evidence bundle for diagnostics and offline analysis."""
         return {
             "schema_version": 1,
@@ -205,7 +207,7 @@ class RuntimeState:
             "status": status,
             "load_model": self.load_learner.as_dict(),
             "load_forecast_evidence": self.load_forecast_evidence.as_dict(),
-            "replay": self.replay_history.export(),
+            "replay": self.replay_history.export(compact=compact_replay),
             "battery_model": self.battery_learner.as_dict(),
             "efficiency_model": self.measured_efficiency.as_dict(),
             "ledger": self.ledger.as_dict(),
@@ -330,12 +332,14 @@ class RuntimeStore:
     """Small persistence adapter."""
 
     def __init__(self, hass: Any, entry_id: str) -> None:
+        self._hass = hass
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry_id}"
         )
 
     async def load(self, now: datetime | None = None) -> RuntimeState:
-        state = RuntimeState.from_dict(await self._store.async_load() or {})
+        data = await self._store.async_load()
+        state = await self._hass.async_add_executor_job(RuntimeState.from_dict, data or {})
         state.prune(now or datetime.now(UTC))
         return state
 

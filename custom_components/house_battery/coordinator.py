@@ -1398,6 +1398,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._unloading and not allow_unloading:
             return "safety request superseded by integration unload"
         request_id = self._safe_request_id
+        capture_evidence(lambda: self.runtime.replay_history.close(now))
         await self.store.save(self.runtime)
         if self._unloading and not allow_unloading:
             return "safety request superseded by integration unload"
@@ -1499,6 +1500,9 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Revoke old work and drain it before a replacement entry can write."""
         stop_required = self.runtime.execution_enabled or self.runtime.pending_safe
         self._unloading = True
+        replay_closed, _ = capture_evidence(
+            lambda: self.runtime.replay_history.close(datetime.now(UTC))
+        )
         self._cancel_price_timer()
         self._sizing_request_key = None
         sizing_task = self._sizing_task
@@ -1517,6 +1521,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._safe_request_id += 1
             self.runtime.pending_safe = True
             await self._async_retry_safe(datetime.now(UTC), allow_unloading=True)
+        elif replay_closed:
+            await self.store.save(self.runtime)
 
     async def async_cancel_unload(self) -> None:
         """Resume fresh validation when Home Assistant cannot unload platforms."""
@@ -1618,6 +1624,17 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                 price=current_price_slot.price if current_price_slot else None,
             )
         )
+
+        def close_replay(*, interrupted: bool = True) -> None:
+            nonlocal planning_evidence_changed, planning_evidence_error
+            closed, close_error = capture_evidence(
+                lambda: self.runtime.replay_history.close(now, interrupted=interrupted)
+            )
+            planning_evidence_changed = closed or planning_evidence_changed
+            planning_evidence_error = close_error or planning_evidence_error
+
+        plan_evidence = None
+        replay_eligible = False
         sizing_should_save = self.runtime.sizing_history.observe(
             now,
             load_w=self._load_power()
@@ -1706,6 +1723,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             and not self.runtime.export_safety_fault_latched
         ):
             self.runtime.export_safety_fault_latched = True
+            close_replay()
             await self.store.save(self.runtime)
         export_safety_fault = (
             self.runtime.export_safety_fault_latched if export_w is not None else None
@@ -1908,6 +1926,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ):
                             self.runtime.export_safety_fault_latched = True
                             export_safety_fault = True
+                            close_replay()
                             await self.store.save(self.runtime)
                             raise ValueError("Grid export detected while planning; control paused")
                 latest_soc = self._float(CONF_SOC)
@@ -1948,20 +1967,18 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     storage_decision.incremental_savings_dkk
                 )
                 if not self._economic_plan_reused:
-                    captured, capture_error = capture_evidence(
-                        lambda: record_plan_evidence(
-                            self.runtime, now, slots=slots, settings=effective_settings,
-                            soc=soc, current_action=current_action, scope=planning_evidence_scope,
-                            committed_slot=committed_slot,
-                            terminal_price_floor_dkk_per_kwh=self.plan.terminal_price_floor_dkk_per_kwh,
-                            current_discharge_enabled=current_discharge_allowed,
-                            forecast_load=lambda start, end: self._forecast_load_wh(
-                                start, end, now, self._load_power()
-                            ),
+                    evidence_load_w = self._load_power()
+                    plan_evidence = partial(
+                        record_plan_evidence,
+                        self.runtime, now, slots=slots, settings=effective_settings,
+                        soc=soc, current_action=current_action, scope=planning_evidence_scope,
+                        committed_slot=committed_slot,
+                        terminal_price_floor_dkk_per_kwh=self.plan.terminal_price_floor_dkk_per_kwh,
+                        current_discharge_enabled=current_discharge_allowed,
+                        forecast_load=lambda start, end: self._forecast_load_wh(
+                            start, end, now, evidence_load_w
                         ),
                     )
-                    planning_evidence_changed = captured or planning_evidence_changed
-                    planning_evidence_error = capture_error or planning_evidence_error
                 if self._override_action() is not None:
                     opportunistic_reason = (
                         f"Manual override uses configured target {settings.target_soc:g}%"
@@ -2066,6 +2083,10 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if commissioned and self.runtime.execution_enabled
                     else "SHADOW"
                 )
+                replay_eligible = (
+                    self._startup_guard_passed
+                    and self._override_action() is None and current_price_slot is not None
+                )
                 reason = self.plan.reason
                 if (
                     published_slot is not None
@@ -2124,6 +2145,12 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                             target_soc=effective_settings.target_soc,
                             load_w=self._load_power(),
                         )
+                        # A direct command may successfully restore Grid/Idle
+                        # when the requested discharge cannot be applied.
+                        replay_eligible = replay_eligible and command_ok and (
+                            not self.is_direct_local
+                            or self.runtime.last_action == requested_action.value
+                        )
                         superseded = command_result == (
                             "command superseded by a safety request"
                         )
@@ -2135,10 +2162,24 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
                         superseded = True
                         command_result = "economic command superseded by a safety request"
                     if superseded or not self.runtime.execution_enabled:
+                        replay_eligible = False
                         state = (
                             "RECOVERING" if self.runtime.execution_enabled else "SHADOW"
                         )
                         reason = "Economic control paused by a safety request"
+
+        # An issued economic plan remains eligible during healthy cache hits.
+        # Override, safety and failed writes end the preceding replay interval.
+        if replay_eligible:
+            replay_eligible = revision == self._planning_revision and not self._unloading
+        if not replay_eligible or plan_evidence is not None:
+            close_replay(interrupted=not replay_eligible)
+        if plan_evidence is not None:
+            captured, capture_error = capture_evidence(
+                partial(plan_evidence, replay_eligible=replay_eligible)
+            )
+            planning_evidence_changed = captured or planning_evidence_changed
+            planning_evidence_error = capture_error or planning_evidence_error
 
         decision_key = (state, reason)
         decision_changed = decision_key != self._last_decision_key
@@ -2701,6 +2742,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.runtime.export_safety_fault_latched = False
         self.runtime.execution_enabled = enabled
         self._startup_control_gate_reason = None
+        if self.runtime.pending_safe:
+            capture_evidence(lambda: self.runtime.replay_history.close(datetime.now(UTC)))
         await self.store.save(self.runtime)
         if not enabled and self.runtime.pending_safe:
             await self._async_retry_safe(datetime.now(UTC))
@@ -2868,6 +2911,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._planning_revision += 1
         self.actuator.invalidate_pending_commands()
         self.runtime.override_action = mode
+        if mode != OVERRIDE_AUTO:
+            capture_evidence(lambda: self.runtime.replay_history.close(datetime.now(UTC)))
         await self.store.save(self.runtime)
         await self.async_request_refresh()
 
@@ -2883,6 +2928,7 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         if disable_automatic_control:
             self.runtime.execution_enabled = False
         self.runtime.override_action = OVERRIDE_AUTO
+        capture_evidence(lambda: self.runtime.replay_history.close(datetime.now(UTC)))
         await self.store.save(self.runtime)
         await self._async_retry_safe(datetime.now(UTC))
         await self.async_request_refresh()
@@ -2905,8 +2951,8 @@ class Fbp1200Coordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.store.save(self.runtime)
         await self.async_request_refresh()
 
-    def export_data(self) -> dict[str, Any]:
-        return self.runtime.export(self.entry.title, self.data)
+    def export_data(self, *, compact_replay: bool = False) -> dict[str, Any]:
+        return self.runtime.export(self.entry.title, self.data, compact_replay=compact_replay)
 
 
 def _valid_sizing_result(value: Any) -> bool:

@@ -31,15 +31,29 @@ operational data.
 New exports include `load_forecast_evidence` and `replay`. Replay preserves issued
 price/load horizons, effective settings, terminal-value anchor, current discharge
 eligibility, SOC, action and published commitment. Realized demand and known
-prices are recorded separately. Older history is not backfilled as if issued
-inputs had existed. The summary shows actual retained input bounds; the 256
-snapshot cap can retain only several hours at minute cadence.
+prices are recorded separately. Each new snapshot is valid through its current
+known tariff unless a newer snapshot or an observed interruption ends it earlier.
+Older archives retain the 15-minute validity their capture supported.
 
-Save the direct `house_battery.export_data` response as JSON, then run locally
-from this repository using its Home Assistant development environment:
+The 29-day buffer supports a full four-week review at normal hourly and
+quarter-hour replan cadence. The export reports the retained bounds. Rapid
+revisions can reach the 8,192-snapshot cap earlier, and outages or insufficient
+measurements can leave genuine gaps.
+
+For a multiweek review, run this action and save the response as JSON.
+
+```yaml
+action: house_battery.export_data
+data:
+  compact_replay: true
+```
+
+Run replay locally from the repository using its Home Assistant development
+environment. The replay window ends at the last measured interval and defaults
+to 28 days.
 
 ```bash
-.venv/bin/python scripts/replay_policies.py /absolute/path/evidence.json --settlement-price 1.50
+.venv/bin/python scripts/replay_policies.py /absolute/path/evidence.json --days 28 --settlement-price 1.50
 ```
 
 Choose an explicit common all-in DKK/kWh replacement price for settling final
@@ -56,8 +70,12 @@ These are simulated policy comparisons using a common conservative scalar-loss
 plant, not measured savings. Demand is a mean within each actual quarter-hour;
 intervals with less than 90% coverage, missing tariffs, or multiple different
 tariffs within a quarter are excluded. Substantially covered load is normalized
-to the full interval and original coverage remains reported. Stale inputs,
-scope changes and gaps split the simulation and settle inventory. Standby,
+to the full interval and original coverage remains reported. At adjacent
+confirmed quarter-hour tariffs, an issue delay of up to one second preserves
+simulated SOC when the measurement coverage, scope and physical settings
+continue. Replay still skips the time before the new plan is issued.
+Missing measurements, observed interruptions, longer delays and incompatible
+inputs split the simulation and settle inventory. Standby,
 temperature/taper curves and measured SOC prediction-error metrics require
 additional plant evidence. No replay command connects to Home Assistant or
 controls the battery.

@@ -44,7 +44,7 @@ def _entity_coordinator(config: dict | None = None) -> SimpleNamespace:
 def test_diagnostics_reports_loaded_version_and_redacts_sensitive_values(monkeypatch):
     async def scenario():
         coordinator = _entity_coordinator({"host": "192.0.2.5", "token": "private-token"})
-        coordinator.export_data = lambda: {"password": "private-password"}
+        coordinator.export_data = lambda *, compact_replay: {"password": "private-password"}
         entry = SimpleNamespace(title="Battery", runtime_data=coordinator)
         loader = AsyncMock(return_value=SimpleNamespace(version="9.9.9"))
         monkeypatch.setattr("house_battery.diagnostics.async_get_integration", loader)

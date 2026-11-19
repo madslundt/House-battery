@@ -7,23 +7,22 @@ adjustment, not cash earned. This is a simulation, not measured policy savings.
 
 from __future__ import annotations
 
-from bisect import bisect_left, bisect_right
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
-from itertools import pairwise
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from math import isfinite, sqrt
 from typing import Any
 
 from .capabilities import DeliveryTopology
-from .models import Action, PlannedSlot, PlannerSettings
+from .models import Action, PlannedSlot, PlannerSettings, PriceSlot
 from .planner import optimize
 from .replay import (
-    MAX_INPUT_AGE,
+    MAX_TARIFF_HANDOFF_DELAY,
     ReplayHistory,
     restore_commitment,
     restore_settings,
     restore_slots,
     timestamp,
+    validity_end,
 )
 
 
@@ -101,37 +100,61 @@ def _execute(
     case.action = Action.GRID if stopped_early else physical_action
 
 
+def _restore_inputs(
+    record: dict[str, Any], issued: datetime,
+) -> tuple[PlannerSettings, list[PriceSlot], datetime, Action, PlannedSlot | None]:
+    settings = restore_settings(record["settings"])
+    slots = restore_slots(record["slots"])
+    expires = validity_end(record, issued)
+    if "valid_until" in record:
+        tariff_end = next((slot.end for slot in slots
+                           if slot.source == "known" and slot.start <= issued < slot.end), issued)
+        expires = min(expires, tariff_end)
+    return settings, slots, expires, Action(record["current_action"]), restore_commitment(
+        record.get("committed_slot"),
+    )
+
+
+def _quarter_start(slot: PriceSlot) -> datetime | None:
+    start = slot.tariff_start or slot.start
+    return start if slot.end - start == timedelta(minutes=15) else None
+
+
 def evaluate_policies(
     history: ReplayHistory, *, settlement_price_dkk_per_kwh: float,
+    since: datetime | None = None,
 ) -> dict[str, Any]:
     """Compare captured settings against a zero-profit-hurdle variant and grid.
 
     Captured snapshots supply only information issued by that decision time.
     Both candidates use their own simulated SOC and the same captured physical
-    parameters. Missing data, stale snapshots, changed physical scope/settings,
-    and gaps close inventory and begin independent segments. Realized loads
-    are piecewise constant within each measured interval. No annualization.
+    parameters. A short issue delay between consecutive confirmed quarters
+    can preserve inventory. Missing data, interruptions and changed physical
+    scope/settings start independent segments. Realized loads are piecewise
+    constant within each measured interval. No annualization.
     """
     if (isinstance(settlement_price_dkk_per_kwh, bool)
             or not isfinite(settlement_price_dkk_per_kwh)
             or settlement_price_dkk_per_kwh < 0):
         raise ValueError("A finite nonnegative common inventory settlement price is required")
-    evidence = history.as_dict()
-    records = evidence["records"]
-    issued_times = [timestamp(record["issued_at"]) for record in records]
-    settings_snapshots = [restore_settings(record["settings"]) for record in records]
-    slot_snapshots = [restore_slots(record["slots"]) for record in records]
-    boundaries = sorted(set(issued_times) | {issued + MAX_INPUT_AGE for issued in issued_times} | {
-        edge for issued, slots in zip(issued_times, slot_snapshots, strict=True)
-        for slot in slots for edge in (slot.start, slot.end) if issued <= edge
-    })
+    since = timestamp(since) if since is not None else None
+    records = iter(history.iter_records())
+    pending = next(records, None)
+    pending_at = timestamp(pending["issued_at"]) if pending is not None else None
+    record: dict[str, Any] | None = None
+    inputs = None
+    issued = None
+    scope = None
     totals: dict[str, dict[str, float]] = {}
     cases: dict[str, _Case] = {}
     baseline = evaluated = skipped = 0.0
+    measured_coverage = available_actual = actual_gap = 0.0
     segments = 0
     previous_end: datetime | None = None
+    previous_quarter_end: datetime | None = None
+    handoff_at: datetime | None = None
+    previous_actual_end: datetime | None = None
     previous_scope: Any = None
-    record_index = -1
 
     def close() -> None:
         nonlocal cases
@@ -145,43 +168,78 @@ def evaluate_policies(
                     total[key] += value
         cases = {}
 
-    for row in evidence["actuals"]:
+    for row in history.iter_actuals():
         start, end = timestamp(row["start"]), timestamp(row["end"])
-        cuts = [start, *boundaries[bisect_right(boundaries, start):bisect_left(boundaries, end)], end]
-        for left, right in pairwise(cuts):
-            while (record_index + 1 < len(records)
-                   and issued_times[record_index + 1] <= left):
-                record_index += 1
+        if since is not None and end <= since:
+            continue
+        left = max(start, since) if since is not None else start
+        elapsed = (end - left).total_seconds()
+        measured_coverage += row["covered_seconds"] * elapsed / (end - start).total_seconds()
+        available_actual += elapsed
+        if previous_actual_end is not None:
+            actual_gap += max(0, (left - previous_actual_end).total_seconds())
+        previous_actual_end = end
+        while left < end:
+            # Advance on issue time, even if a newer vintage cannot be used.
+            # Expired/superseded vintages never become current again.
+            while pending_at is not None and pending_at <= left:
+                record, issued = pending, pending_at
+                pending = next(records, None)
+                pending_at = timestamp(pending["issued_at"]) if pending is not None else None
+                inputs = None
+                if pending_at is not None and pending_at <= left:
+                    continue
+                try:
+                    inputs = _restore_inputs(record, issued)
+                    scope = (record["scope"], replace(inputs[0], minimum_profit_dkk_per_kwh=0))
+                except (TypeError, ValueError, KeyError):
+                    pass
+            right = min(end, pending_at) if pending_at is not None else end
+            expires = None
+            eligible = False
+            if inputs is not None and record is not None:
+                settings, slots, expires, action, commitment = inputs
+                if left < expires and row.get("scope") in (None, record["scope"]):
+                    right = min(right, expires)
+                    current = next((slot for slot in slots
+                                    if slot.source == "known" and slot.start <= left < slot.end), None)
+                    if current is None:
+                        # Legacy vintages can outlast their first tariff. Split
+                        # at the next known edge if the interval has a gap.
+                        right = min((slot.start for slot in slots
+                                     if slot.source == "known" and left < slot.start < right),
+                                    default=right)
+                    else:
+                        right = min(right, current.end)
+                        eligible = True
             hours = (right - left).total_seconds() / 3600
-            record = records[record_index] if record_index >= 0 else None
-            if (record is None or left - issued_times[record_index] >= MAX_INPUT_AGE
-                    or row.get("scope") not in (None, record["scope"])):
+            if not eligible:
                 skipped += hours
-                close()
-                previous_end = None
+                if (previous_end == previous_quarter_end == expires == left
+                        and pending_at == right
+                        and right - left <= MAX_TARIFF_HANDOFF_DELAY
+                        and record is not None and "valid_until" in record):
+                    # Keep inventory in memory until the adjacent tariff's
+                    # plan is issued. The elapsed delay remains unevaluated.
+                    handoff_at = right
+                else:
+                    close()
+                    previous_end = handoff_at = None
+                left = right
                 continue
-            settings = settings_snapshots[record_index]
-            physical = asdict(replace(settings, minimum_profit_dkk_per_kwh=0))
-            scope = (record["scope"], repr(physical))
-            slots = slot_snapshots[record_index]
-            if not any(s.source == "known" and s.start <= left < s.end for s in slots):
-                skipped += hours
-                close()
-                previous_end = None
-                continue
-            if not cases or previous_end != left or previous_scope != scope:
+            quarter_start = _quarter_start(current)
+            continuous = previous_end == left or (
+                handoff_at == left and quarter_start == previous_end
+            )
+            handoff_at = None
+            if not cases or not continuous or previous_scope != scope:
                 close()
                 segments += 1
                 energy = settings.capacity_wh * record["soc"] / 100
-                cases = {name: _Case(energy, energy, settings, Action(record["current_action"]))
+                cases = {name: _Case(energy, energy, settings, action, commitment)
                          for name in ("current", "zero_profit")}
-                for case in cases.values():
-                    case.held = restore_commitment(record.get("committed_slot"))
             load = row["load_wh"] * (right - left) / (end - start)
-            original_current_end = next((s.end for s in slots
-                                         if s.start <= issued_times[record_index] < s.end),
-                                        issued_times[record_index])
-            discharge_enabled = record.get("current_discharge_enabled", True) if left < original_current_end else True
+            discharge_enabled = record.get("current_discharge_enabled", True) if current.start <= issued < current.end else True
             for name, case in cases.items():
                 candidate = settings if name == "current" else replace(settings, minimum_profit_dkk_per_kwh=0)
                 plan = optimize(slots, now=left, soc=case.stored_wh / settings.capacity_wh * 100,
@@ -191,15 +249,16 @@ def evaluate_policies(
                                 current_discharge_enabled=discharge_enabled)
                 decision = plan.slots[0] if plan.slots else None
                 action = decision.action if decision else Action.GRID
-                # Execute through the next issued input, measured interval, or
-                # decision boundary; native price changes normally have a snapshot.
                 case.held = decision
                 _execute(case, action, load_wh=load, hours=hours, price=row["price"],
                          target_soc=(decision.charge_target_soc or settings.target_soc)
                          if decision else settings.target_soc, plant=settings)
             baseline += load / 1000 * row["price"]
             evaluated += hours
-            previous_end, previous_scope = right, scope
+            previous_end = None if right == expires and record.get("interrupted", False) else right
+            previous_scope = scope
+            previous_quarter_end = current.end if quarter_start is not None else None
+            left = right
     close()
     for name in ("current", "zero_profit"):
         total = totals.setdefault(name, _empty_metrics())
@@ -210,11 +269,9 @@ def evaluate_policies(
     return {
         "method": "causal_issued_inputs_interval_mean_plant",
         "evaluated_hours": evaluated, "skipped_hours": skipped, "segments": segments,
-        "measured_coverage_hours": sum(row["covered_seconds"] for row in evidence["actuals"]) / 3600,
-        "available_actual_hours": sum((timestamp(row["end"]) - timestamp(row["start"])).total_seconds()
-                                      for row in evidence["actuals"]) / 3600,
-        "actual_gap_hours": sum(max(0, (timestamp(later["start"]) - timestamp(earlier["end"])).total_seconds())
-                                for earlier, later in pairwise(evidence["actuals"])) / 3600,
+        "measured_coverage_hours": measured_coverage / 3600,
+        "available_actual_hours": available_actual / 3600,
+        "actual_gap_hours": actual_gap / 3600,
         "settlement_price_dkk_per_kwh": settlement_price_dkk_per_kwh, "policies": totals,
         "assumptions": ["Realized load is constant within each measured interval",
                         "Only constant-price measured intervals are eligible; mixed-price quarters excluded by capture",

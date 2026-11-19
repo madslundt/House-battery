@@ -53,3 +53,9 @@ export_data:
       name: Config entry ID
       selector:
         text:
+    compact_replay:
+      name: Compact replay archive
+      description: Return the compressed replay history for offline analysis of up to 28 days.
+      default: false
+      selector:
+        boolean:

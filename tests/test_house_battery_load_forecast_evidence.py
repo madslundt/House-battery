@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components"))
 
 from house_battery.load_forecast_evidence import LoadForecastEvidence
+from house_battery.replay import ReplayHistory
 
 BASE = datetime(2026, 11, 1, tzinfo=UTC)
 
@@ -49,6 +50,23 @@ def test_actual_accumulator_splits_boundaries_and_does_not_bridge_restart():
     restored = LoadForecastEvidence.from_dict(evidence.as_dict())
     assert restored.observe(BASE + timedelta(minutes=30), 400, 2) == []
     assert restored.observe(BASE + timedelta(minutes=45), 400, 2) == []
+
+
+def test_full_quarter_with_jitter_is_scored_and_archived_at_tariff_boundary():
+    evidence = LoadForecastEvidence()
+    evidence.record_forecasts(BASE - timedelta(hours=1), [prediction()], "v1")
+    offsets = (0, 653159, 267853, 777820, 375951, 833820, 723985, 882388,
+               775839, 683704, 555787, 30414, 881168, 488240, 813651, 0)
+    for minute, offset in enumerate(offsets):
+        now = BASE + timedelta(minutes=minute, microseconds=offset)
+        rows = evidence.observe(now, 260, 2.6 if minute < 15 else 2.5)
+
+    [actual] = rows
+    assert actual["covered_seconds"] == 900
+    assert actual["price"] == pytest.approx(2.6)
+    assert actual["load_wh"] == pytest.approx(65)
+    assert evidence.summary(now)["samples"] == 1
+    assert ReplayHistory().record_actual(actual)
 
 
 def test_missing_price_keeps_load_evidence_but_does_not_invent_financial_actual():

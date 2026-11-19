@@ -58,7 +58,10 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         await coordinator.async_request_refresh()
 
     async def export_data(call: ServiceCall) -> dict[str, Any]:
-        return coordinator_for(call).export_data()
+        coordinator = coordinator_for(call)
+        if call.data.get("compact_replay", False):
+            return coordinator.export_data(compact_replay=True)
+        return coordinator.export_data()
 
     hass.services.async_register(
         DOMAIN,
@@ -86,7 +89,10 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         DOMAIN,
         SERVICE_EXPORT_DATA,
         export_data,
-        schema=vol.Schema({vol.Optional("config_entry_id"): cv.string}),
+        schema=vol.Schema({
+            vol.Optional("config_entry_id"): cv.string,
+            vol.Optional("compact_replay"): cv.boolean,
+        }),
         supports_response=SupportsResponse.ONLY,
     )
     return True
